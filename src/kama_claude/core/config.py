@@ -15,7 +15,8 @@ _DEFAULT_LOG_FILE = "~/.kama/logs/core.log"
 _DEFAULT_LOG_FORMAT = "text"
 _DEFAULT_CONFIG_PATH = "~/.kama/config.toml"
 _DEFAULT_MAX_STEPS = 20
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_LLM_PROTOCOL = "anthropic"
+_DEFAULT_MODEL = "deepseek-chat"
 _DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
 _DEFAULT_SESSIONS_DIR = ".kama/sessions"
 
@@ -34,7 +35,9 @@ class AgentConfig:
 
 @dataclass
 class LlmConfig:
+    protocol: str = _DEFAULT_LLM_PROTOCOL  # "anthropic" | "openai"
     default_model: str = _DEFAULT_MODEL
+    base_url: str = ""  # 留空时由对应 SDK 的标准环境变量决定
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
 
 
@@ -182,14 +185,28 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         llm = data["llm"]
         if not isinstance(llm, dict):
             raise SystemExit("Config error: [llm] must be a table")
-        unknown_llm: set[str] = set(llm.keys()) - {"default_model", "router"}
+        unknown_llm: set[str] = set(llm.keys()) - {
+            "protocol", "default_model", "base_url", "router",
+        }
         if unknown_llm:
             raise SystemExit(f"Unknown [llm] keys: {', '.join(sorted(unknown_llm))}")
+        if "protocol" in llm:
+            val = llm["protocol"]
+            if not isinstance(val, str) or val.lower() not in ("anthropic", "openai"):
+                raise SystemExit(
+                    "Config error: llm.protocol must be 'anthropic' or 'openai'"
+                )
+            config.llm.protocol = val.lower()
         if "default_model" in llm:
             val = llm["default_model"]
-            if not isinstance(val, str):
-                raise SystemExit("Config error: llm.default_model must be a string")
+            if not isinstance(val, str) or not val.strip():
+                raise SystemExit("Config error: llm.default_model must be a non-empty string")
             config.llm.default_model = val
+        if "base_url" in llm:
+            val = llm["base_url"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: llm.base_url must be a string")
+            config.llm.base_url = val
         if "router" in llm:
             val = llm["router"]
             if not isinstance(val, str):
@@ -364,9 +381,25 @@ def _apply_env(config: KamaConfig) -> None:
                 f"Config error: KAMA_MAX_STEPS must be an integer, got: {max_steps_str!r}"
             )
 
-    default_model = os.environ.get("KAMA_LLM_DEFAULT_MODEL")
+    default_model = os.environ.get("LLM_DEFAULT_MODEL")
     if default_model is not None:
+        if not default_model.strip():
+            raise SystemExit("Config error: LLM_DEFAULT_MODEL must not be empty")
         config.llm.default_model = default_model
+
+    protocol = os.environ.get("LLM_PROTOCOL")
+    if protocol is not None:
+        protocol = protocol.lower()
+        if protocol not in ("anthropic", "openai"):
+            raise SystemExit(
+                "Config error: LLM_PROTOCOL must be 'anthropic' or 'openai',"
+                f" got: {protocol!r}"
+            )
+        config.llm.protocol = protocol
+
+    base_url = os.environ.get("LLM_BASE_URL")
+    if base_url is not None:
+        config.llm.base_url = base_url
 
     trace_enabled = os.environ.get("KAMA_TRACE_ENABLED")
     if trace_enabled is not None:

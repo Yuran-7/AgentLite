@@ -130,3 +130,67 @@ def test_priority_chain_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     cfg = get_config()
 
     assert cfg.port == 8000
+
+
+# 功能：验证 TOML 可以同时配置 LLM 协议、DeepSeek 模型 ID 和 API 地址
+# 设计：通过显式 KAMA_CONFIG 隔离其他配置源，逐字段断言新增 [llm] 配置被严格解析
+def test_llm_protocol_toml_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toml_path = tmp_path / "kama.toml"
+    toml_path.write_text(
+        '[llm]\nprotocol = "openai"\ndefault_model = "deepseek-v3"\n'
+        'base_url = "https://api.example.com/v1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KAMA_CONFIG", str(toml_path))
+    monkeypatch.delenv("LLM_PROTOCOL", raising=False)
+    monkeypatch.delenv("LLM_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+
+    cfg = get_config()
+
+    assert cfg.llm.protocol == "openai"
+    assert cfg.llm.default_model == "deepseek-v3"
+    assert cfg.llm.base_url == "https://api.example.com/v1"
+
+
+# 功能：验证 LLM 环境变量覆盖 TOML 中的协议、模型和 API 地址
+# 设计：为三个字段同时设置不同的 TOML 与环境值，确认既有优先级链对新增配置同样生效
+def test_llm_env_overrides_toml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toml_path = tmp_path / "kama.toml"
+    toml_path.write_text(
+        '[llm]\nprotocol = "anthropic"\ndefault_model = "deepseek-old"\n'
+        'base_url = "https://anthropic.example.com"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KAMA_CONFIG", str(toml_path))
+    monkeypatch.setenv("LLM_PROTOCOL", "OPENAI")
+    monkeypatch.setenv("LLM_DEFAULT_MODEL", "deepseek-new")
+    monkeypatch.setenv("LLM_BASE_URL", "https://openai.example.com/v1")
+
+    cfg = get_config()
+
+    assert cfg.llm.protocol == "openai"
+    assert cfg.llm.default_model == "deepseek-new"
+    assert cfg.llm.base_url == "https://openai.example.com/v1"
+
+
+# 功能：验证未知 LLM 协议在配置加载阶段立即失败
+# 设计：通过环境变量注入非法协议，断言错误包含变量名，避免运行到首次 API 调用才暴露问题
+def test_invalid_llm_protocol_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KAMA_CONFIG", raising=False)
+    monkeypatch.setenv("LLM_PROTOCOL", "unknown")
+
+    with pytest.raises(SystemExit, match="LLM_PROTOCOL"):
+        get_config()

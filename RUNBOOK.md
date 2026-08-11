@@ -40,7 +40,7 @@ uv run kama core stop
 
 ## 配置
 
-优先级（低 → 高）：**内建默认值 → `~/.kama/config.toml` → `.env` → 系统环境变量**。
+优先级（低 → 高）：**内建默认值 → `~/.kama/config.toml` → `.kama/config.toml` → `.env` → 系统环境变量**。
 
 ### `~/.kama/config.toml`
 
@@ -56,6 +56,11 @@ format = "text"    # "text" | "json"
 
 [session]
 dir = ".kama/sessions"  # 相对路径以 daemon 启动目录为基准
+
+[llm]
+protocol = "anthropic"       # "anthropic" | "openai"
+default_model = "deepseek-chat"
+# base_url = "https://example.com"  # 可选；留空时读取对应 SDK 的标准环境变量
 ```
 
 ### `.env`
@@ -77,6 +82,13 @@ cp .env.example .env
 | `KAMA_LOG_LEVEL` | `INFO` | 日志级别（DEBUG / INFO / WARNING / ERROR） |
 | `KAMA_LOG_FILE` | `~/.kama/logs/core.log` | 日志文件路径（留空则仅输出 stderr） |
 | `KAMA_LOG_FORMAT` | `text` | 日志格式（`text` 或 `json`） |
+| `LLM_PROTOCOL` | `anthropic` | DeepSeek API 协议（`anthropic` 或 `openai`） |
+| `LLM_DEFAULT_MODEL` | `deepseek-chat` | 服务端实际提供的 DeepSeek model ID |
+| `LLM_BASE_URL` | 空 | 通用 API 地址覆盖；否则读取 `ANTHROPIC_BASE_URL` 或 `OPENAI_BASE_URL` |
+| `LLM_API_KEY` | 空 | 通用密钥覆盖；否则读取 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` |
+
+OpenAI-compatible 协议使用 Chat Completions；Anthropic-compatible 协议使用 Messages API。
+可以同时在 `.env` 保存两套标准 URL 和密钥，切换时只修改 `LLM_PROTOCOL`。
 
 ---
 

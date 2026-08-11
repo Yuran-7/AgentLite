@@ -13,7 +13,7 @@ from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus, EventHandler
 from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.llm.base import LLMProvider
-from kama_claude.core.llm.provider import AnthropicProvider
+from kama_claude.core.llm.factory import create_llm_provider
 from kama_claude.core.loop import AgentLoop
 from kama_claude.core.mcp.server import McpServerManager
 from kama_claude.core.memory.loader import load_context_file
@@ -193,8 +193,8 @@ class AgentRunner:
 
             cancelled = False
             try:
-                provider: LLMProvider = self._provider or AnthropicProvider(
-                    self._config.llm.default_model
+                provider: LLMProvider = self._provider or create_llm_provider(
+                    self._config.llm
                 )
                 if self._trace is not None:
                     provider = TracingProvider(

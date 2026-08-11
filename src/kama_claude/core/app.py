@@ -39,7 +39,7 @@ from kama_claude.core.bus.commands import (
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.config import KamaConfig, get_config
 from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.provider import AnthropicProvider
+from kama_claude.core.llm.factory import create_llm_provider
 from kama_claude.core.logging_setup import setup_logging
 from kama_claude.core.mcp.server import McpServerManager
 from kama_claude.core.permissions.manager import PermissionManager
@@ -132,7 +132,7 @@ class CoreApp:
         run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
         return SessionSendMessageResult(run_id=run_id)
 
-    # 返回 session 的完整 Anthropic messages 历史
+    # 返回 session 的完整内部 messages 历史
     async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
         assert self._sessions is not None
         cmd = SessionGetHistoryCommand.model_validate(params)
@@ -247,7 +247,7 @@ class CoreApp:
         store = SessionStore(self._sessions_root)
         logger.info("sessions: root=%s", self._sessions_root)
         assert self._config is not None
-        compact_provider = AnthropicProvider(self._config.llm.default_model)
+        compact_provider = create_llm_provider(self._config.llm)
 
         self._mcp_manager = McpServerManager()
         if self._config.mcp.servers:

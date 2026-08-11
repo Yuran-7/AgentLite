@@ -15,7 +15,7 @@ class ToolRegistry:
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
-    # 返回所有工具的 Anthropic 格式 schema 列表
+    # 返回所有工具的内部统一 schema 列表，由具体 LLM Provider 转换协议格式
     def tool_schemas(self) -> list[dict[str, object]]:
         return [
             {

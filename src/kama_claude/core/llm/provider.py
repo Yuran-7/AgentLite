@@ -44,12 +44,25 @@ def _now() -> str:
 
 class AnthropicProvider:
     # 初始化 Anthropic 客户端；client 可在测试时注入以跳过 API key 检查
-    def __init__(self, model: str, client: Any = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        client: Any = None,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         if client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
+            resolved_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if not resolved_api_key:
                 raise SystemExit("ANTHROPIC_API_KEY not set")
-            self._client: Any = anthropic.AsyncAnthropic(api_key=api_key)
+            if base_url:
+                self._client: Any = anthropic.AsyncAnthropic(
+                    api_key=resolved_api_key,
+                    base_url=base_url,
+                )
+            else:
+                self._client = anthropic.AsyncAnthropic(api_key=resolved_api_key)
         else:
             self._client = client
         self._model = model

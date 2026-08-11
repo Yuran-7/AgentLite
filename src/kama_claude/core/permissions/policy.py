@@ -14,15 +14,22 @@ class PermissionDecision(StrEnum):
 
 # 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow_patterns 绕过）
 OUTSIDE_CWD_HEURISTICS: list[str] = [
-    r"(^|\s)/[^\s]",              # absolute path
-    r"(^|\s)~",                   # tilde home
-    r"(^|\s)\.\.(/|$|\s)",        # parent traversal
+    r"(^|[\s\"'=])/[^\s]",        # POSIX absolute path, including quoted paths
+    r"(^|[\s\"'=])~",             # tilde home, including quoted paths
+    r"(^|[\s\"'=])\.\.([/\\]|$|\s)",  # parent traversal (POSIX/Windows)
     r"\$\{?HOME\b",               # $HOME variable
     r"\$\{?PWD\b",                # $PWD variable
-    r"(^|\s|;|&&|\|\|)cd(\s|$)",  # explicit cd
+    r"(^|[\s\"'=])[A-Za-z]:[/\\]",  # Windows drive absolute path
+    r"(^|[\s\"'=])\\\\[^\\\s]+\\",  # Windows UNC path
+    r"%(USERPROFILE|HOMEDRIVE|HOMEPATH|CD)%",  # cmd.exe path variables
+    r"\$env:(USERPROFILE|HOMEDRIVE|HOMEPATH|CD)\b",  # PowerShell path variables
+    r"(^|\s|;|&&|\|\|)(cd|chdir|pushd|popd)(\s|$)",  # shell directory changes
+    r"(^|[\s;|&])set-location(\s|$)",  # PowerShell directory change
 ]
 
-_OUTSIDE_CWD_RE: list[re.Pattern[str]] = [re.compile(p) for p in OUTSIDE_CWD_HEURISTICS]
+_OUTSIDE_CWD_RE: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE) for p in OUTSIDE_CWD_HEURISTICS
+]
 
 
 # 判断 bash 命令是否命中 outside-cwd 启发式规则

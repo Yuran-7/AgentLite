@@ -48,7 +48,7 @@ def main() -> None:
     setup_logging(config)
 
     if args.command == "ping":
-        cmd_ping(config)
+        cmd_ping(config)  # 进入cmd_ping之后，我们从同步CLI世界切换到异步网络I/O
     elif args.command == "chat":
         cmd_chat(config)
     elif args.command == "run":

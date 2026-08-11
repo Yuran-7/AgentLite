@@ -48,6 +48,51 @@ def test_missing_env_file_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert cfg.port == 7437
 
 
+# 功能：验证 session 默认写入 daemon 当前工作目录下的 .kama/sessions
+# 设计：切换到临时目录并清除覆盖变量，确认默认值为相对路径且不会落入用户主目录
+def test_sessions_default_to_current_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KAMA_SESSIONS_DIR", raising=False)
+
+    cfg = get_config()
+
+    assert cfg.session.dir == ".kama/sessions"
+
+
+# 功能：验证 KAMA_SESSIONS_DIR 环境变量可以覆盖 session 存储目录
+# 设计：设置 Windows 兼容的相对路径，确认环境层配置直接传入 session 配置对象
+def test_sessions_dir_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KAMA_SESSIONS_DIR", "workspace/kama-sessions")
+
+    cfg = get_config()
+
+    assert cfg.session.dir == "workspace/kama-sessions"
+
+
+# 功能：验证 TOML 的 session.dir 可以配置 session 存储目录
+# 设计：使用显式 KAMA_CONFIG 隔离全局配置，确认新增 section 能通过严格未知键校验
+def test_sessions_dir_toml_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toml_path = tmp_path / "kama.toml"
+    toml_path.write_text('[session]\ndir = "data/sessions"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KAMA_CONFIG", str(toml_path))
+    monkeypatch.delenv("KAMA_SESSIONS_DIR", raising=False)
+
+    cfg = get_config()
+
+    assert cfg.session.dir == "data/sessions"
+
+
 # 功能：验证 .env 中设置的 KAMA_CONFIG 能正确影响 TOML 配置文件的加载路径
 # 设计：.env 指向自定义 TOML 文件，TOML 中写入不同端口，确认 .env 在 TOML 加载前被读取（优先级链的正确顺序）
 def test_dotenv_before_toml_kama_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

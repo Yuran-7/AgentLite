@@ -18,6 +18,14 @@ class PongResult(BaseModel):
     received_at: str  # ISO 8601
 
 
+class CoreShutdownCommand(BaseModel):
+    type: Literal["core.shutdown"] = "core.shutdown"
+
+
+class CoreShutdownResult(BaseModel):
+    accepted: bool = True
+
+
 class AgentRunCommand(BaseModel):
     type: Literal["agent.run"] = "agent.run"
     goal: str
@@ -103,6 +111,7 @@ class SessionCompactResult(BaseModel):
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
+    | CoreShutdownCommand
     | AgentRunCommand
     | EventSubscribeCommand
     | SessionCreateCommand

@@ -120,18 +120,18 @@ class Compactor:
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
 
         compress_request: list[dict[str, object]] = [
-            {"role": "user", "content": f"{prompt}\n\n---\n\n{history_text}"}
+            {"role": "user", "content": f"{prompt}\n\n---\n\n{history_text}"} # 先压缩命令，再加上历史消息
         ]
 
         try:
             silent_bus = _Bus()
             response = await provider.chat(
-                messages=compress_request,
+                messages=compress_request,  # 这个属于user prompt
                 tool_schemas=[],
                 bus=silent_bus,
                 run_id="compact",
                 step=0,
-                system="You are a helpful assistant that summarizes conversations.",
+                system="You are a helpful assistant that summarizes conversations.",  # 这个属于system prompt
             )
         except Exception:
             logger.exception("compactor: LLM call failed, skipping compaction")

@@ -5,8 +5,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from kama_claude.core.compact.compactor import Compactor
 from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus
@@ -39,9 +37,7 @@ def test_compact_messages_calls_provider(tmp_path: Path) -> None:
     compactor = Compactor(bus, tmp_path, "sess-1")
     messages = _make_messages()
 
-    result = asyncio.get_event_loop().run_until_complete(
-        compactor.compact_messages(messages, provider)
-    )
+    result = asyncio.run(compactor.compact_messages(messages, provider))
 
     assert result is not None
     provider.chat.assert_called_once()
@@ -57,9 +53,7 @@ def test_compact_messages_returns_summary(tmp_path: Path) -> None:
     bus = EventBus()
     compactor = Compactor(bus, tmp_path, "sess-1")
 
-    result = asyncio.get_event_loop().run_until_complete(
-        compactor.compact_messages(_make_messages(), provider)
-    )
+    result = asyncio.run(compactor.compact_messages(_make_messages(), provider))
 
     assert result is not None
     assert result.summary_text == expected
@@ -74,7 +68,7 @@ def test_compact_replaces_context_messages(tmp_path: Path) -> None:
     ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
     ctx.messages = _make_messages()
 
-    asyncio.get_event_loop().run_until_complete(compactor.compact(ctx, provider))
+    asyncio.run(compactor.compact(ctx, provider))
 
     assert len(ctx.messages) == 2
     assert ctx.messages[0]["role"] == "user"
@@ -90,7 +84,7 @@ def test_compact_writes_summary_file(tmp_path: Path) -> None:
     ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
     ctx.messages = _make_messages()
 
-    asyncio.get_event_loop().run_until_complete(compactor.compact(ctx, provider))
+    asyncio.run(compactor.compact(ctx, provider))
 
     summary_files = list(tmp_path.glob("summary_*.md"))
     assert len(summary_files) == 1
@@ -111,7 +105,7 @@ def test_compact_publishes_event(tmp_path: Path) -> None:
     ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
     ctx.messages = _make_messages()
 
-    asyncio.get_event_loop().run_until_complete(compactor.compact(ctx, provider))
+    asyncio.run(compactor.compact(ctx, provider))
 
     types = [getattr(e, "type", None) for e in received]
     assert "context.compacted" in types
@@ -128,7 +122,7 @@ def test_compact_failure_preserves_context(tmp_path: Path) -> None:
     original_messages = _make_messages()
     ctx.messages = list(original_messages)
 
-    result = asyncio.get_event_loop().run_until_complete(compactor.compact(ctx, provider))
+    result = asyncio.run(compactor.compact(ctx, provider))
 
     assert result is None
     assert ctx.messages == original_messages

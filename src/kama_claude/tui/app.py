@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 from rich.markdown import Markdown
 from textual import events
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult  # Textual 是用于构建终端用户界面（TUI）的第三方库
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches

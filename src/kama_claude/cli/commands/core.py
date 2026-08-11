@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import subprocess
 import sys
 from pathlib import Path
 
 from kama_claude.core.config import KamaConfig
+from kama_claude.core.transport.socket_client import SocketClient
 
 _PID_FILE = Path.home() / ".kama" / "kama-core.pid"
 
@@ -19,17 +19,19 @@ async def _ping_check(config: KamaConfig) -> None:
     await w.wait_closed()
 
 
-# 读取 PID 文件并确认进程存活，进程已消失则删除文件并返回 None
-def _running_pid() -> int | None:
-    if not _PID_FILE.exists():
-        return None
+# 通过 TCP IPC 请求 daemon 优雅退出，并等待 JSON-RPC 响应
+async def _shutdown_request(config: KamaConfig) -> None:
+    client = SocketClient(config.host, config.port)
+    await client.connect()
+    event_loop = asyncio.create_task(client.run_event_loop())
     try:
-        pid = int(_PID_FILE.read_text().strip())
-        os.kill(pid, 0)
-        return pid
-    except (ValueError, ProcessLookupError, PermissionError):
-        _PID_FILE.unlink(missing_ok=True)
-        return None
+        await asyncio.wait_for(
+            client.send_command("core.shutdown", {"type": "core.shutdown"}),
+            timeout=2.0,
+        )
+    finally:
+        await client.close()
+        await event_loop
 
 
 # 打印 daemon 当前状态（running / not running）
@@ -50,23 +52,33 @@ def cmd_core_start(config: KamaConfig) -> None:
     except (ConnectionRefusedError, OSError):
         pass
 
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "kama_claude.core"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if os.name == "nt":
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "kama_claude.core"],
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "kama_claude.core"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     _PID_FILE.write_text(str(proc.pid))
     print(f"started  pid={proc.pid}  ({config.host}:{config.port})")
 
 
-# 向 daemon 发送 SIGTERM 停止进程，若未运行则提示
+# 通过跨平台 IPC 请求 daemon 优雅停止，若未运行则清理过期 PID 文件
 def cmd_core_stop(config: KamaConfig) -> None:
-    pid = _running_pid()
-    if pid is None:
+    pid = _PID_FILE.read_text().strip() if _PID_FILE.exists() else "unknown"
+    try:
+        asyncio.run(_shutdown_request(config))
+    except (ConnectionRefusedError, OSError, TimeoutError, asyncio.CancelledError):
+        _PID_FILE.unlink(missing_ok=True)
         print("not running")
         return
-    os.kill(pid, signal.SIGTERM)
     _PID_FILE.unlink(missing_ok=True)
     print(f"stopped  pid={pid}")

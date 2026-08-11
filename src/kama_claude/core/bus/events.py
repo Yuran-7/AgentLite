@@ -204,6 +204,10 @@ class SkillInvokedEvent(BaseModel):
 
 
 # 根据 type 字段决定事件类型的判别联合
+# Annotated语法，Annotated[原始类型, 元数据1, 元数据2, ...]
+# 当前原始类型是一个union，元数据pydantic提供的Discriminator("type")
+# 它的核心目的是告诉 Pydantic：“别傻乎乎地逐个尝试所有类型，直接看数据里的 type 字段，它叫什么名字，就把它解析成哪个类。”
+# 数据可以是JSON字符串，也可以是Python字典
 Event = Annotated[
     CoreStartedEvent
     | RunStartedEvent

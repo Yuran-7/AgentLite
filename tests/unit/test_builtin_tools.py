@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from kama_claude.core.tools.builtin.bash import BashTool
+from kama_claude.core.tools.builtin.bash import BashTool, _shell_argv
 from kama_claude.core.tools.builtin.list_dir import ListDirTool
 from kama_claude.core.tools.builtin.write_file import WriteFileTool
 
 # ── bash ──────────────────────────────────────────────────────────────────────
+
+# 功能：验证 POSIX 平台通过 /bin/sh 执行命令而不依赖当前用户的交互 shell
+# 设计：直接检查参数向量，避免测试环境实际 shell 配置影响跨平台选择逻辑
+def test_shell_argv_uses_sh_on_posix() -> None:
+    assert _shell_argv("echo hello", platform="posix") == ["/bin/sh", "-c", "echo hello"]
+
+
+# 功能：验证 Windows 平台优先选择 PowerShell 并启用非交互模式
+# 设计：替换 executable 查找结果以隔离宿主机安装情况，只断言稳定的启动参数
+def test_shell_argv_uses_powershell_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "kama_claude.core.tools.builtin.bash.shutil.which",
+        lambda name: "pwsh.exe" if name == "pwsh" else None,
+    )
+    argv = _shell_argv("Write-Output hello", platform="nt")
+    assert argv[0] == "pwsh.exe"
+    assert "-NonInteractive" in argv
+    assert argv[-1].endswith("Write-Output hello")
 
 # 功能：验证成功命令的 stdout 出现在 ToolResult.content 中，is_error 为 False
 # 设计：用 echo 命令避免外部依赖，直接比较输出内容，无需 mock
@@ -41,7 +60,8 @@ async def test_bash_timeout() -> None:
 # 设计：只写 stderr 的命令（>&2 echo），输出应该出现在合并后的 content 里
 @pytest.mark.asyncio
 async def test_bash_stderr_merged() -> None:
-    result = await BashTool().invoke({"command": "echo err >&2"})
+    command = '[Console]::Error.WriteLine("err")' if os.name == "nt" else "echo err >&2"
+    result = await BashTool().invoke({"command": command})
     assert not result.is_error
     assert "err" in result.content
 

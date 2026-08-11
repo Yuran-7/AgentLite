@@ -75,7 +75,7 @@ class SocketServer:
             pass
 
         self._server = await asyncio.start_server(
-            self._handle_connection,
+            self._handle_connection,  # 每当有新连接建立时，由事件循环调用此处理函数
             host=self._host,
             port=self._port,
             limit=_MAX_LINE_BYTES,

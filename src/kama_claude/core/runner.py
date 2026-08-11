@@ -150,6 +150,7 @@ class AgentRunner:
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
     ) -> RunOutcome:
+        # 1. 确定本次运行的唯一 run_id、目录，以及需要回放的会话上下文
         run_id = run_id or new_run_id()
         if session is not None and store is not None:
             run_path = store.runs_dir(session.id) / run_id
@@ -166,10 +167,12 @@ class AgentRunner:
 
         task_manager = TaskManager(run_path / ".tasks")
 
+        # 2. 建立事件总线，并订阅额外的事件处理器
         bus = self._bus if self._bus is not None else EventBus()
         for h in self._extra_handlers:
             bus.subscribe(h)
 
+        # 3. 创建本次 run 的工作上下文；goal 或会话历史会成为初始消息
         context = ExecutionContext(
             run_id=run_id,
             goal=goal,
@@ -182,8 +185,10 @@ class AgentRunner:
         )
         prefill_len = len(history)
 
+        # 4. 将事件写入 events.jsonl，并驱动循环直到上下文终止
         async with EventWriter(run_path / "events.jsonl") as writer:
-            writer.subscribe(bus)
+            writer.subscribe(bus)  # 内部把 writer.handle 订阅到事件总线
+            # publish 会依次等待所有已订阅的 handler 处理该事件
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
             cancelled = False

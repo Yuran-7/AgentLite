@@ -106,7 +106,7 @@ async def invoke_tool(
         async def _emit_permission(raw: dict[str, Any]) -> None:
             await bus.publish(PermissionRequestedEvent(**raw, run_id=run_id))
 
-        allowed, decision = await permission_manager.check_and_wait(
+        allowed, decision = await permission_manager.check_and_wait(  # 核心函数
             tool_use_id=tool_call.id,
             tool_name=tool_call.name,
             params=dict(tool_call.input),
@@ -141,7 +141,7 @@ async def invoke_tool(
                 elapsed(),
             )
 
-    for attempt in range(1, _MAX_RETRIES + 2):
+    for attempt in range(1, _MAX_RETRIES + 2):  # 进入这个for循环是因为权限检查通过了
         error_class: str | None = None
         error_message: str | None = None
 

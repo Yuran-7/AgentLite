@@ -5,10 +5,11 @@
 ### 启动守护进程
 
 ```bash
-uv run kama-core
+uv run kama core start
 ```
 
-默认监听 `127.0.0.1:7437`，按 `Ctrl+C` 优雅退出。
+默认在后台监听 `127.0.0.1:7437`，支持 Windows、Linux 和 macOS。
+调试时也可以运行 `uv run kama-core` 保持在前台，按 `Ctrl+C` 优雅退出。
 
 ### 验证连通
 
@@ -20,8 +21,20 @@ uv run kama ping
 ### 停止守护进程
 
 ```bash
-kill $(pgrep -f kama-core)
+uv run kama core stop
 ```
+
+停止命令通过本机 TCP IPC 请求 daemon 清理任务、MCP、trace 和 socket，不依赖 Unix 信号。
+
+### Shell 工具
+
+对外协议为兼容旧版本仍使用工具名 `bash`，实际执行器按平台选择：
+
+- Windows：优先 `pwsh`，否则使用系统自带的 Windows PowerShell，最后回退到 `cmd.exe`。
+- Linux / macOS：使用 `/bin/sh`。
+
+命令语法需要与当前平台一致。Windows 权限检查会识别盘符绝对路径、UNC 路径、
+`%USERPROFILE%`、`$env:USERPROFILE` 和 `Set-Location` 等越界形式。
 
 ---
 
@@ -40,6 +53,9 @@ port = 7437
 level  = "INFO"
 file   = "~/.kama/logs/core.log"
 format = "text"    # "text" | "json"
+
+[session]
+dir = ".kama/sessions"  # 相对路径以 daemon 启动目录为基准
 ```
 
 ### `.env`
@@ -57,6 +73,7 @@ cp .env.example .env
 | `KAMA_CONFIG` | `~/.kama/config.toml` | 覆盖配置文件路径 |
 | `KAMA_HOST` | `127.0.0.1` | TCP 监听地址 |
 | `KAMA_PORT` | `7437` | TCP 监听端口 |
+| `KAMA_SESSIONS_DIR` | `.kama/sessions` | Session 存储目录；相对路径基于 daemon 启动目录 |
 | `KAMA_LOG_LEVEL` | `INFO` | 日志级别（DEBUG / INFO / WARNING / ERROR） |
 | `KAMA_LOG_FILE` | `~/.kama/logs/core.log` | 日志文件路径（留空则仅输出 stderr） |
 | `KAMA_LOG_FORMAT` | `text` | 日志格式（`text` 或 `json`） |
@@ -89,7 +106,7 @@ tail -f ~/.kama/logs/core.log
 
 | 报错 | 原因 | 处理 |
 |------|------|------|
-| `core already running at 127.0.0.1:7437` | 已有守护进程在运行 | `kill $(pgrep -f kama-core)` |
+| `core already running at 127.0.0.1:7437` | 已有守护进程在运行 | `uv run kama core stop` |
 | `core not running` | 未启动守护进程 | `uv run kama-core` |
 | `Address already in use` | 端口被其他进程占用 | `KAMA_PORT=8000 uv run kama-core` |
 | `Config error: KAMA_PORT must be an integer` | `.env` 或环境变量中端口值非整数 | 检查 `KAMA_PORT` 的值 |

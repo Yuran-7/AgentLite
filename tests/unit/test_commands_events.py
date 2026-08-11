@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kama_claude.core.bus.commands import PingCommand, PongResult
+from kama_claude.core.bus.commands import CoreShutdownCommand, PingCommand, PongResult
 from kama_claude.core.bus.events import CoreStartedEvent
 
 
@@ -21,6 +21,14 @@ def test_ping_command_roundtrip() -> None:
 def test_ping_command_default_type() -> None:
     cmd = PingCommand(client="x")
     assert cmd.type == "core.ping"
+
+
+# 功能：验证跨平台关闭命令使用固定的 core.shutdown 判别字段
+# 设计：直接构造无参数命令并往返序列化，确保 CLI 与 daemon 的 IPC 合约稳定
+def test_core_shutdown_command_roundtrip() -> None:
+    cmd = CoreShutdownCommand()
+    restored = CoreShutdownCommand.model_validate_json(cmd.model_dump_json())
+    assert restored.type == "core.shutdown"
 
 
 # 功能：验证缺少必填 client 字段时 pydantic 校验失败

@@ -34,6 +34,7 @@ class _PendingRequest:
 
 
 # 管理工具调用权限：策略评估、用户审批挂起、session 级和持久化 always 缓存、超时
+# CoreApp的成员变量
 class PermissionManager:
     def __init__(
         self,
@@ -112,7 +113,7 @@ class PermissionManager:
             # default == ASK（bash、unknown tool）→ fall through to Future
 
         # ASK 路径（来自 OUTSIDE_CWD 强制 ASK，或 default=ASK）
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop() # 事件循环来自asyncio.run(CoreApp().run())
         future: asyncio.Future[str] = loop.create_future()
         self._pending[tool_use_id] = _PendingRequest(
             future=future,
@@ -136,7 +137,7 @@ class PermissionManager:
             if self._timeout_s > 0:
                 raw = await asyncio.wait_for(future, timeout=self._timeout_s)
             else:
-                raw = await future
+                raw = await future  # 卡在这里，直到执行respond的req.future.set_result(decision)
         except asyncio.TimeoutError:
             self._pending.pop(tool_use_id, None)
             logger.info("permission: timeout tool_use_id=%s tool=%s", tool_use_id, tool_name)

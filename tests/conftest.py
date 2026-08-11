@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 
@@ -20,17 +21,24 @@ def free_port() -> int:
 
 
 @pytest.fixture
-async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[bytes], None]:
+async def running_daemon(
+    free_port: int,
+    tmp_path: Path,
+) -> AsyncGenerator[subprocess.Popen[bytes], None]:
     env = os.environ.copy()
     env["KAMA_PORT"] = str(free_port)
     env["KAMA_LOG_FILE"] = ""
     env["KAMA_LOG_LEVEL"] = "WARNING"
+    env["KAMA_SESSIONS_DIR"] = str(tmp_path / "sessions")
 
     proc = subprocess.Popen([sys.executable, "-m", "kama_claude.core"], env=env)
 
-    deadline = time.monotonic() + 3.0
+    # Windows 首次导入 Textual/Anthropic 依赖较慢，预留足够时间并尽早报告子进程退出
+    deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         await asyncio.sleep(0.05)
+        if proc.poll() is not None:
+            pytest.fail(f"Daemon exited during startup with code {proc.returncode}")
         try:
             _reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
             writer.close()
@@ -41,10 +49,12 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     else:
         proc.terminate()
         proc.wait()
-        pytest.fail("Daemon did not start within 3 seconds")
+        pytest.fail("Daemon did not start within 10 seconds")
 
     yield proc
 
+    if proc.poll() is not None:
+        return
     proc.terminate()
     try:
         proc.wait(timeout=2)

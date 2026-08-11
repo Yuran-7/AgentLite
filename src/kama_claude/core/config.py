@@ -17,6 +17,7 @@ _DEFAULT_CONFIG_PATH = "~/.kama/config.toml"
 _DEFAULT_MAX_STEPS = 20
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 _DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
+_DEFAULT_SESSIONS_DIR = ".kama/sessions"
 
 
 @dataclass
@@ -72,6 +73,12 @@ class McpConfig:
     servers: list[McpServerConfig] = field(default_factory=list)
 
 
+# Session 存储配置：替代原先硬编码的 ~/.kama/sessions，允许按项目或环境变量指定目录
+@dataclass
+class SessionConfig:
+    dir: str = _DEFAULT_SESSIONS_DIR
+
+
 @dataclass
 class KamaConfig:
     host: str = _DEFAULT_HOST
@@ -83,11 +90,12 @@ class KamaConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
 def get_config() -> KamaConfig:
-    config = KamaConfig()
+    config = KamaConfig() # 所谓的内建默认值
 
     # .env 必须在读取 KAMA_CONFIG 之前加载，以便 .env 中的 KAMA_CONFIG 能影响 TOML 路径
     load_dotenv(".env", override=False)
@@ -117,7 +125,11 @@ def get_config() -> KamaConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp"}
+    known_sections = {
+        "core", "logging", "agent", "llm", "trace", "permission",
+        "compaction", "mcp", "session",
+    }
+    unknown = set(data.keys()) - known_sections
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -220,6 +232,21 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: permission.timeout_s must be a non-negative number")
             config.permission.timeout_s = float(val)
 
+    if "session" in data:
+        session = data["session"]
+        if not isinstance(session, dict):
+            raise SystemExit("Config error: [session] must be a table")
+        unknown_session: set[str] = set(session.keys()) - {"dir"}
+        if unknown_session:
+            raise SystemExit(
+                f"Unknown [session] keys: {', '.join(sorted(unknown_session))}"
+            )
+        if "dir" in session:
+            val = session["dir"]
+            if not isinstance(val, str) or not val.strip():
+                raise SystemExit("Config error: session.dir must be a non-empty string")
+            config.session.dir = val
+
     if "compaction" in data:
         comp = data["compaction"]
         if not isinstance(comp, dict):
@@ -315,6 +342,12 @@ def _apply_env(config: KamaConfig) -> None:
     log_format = os.environ.get("KAMA_LOG_FORMAT")
     if log_format is not None:
         config.logging.format = log_format
+
+    sessions_dir = os.environ.get("KAMA_SESSIONS_DIR")
+    if sessions_dir is not None:
+        if not sessions_dir.strip():
+            raise SystemExit("Config error: KAMA_SESSIONS_DIR must not be empty")
+        config.session.dir = sessions_dir
 
     max_steps_str = os.environ.get("KAMA_MAX_STEPS")
     if max_steps_str is not None:

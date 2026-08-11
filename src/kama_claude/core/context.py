@@ -6,6 +6,8 @@ from typing import Any
 
 @dataclass
 class ExecutionContext:
+    """单次 Agent run 的执行上下文；包含会话回放，但不负责持久化跨 run 的历史。"""
+
     run_id: str
     goal: str
     max_steps: int

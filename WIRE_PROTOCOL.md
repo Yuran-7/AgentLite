@@ -6,7 +6,7 @@
 
 - TCP loopback `127.0.0.1:7437` (override via `KAMA_HOST` / `KAMA_PORT`)
 - Each message is one `\n`-terminated JSON line (NDJSON)
-- Commands use JSON-RPC 2.0 (client â†’ server); Events use `kind=event` envelope (server â†’ client)
+- Commands use JSON-RPC 2.0 (client ¡ú server); Events use `kind=event` envelope (server ¡ú client)
 
 ## Commands
 
@@ -99,6 +99,47 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "uptime_ms": 12,
     "received_at": "2026-05-16T10:00:00.001Z"
   }
+}
+```
+
+### CoreShutdownCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "core.shutdown",
+      "default": "core.shutdown",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "CoreShutdownCommand",
+  "type": "object"
+}
+```
+
+### CoreShutdownResult
+
+| Field | Type | Required |
+|---|---|---|
+| `accepted` | `boolean` | no |
+
+```json
+{
+  "properties": {
+    "accepted": {
+      "default": true,
+      "title": "Accepted",
+      "type": "boolean"
+    }
+  },
+  "title": "CoreShutdownResult",
+  "type": "object"
 }
 ```
 
@@ -631,7 +672,7 @@ Events pushed from daemon to subscribed clients over the same TCP connection.
 
 ## IPC Events
 
-Events sent over the IPC socket (daemon â†’ client).
+Events sent over the IPC socket (daemon ¡ú client).
 
 ### CoreStartedEvent
 

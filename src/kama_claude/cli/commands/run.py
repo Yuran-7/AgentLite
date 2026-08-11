@@ -23,7 +23,7 @@ class StdoutPrinter:
             self._inline = False
 
     # 根据事件 type 字段分发并格式化打印到 stdout/stderr
-    async def handle(self, event: dict[str, Any]) -> None:
+    async def handle(self, event: dict[str, Any]) -> None:  # 由 SocketClient 的事件回调调用
         t = event.get("type", "")
 
         if t == "run.started":
@@ -83,18 +83,18 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
                 exit_code = 1
             finished.set()
 
-    client.on_event(on_event)
-    loop_task = asyncio.create_task(client.run_event_loop())
+    client.on_event(on_event)  # 注册上面定义的事件回调
+    loop_task = asyncio.create_task(client.run_event_loop())  # 持续读取并分发服务端消息
 
     try:
-        await client.send_command(
+        await client.send_command(  # 先订阅本次运行所需的事件
             "event.subscribe",
             {
                 "topics": ["run.*", "step.*", "tool.*", "llm.token", "llm.usage"],
                 "scope": "global",
             },
         )
-        await client.send_command("agent.run", {"goal": goal})
+        await client.send_command("agent.run", {"goal": goal})  # 再触发 agent run
     except IpcError as e:
         print(f"error: {e}", file=sys.stderr)
         loop_task.cancel()

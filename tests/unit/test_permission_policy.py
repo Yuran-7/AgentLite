@@ -78,6 +78,39 @@ def test_outside_cwd_cd_forces_ask() -> None:
     assert result == PermissionDecision.ASK
 
 
+# 功能：验证 Windows 盘符绝对路径会触发 OUTSIDE_CWD 强制询问
+# 设计：使用 PowerShell 常见的 C:\\Users 路径并配置全放行规则，确认其不能绕过边界检查
+def test_outside_cwd_windows_drive_forces_ask() -> None:
+    policy = ToolPolicy(default=PermissionDecision.ASK, allow_patterns=[r".*"])
+    result = evaluate("bash", {"command": r"Get-Content C:\Users\Public\x.txt"}, policy)
+    assert result == PermissionDecision.ASK
+
+
+# 功能：验证 Windows UNC 网络路径会触发 OUTSIDE_CWD 强制询问
+# 设计：以双反斜杠服务器共享路径覆盖无盘符绝对路径，防止网络位置被静默访问
+def test_outside_cwd_windows_unc_forces_ask() -> None:
+    assert matches_outside_cwd(r"Get-Content \\server\share\x.txt")
+
+
+# 功能：验证引号包裹的 Windows 父目录遍历仍会触发 OUTSIDE_CWD
+# 设计：覆盖 PowerShell 常见的双引号路径写法，避免引号成为边界检测绕过方式
+def test_outside_cwd_quoted_windows_parent_forces_ask() -> None:
+    assert matches_outside_cwd(r'Get-Content "..\secret.txt"')
+
+
+# 功能：验证 PowerShell 和 cmd 的用户目录变量会触发 OUTSIDE_CWD 强制询问
+# 设计：分别覆盖两种 Windows shell 的变量语法，确保间接绝对路径同样需要审批
+def test_outside_cwd_windows_home_variables_force_ask() -> None:
+    assert matches_outside_cwd(r"Get-ChildItem $env:USERPROFILE")
+    assert matches_outside_cwd(r"dir %USERPROFILE%")
+
+
+# 功能：验证 PowerShell Set-Location 改变工作目录时触发 OUTSIDE_CWD
+# 设计：使用大小写混合形式验证规则不区分大小写，符合 PowerShell 命令语义
+def test_outside_cwd_powershell_set_location_forces_ask() -> None:
+    assert matches_outside_cwd("Set-Location temp")
+
+
 # 功能：验证纯相对路径命令不触发 OUTSIDE_CWD
 # 设计：echo hi / ls src/ 等安全命令应正常走 allow_patterns 或 default 层
 def test_relative_path_not_outside_cwd() -> None:

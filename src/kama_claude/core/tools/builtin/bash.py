@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,17 +12,44 @@ _MAX_OUTPUT_BYTES = 64 * 1024  # 64 KB
 _DEFAULT_TIMEOUT = 60
 
 
+# 根据当前平台构造非交互 shell 命令，Windows 优先 PowerShell，POSIX 使用 /bin/sh
+def _shell_argv(command: str, platform: str | None = None) -> list[str]:
+    current_platform = platform or os.name
+    if current_platform == "nt":
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if powershell is not None:
+            utf8_command = (
+                "$OutputEncoding = [Console]::OutputEncoding = "
+                "[System.Text.UTF8Encoding]::new(); "
+                + command
+            )
+            return [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                utf8_command,
+            ]
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", command]
+    return ["/bin/sh", "-c", command]
+
+
 class BashParams(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore") # 这个是BaseModel里面的一个类变量，不校验
+    
     command: str
     timeout: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=120)
 
 
 class BashTool(BaseTool):
-    params_model = BashParams
+    params_model = BashParams # python中称为类变量，有点像c++中的static成员变量
     name = "bash"
     description = (
-        "Execute a shell command and return its output (stdout + stderr combined). "
+        "Execute a platform shell command and return its output (stdout + stderr combined). "
+        "Windows uses PowerShell; POSIX uses /bin/sh. "
         "Non-interactive only — commands requiring user input will hang and time out. "
         "Prefer short, focused commands. Output is truncated at 64 KB."
     )
@@ -46,8 +75,8 @@ class BashTool(BaseTool):
         timeout = p.timeout
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            proc = await asyncio.create_subprocess_exec(
+                *_shell_argv(command),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

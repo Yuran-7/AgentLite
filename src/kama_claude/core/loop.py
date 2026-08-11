@@ -47,7 +47,7 @@ class AgentLoop:
     # 驱动 plan→act→observe 循环直到上下文终止；CancelledError 向上传播
     async def run(self, context: ExecutionContext) -> None:
         while not context.is_done():
-            context.step += 1
+            context.step += 1  # step 初始为 0，第一次循环从 1 开始
             await self._bus.publish(
                 StepStartedEvent(run_id=context.run_id, step=context.step, ts=_now())
             )

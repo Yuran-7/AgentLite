@@ -5,6 +5,7 @@ import datetime
 import fnmatch
 import json
 import logging
+import os
 import signal
 import time
 from datetime import UTC
@@ -17,6 +18,8 @@ import kama_claude
 from kama_claude.core.bus.commands import (
     AgentRunCommand,
     AgentRunResult,
+    CoreShutdownCommand,
+    CoreShutdownResult,
     EventSubscribeCommand,
     EventSubscribeResult,
     PermissionRespondCommand,
@@ -67,6 +70,8 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
+        self._shutdown: asyncio.Event | None = None
+        self._sessions_root: Path | None = None
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -77,6 +82,13 @@ class CoreApp:
             uptime_ms=int((time.monotonic() - self._start_time) * 1000),
             received_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
+
+    # 处理 core.shutdown 请求，在响应发出后触发守护进程的跨平台优雅退出
+    async def _shutdown_handler(self, params: dict[str, Any]) -> CoreShutdownResult:
+        CoreShutdownCommand.model_validate(params)
+        assert self._shutdown is not None
+        asyncio.get_running_loop().call_later(0.05, self._shutdown.set)
+        return CoreShutdownResult()
 
     # 将 EventBus 事件写入 trace（作为 EventBus 订阅者）
     async def _trace_event_handler(self, event: BaseModel) -> None:
@@ -178,7 +190,8 @@ class CoreApp:
     ) -> int:
         path = events_file(run_id)
         if not path.exists():
-            for candidate in Path("~/.kama/sessions").expanduser().glob(
+            assert self._sessions_root is not None
+            for candidate in self._sessions_root.glob(
                 f"*/runs/{run_id}/events.jsonl"
             ):
                 path = candidate
@@ -205,7 +218,7 @@ class CoreApp:
             await writer.drain()
         return count
 
-    # 启动守护进程：加载配置、初始化日志、启动 trace、启动 TCP 服务器，并等待退出信号
+    # 启动常驻 core 进程：加载配置、初始化日志、启动 trace 和 TCP 服务，并等待退出信号
     async def run(self) -> None:
         self._start_time = time.monotonic()
         self._config = get_config()
@@ -230,8 +243,9 @@ class CoreApp:
 
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
-        sessions_root = Path("~/.kama/sessions").expanduser()
-        store = SessionStore(sessions_root)
+        self._sessions_root = Path(self._config.session.dir).expanduser().resolve()
+        store = SessionStore(self._sessions_root)
+        logger.info("sessions: root=%s", self._sessions_root)
         assert self._config is not None
         compact_provider = AnthropicProvider(self._config.llm.default_model)
 
@@ -259,7 +273,9 @@ class CoreApp:
             self._broadcaster,
             trace=self._trace,
         )
+        # 将 RPC 方法名注册到对应的异步处理函数
         server.register("core.ping", self._ping_handler)
+        server.register("core.shutdown", self._shutdown_handler)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
         server.register("session.create", self._session_create_handler)
@@ -269,27 +285,46 @@ class CoreApp:
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
 
-        addr = await server.start()
+        self._shutdown = asyncio.Event()
+        addr = await server.start()  # 启动监听；新连接由 SocketServer 的回调处理
         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
         logger.info("config: %s", self._config)
 
-        loop = asyncio.get_running_loop()
-        shutdown = asyncio.Event()
-        loop.add_signal_handler(signal.SIGINT, shutdown.set)
-        loop.add_signal_handler(signal.SIGTERM, shutdown.set)
+        loop = asyncio.get_running_loop()  # 获取 asyncio.run 已启动的事件循环
+        async_signals: list[signal.Signals] = []
+        sync_signals: dict[signal.Signals, Any] = {}
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, self._shutdown.set)
+                async_signals.append(sig)
+            except NotImplementedError:
+                previous = signal.getsignal(sig)
+                signal.signal(
+                    sig,
+                    lambda _signum, _frame: loop.call_soon_threadsafe(
+                        self._shutdown.set  # type: ignore[union-attr]
+                    ),
+                )
+                sync_signals[sig] = previous
 
-        await shutdown.wait()
+        try:
+            await self._shutdown.wait()  # 挂起当前协程，直到信号或 core.shutdown 触发事件
+        finally:
+            for sig in async_signals:
+                loop.remove_signal_handler(sig)
+            for sig, previous in sync_signals.items():
+                signal.signal(sig, previous)
 
-        logger.info("shutting down")
-        for run_task in list(self._running_runs):
-            run_task.cancel()
-        if self._running_runs:
-            await asyncio.gather(*self._running_runs, return_exceptions=True)
-        if self._mcp_manager is not None:
-            await self._mcp_manager.stop_all()
-        await server.stop()
-        if self._trace is not None:
-            await self._trace.stop()
+            logger.info("shutting down pid=%d", os.getpid())
+            for run_task in list(self._running_runs):
+                run_task.cancel()
+            if self._running_runs:
+                await asyncio.gather(*self._running_runs, return_exceptions=True)
+            if self._mcp_manager is not None:
+                await self._mcp_manager.stop_all()
+            await server.stop()
+            if self._trace is not None:
+                await self._trace.stop()
 
 
 # 同步入口：启动 CoreApp 事件循环

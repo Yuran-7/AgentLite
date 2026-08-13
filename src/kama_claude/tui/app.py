@@ -39,7 +39,8 @@ def _param_summary(tool_name: str, params: dict[str, Any], max_len: int = 72) ->
         "read_file": ("path",),
         "write_file": ("path",),
         "list_dir": ("path", "max_depth"),
-        "bash": ("command",),
+        "bash": ("command",),  # legacy sessions
+        "shell": ("command",),
         "note_save": ("content",),
     }
     keys = keys_by_tool.get(tool_name, ())

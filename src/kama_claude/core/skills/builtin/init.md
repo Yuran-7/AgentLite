@@ -5,7 +5,7 @@ allowed_tools:
   - read_file
   - list_dir
   - write_file
-  - bash
+  - shell
 ---
 你是一位项目分析专家。请分析当前项目目录，生成一份 `.kama/context.md` 文件，供 AI agent 在后续对话中快速了解项目背景。
 

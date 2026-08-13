@@ -21,7 +21,7 @@ _DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
 _DEFAULT_SESSIONS_DIR = ".kama/sessions"
 _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "read_file",
-    "bash",
+    "shell",
     "write_file",
     "list_dir",
     "task_create",
@@ -31,6 +31,11 @@ _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "spawn_agent",
     "agent_result",
 ]
+
+
+# 将旧版 bash 工具名迁移为 shell，并保持配置顺序去重
+def _normalize_tool_names(names: list[str]) -> list[str]:
+    return list(dict.fromkeys("shell" if name == "bash" else name for name in names))
 
 
 @dataclass
@@ -227,7 +232,7 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit(
                     "Config error: agent.subagent_allowed_tools must be an array of strings"
                 )
-            config.agent.subagent_allowed_tools = list(dict.fromkeys(val))
+            config.agent.subagent_allowed_tools = _normalize_tool_names(val)
 
     if "web" in data:
         web = data["web"]
@@ -516,8 +521,8 @@ def _apply_env(config: KamaConfig) -> None:
 
     subagent_tools = os.environ.get("KAMA_SUBAGENT_ALLOWED_TOOLS")
     if subagent_tools is not None:
-        config.agent.subagent_allowed_tools = list(
-            dict.fromkeys(item.strip() for item in subagent_tools.split(",") if item.strip())
+        config.agent.subagent_allowed_tools = _normalize_tool_names(
+            [item.strip() for item in subagent_tools.split(",") if item.strip()]
         )
 
     web_enabled = os.environ.get("KAMA_WEB_ENABLED")

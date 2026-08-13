@@ -28,7 +28,7 @@ uv run kama core stop
 
 ### Shell 工具
 
-对外协议为兼容旧版本仍使用工具名 `bash`，实际执行器按平台选择：
+对模型暴露的工具名为 `shell`，实际执行器按平台选择：
 
 - Windows：优先 `pwsh`，否则使用系统自带的 Windows PowerShell，最后回退到 `cmd.exe`。
 - Linux / macOS：使用 `/bin/sh`。
@@ -61,7 +61,7 @@ dir = ".kama/sessions"  # 相对路径以 daemon 启动目录为基准
 max_steps = 20
 # 所有子 Agent 的能力上限；默认不允许联网。角色 allowed_tools 只能继续收窄。
 subagent_allowed_tools = [
-  "read_file", "bash", "write_file", "list_dir",
+  "read_file", "shell", "write_file", "list_dir",
   "task_create", "task_update", "task_list", "task_get",
   "spawn_agent", "agent_result",
 ]

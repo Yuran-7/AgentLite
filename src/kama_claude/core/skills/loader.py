@@ -42,7 +42,9 @@ def _parse_skill_file(path: Path) -> Skill:
                     fold = val == ">"
                     parts: list[str] = []
                     i += 1
-                    while i < len(lines) and (lines[i].startswith(" ") or lines[i].startswith("\t")):
+                    while i < len(lines) and (
+                        lines[i].startswith(" ") or lines[i].startswith("\t")
+                    ):
                         parts.append(lines[i].strip())
                         i += 1
                     description = (" ".join(parts) if fold else "\n".join(parts)).strip()
@@ -52,7 +54,8 @@ def _parse_skill_file(path: Path) -> Skill:
             elif stripped.startswith("allowed_tools:"):
                 pass
             elif stripped.startswith("- "):
-                allowed_tools.append(stripped[2:].strip())
+                tool_name = stripped[2:].strip()
+                allowed_tools.append("shell" if tool_name == "bash" else tool_name)
             i += 1
 
     return Skill(

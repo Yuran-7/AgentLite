@@ -40,10 +40,14 @@ class AgentProfileLoader:
         with open(path, "rb") as f:
             data = tomllib.load(f)
         agent = data.get("agent", {})
+        allowed_tools = [
+            "shell" if tool == "bash" else tool
+            for tool in agent.get("allowed_tools", [])
+        ]
         return AgentProfile(
             name=name,
             description=agent.get("description", ""),
             system_prompt=agent.get("system_prompt", "").strip(),
-            allowed_tools=agent.get("allowed_tools", []),
+            allowed_tools=list(dict.fromkeys(allowed_tools)),
             model=agent.get("model", ""),
         )

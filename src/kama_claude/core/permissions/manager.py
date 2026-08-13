@@ -12,6 +12,7 @@ from typing import Any
 
 from kama_claude.core.permissions.policy import (
     DEFAULT_POLICIES,
+    SHELL_TOOL_NAMES,
     PermissionDecision,
     ToolPolicy,
     matches_outside_cwd,
@@ -60,6 +61,8 @@ class PermissionManager:
     def evaluate(self, tool_name: str, params: dict[str, Any]) -> PermissionDecision:
         from kama_claude.core.permissions.policy import evaluate
         policy = self._policies.get(tool_name)
+        if policy is None and tool_name == "shell":
+            policy = self._policies.get("bash")
         return evaluate(tool_name, params, policy)
 
     # 检查权限；如需 ask 则向客户端发事件并等待响应；返回 (allowed, decision_str)
@@ -71,17 +74,22 @@ class PermissionManager:
         session_id: str,
         event_emitter: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> tuple[bool, str]:
-        command = str(params.get("command", "")) if tool_name == "bash" else ""
-        policy = self._policies.get(tool_name)
+        cache_tool_name = "shell" if tool_name == "bash" else tool_name
+        command = (
+            str(params.get("command", "")) if tool_name in SHELL_TOOL_NAMES else ""
+        )
+        policy = self._policies.get(tool_name) or self._policies.get(cache_tool_name)
+        if policy is None and cache_tool_name == "shell":
+            policy = self._policies.get("bash")
 
-        # Tier 1: deny_patterns（bash only，不可被缓存绕过）
+        # Tier 1: deny_patterns（shell only，不可被缓存绕过）
         if command and policy:
             for pat in policy.deny_patterns:
                 if re.search(pat, command):
                     logger.debug("permission: deny_pattern hit tool=%s", tool_name)
                     return False, "auto_deny"
 
-        # Tier 2: OUTSIDE_CWD_HEURISTICS（bash only，强制 ASK，不可被任何缓存绕过）
+        # Tier 2: OUTSIDE_CWD_HEURISTICS（shell only，强制 ASK，不可被任何缓存绕过）
         outside_cwd = bool(command and matches_outside_cwd(command))
         browser_interaction = bool(
             tool_name == "browser" and params.get("action") in {"click", "type"}
@@ -89,15 +97,15 @@ class PermissionManager:
 
         if not outside_cwd:
             # Tier 3: session always 缓存
-            session_key = (session_id, tool_name)
+            session_key = (session_id, cache_tool_name)
             if session_key in self._session_always:
                 cached = self._session_always[session_key]
                 logger.debug("permission: session cache hit tool=%s decision=%s", tool_name, cached)
                 return cached == "allow", f"auto_{cached}"
 
             # Tier 4: persistent always（跨 session）
-            if tool_name in self._persistent_always:
-                cached = self._persistent_always[tool_name]
+            if cache_tool_name in self._persistent_always:
+                cached = self._persistent_always[cache_tool_name]
                 logger.debug(
                     "permission: persistent cache hit tool=%s decision=%s",
                     tool_name,
@@ -106,7 +114,7 @@ class PermissionManager:
                 return cached == "allow", f"auto_{cached}"
 
             if not browser_interaction:
-                # Tier 5: allow_patterns（bash only）
+                # Tier 5: allow_patterns（shell only）
                 if command and policy:
                     for pat in policy.allow_patterns:
                         if re.search(pat, command):
@@ -118,7 +126,7 @@ class PermissionManager:
                         return True, "auto_allow"
                     if policy.default == PermissionDecision.DENY:
                         return False, "auto_deny"
-            # default == ASK（bash、unknown tool）→ fall through to Future
+            # default == ASK（shell、unknown tool）→ fall through to Future
 
         # ASK 路径（越界 shell、浏览器交互或 default=ASK）
         loop = asyncio.get_event_loop() # 事件循环来自asyncio.run(CoreApp().run())
@@ -126,7 +134,7 @@ class PermissionManager:
         self._pending[tool_use_id] = _PendingRequest(
             future=future,
             session_id=session_id,
-            tool_name=tool_name,
+            tool_name=cache_tool_name,
         )
 
         await event_emitter(
@@ -151,7 +159,7 @@ class PermissionManager:
             logger.info("permission: timeout tool_use_id=%s tool=%s", tool_use_id, tool_name)
             return False, "timeout"
 
-        allowed = self._apply_response(raw, session_id, tool_name)
+        allowed = self._apply_response(raw, session_id, cache_tool_name)
         return allowed, raw
 
     # 处理客户端返回的审批决策，resolve 对应 Future

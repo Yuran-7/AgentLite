@@ -71,7 +71,8 @@ allowed_tools:
     assert skill.name == "custom"
     assert skill.description == "自定义 skill 测试"
     assert "read_file" in skill.allowed_tools
-    assert "bash" in skill.allowed_tools
+    assert "shell" in skill.allowed_tools
+    assert "bash" not in skill.allowed_tools
     assert "$ARGUMENTS" in skill.system_prompt_template
 
 

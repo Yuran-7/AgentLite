@@ -204,7 +204,7 @@ def test_web_and_subagent_tool_policy_toml(
 ) -> None:
     toml_path = tmp_path / "kama.toml"
     toml_path.write_text(
-        '[agent]\nsubagent_allowed_tools = ["read_file", "web_search"]\n'
+        '[agent]\nsubagent_allowed_tools = ["read_file", "bash", "web_search"]\n'
         '[web]\nsearch_provider = "searxng"\n'
         'search_base_url = "https://search.example.com"\nfetch_max_chars = 6000\n',
         encoding="utf-8",
@@ -214,7 +214,7 @@ def test_web_and_subagent_tool_policy_toml(
 
     cfg = get_config()
 
-    assert cfg.agent.subagent_allowed_tools == ["read_file", "web_search"]
+    assert cfg.agent.subagent_allowed_tools == ["read_file", "shell", "web_search"]
     assert cfg.web.search_provider == "searxng"
     assert cfg.web.search_base_url == "https://search.example.com"
     assert cfg.web.fetch_max_chars == 6000

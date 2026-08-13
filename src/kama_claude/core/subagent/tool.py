@@ -16,7 +16,7 @@ from kama_claude.core.loop import AgentLoop
 from kama_claude.core.runs import new_run_id
 from kama_claude.core.subagent.registry import BackgroundTaskRegistry
 from kama_claude.core.tools.base import BaseTool, ToolResult
-from kama_claude.core.tools.builtin.bash import BashTool
+from kama_claude.core.tools.builtin.bash import ShellTool
 from kama_claude.core.tools.builtin.browser import BrowserTool
 from kama_claude.core.tools.builtin.list_dir import ListDirTool
 from kama_claude.core.tools.builtin.read_file import ReadFileTool
@@ -110,11 +110,14 @@ class SpawnAgentTool(BaseTool):
         self._session_id = session_id
         self._web_config = web_config
         self._subagent_allowed_tools = (
-            set(subagent_allowed_tools)
+            {
+                "shell" if name == "bash" else name
+                for name in subagent_allowed_tools
+            }
             if subagent_allowed_tools is not None
             else {
                 "read_file",
-                "bash",
+                "shell",
                 "write_file",
                 "list_dir",
                 "task_create",
@@ -279,7 +282,7 @@ class SpawnAgentTool(BaseTool):
         registry = ToolRegistry()
         _all_tools = [
             ReadFileTool(),
-            BashTool(),
+            ShellTool(),
             WriteFileTool(),
             ListDirTool(),
         ]

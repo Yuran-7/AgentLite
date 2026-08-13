@@ -23,6 +23,8 @@ def load_policy_file(path: Path | None = None) -> dict[str, str]:
         if in_always and "=" in stripped and not stripped.startswith("#"):
             k, _, v = stripped.partition("=")
             k = k.strip()
+            if k == "bash":
+                k = "shell"
             v = v.strip().strip('"')
             if v in ("allow", "deny"):
                 result[k] = v

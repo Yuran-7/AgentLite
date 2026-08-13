@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -48,6 +47,25 @@ async def test_check_and_wait_allow_no_event() -> None:
     allowed, decision = await mgr.check_and_wait(
         tool_use_id="t1", tool_name="read_file",
         params={"path": "README.md"}, session_id="s1",
+        event_emitter=emitter,
+    )
+
+    assert allowed is True
+    assert decision == "auto_allow"
+    assert emitted == []
+
+
+# 功能：验证旧版 bash 自定义策略可继续控制新名称 shell
+# 设计：只注入 bash 键的 ALLOW 策略，再以 shell 名调用，覆盖配置迁移兼容路径
+async def test_legacy_bash_policy_applies_to_shell() -> None:
+    mgr = _make_manager(bash=ToolPolicy(default=PermissionDecision.ALLOW))
+    emitted, emitter = await _collect_emitted()
+
+    allowed, decision = await mgr.check_and_wait(
+        tool_use_id="legacy-shell",
+        tool_name="shell",
+        params={"command": "echo hi"},
+        session_id="s1",
         event_emitter=emitter,
     )
 
@@ -353,7 +371,7 @@ async def test_persistent_always_written_and_reloaded(tmp_path: pytest.TempPathF
     assert policy_file.exists()
 
     loaded = load_policy_file(policy_file)
-    assert loaded.get("bash") == "allow"
+    assert loaded.get("shell") == "allow"
 
     # 新 manager 加载同一文件，bash 应直接 auto_allow（无 OUTSIDE_CWD）
     mgr2 = PermissionManager(policy_file=policy_file)

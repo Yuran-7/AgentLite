@@ -12,7 +12,11 @@ class PermissionDecision(StrEnum):
     ASK = "ask"
 
 
-# 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow_patterns 绕过）
+# shell 是当前公开名称，bash 仅用于兼容旧会话和策略文件
+SHELL_TOOL_NAMES = {"shell", "bash"}
+
+
+# 检测 shell 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow_patterns 绕过）
 OUTSIDE_CWD_HEURISTICS: list[str] = [
     r"(^|[\s\"'=])/[^\s]",        # POSIX absolute path, including quoted paths
     r"(^|[\s\"'=])~",             # tilde home, including quoted paths
@@ -32,7 +36,7 @@ _OUTSIDE_CWD_RE: list[re.Pattern[str]] = [
 ]
 
 
-# 判断 bash 命令是否命中 outside-cwd 启发式规则
+# 判断 shell 命令是否命中 outside-cwd 启发式规则
 def matches_outside_cwd(command: str) -> bool:
     return any(pat.search(command) for pat in _OUTSIDE_CWD_RE)
 
@@ -45,7 +49,8 @@ class ToolPolicy:
 
 
 DEFAULT_POLICIES: dict[str, ToolPolicy] = {
-    "bash":       ToolPolicy(default=PermissionDecision.ASK),
+    "shell":      ToolPolicy(default=PermissionDecision.ASK),
+    "bash":       ToolPolicy(default=PermissionDecision.ASK),  # legacy tool name
     "write_file": ToolPolicy(default=PermissionDecision.ASK),
     "read_file":  ToolPolicy(default=PermissionDecision.ALLOW),
     "list_dir":   ToolPolicy(default=PermissionDecision.ALLOW),
@@ -58,9 +63,10 @@ DEFAULT_POLICIES: dict[str, ToolPolicy] = {
 # 未在 DEFAULT_POLICIES 中登记的工具的兜底策略
 _UNKNOWN_TOOL_DEFAULT = PermissionDecision.ASK
 
-# bash 参数中展示用的关键字段映射
+# 工具参数中展示用的关键字段映射
 _PREVIEW_KEY: dict[str, str] = {
-    "bash":       "command",
+    "shell":      "command",
+    "bash":       "command",  # legacy tool name
     "read_file":  "path",
     "write_file": "path",
     "list_dir":   "path",
@@ -99,9 +105,9 @@ def evaluate(
     if tool_name == "browser" and params.get("action") in {"click", "type"}:
         return PermissionDecision.ASK
 
-    command = str(params.get("command", "")) if tool_name == "bash" else ""
+    command = str(params.get("command", "")) if tool_name in SHELL_TOOL_NAMES else ""
 
-    # Tier 1: deny_patterns (bash only)
+    # Tier 1: deny_patterns (shell only)
     if command:
         for pat in policy.deny_patterns:
             if re.search(pat, command):
@@ -111,7 +117,7 @@ def evaluate(
     if command and matches_outside_cwd(command):
         return PermissionDecision.ASK
 
-    # Tier 3: allow_patterns (bash only)
+    # Tier 3: allow_patterns (shell only)
     if command:
         for pat in policy.allow_patterns:
             if re.search(pat, command):

@@ -54,7 +54,8 @@ model = "claude-sonnet-4-6"
     assert profile.description == "测试角色"
     assert profile.system_prompt == "你是测试助手。"
     assert "read_file" in profile.allowed_tools
-    assert "bash" in profile.allowed_tools
+    assert "shell" in profile.allowed_tools
+    assert "bash" not in profile.allowed_tools
     assert profile.model == "claude-sonnet-4-6"
 
 

@@ -25,11 +25,11 @@ from kama_claude.core.subagent.registry import BackgroundTaskRegistry
 from kama_claude.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from kama_claude.core.task.manager import TaskManager
 from kama_claude.core.tools.builtin import (
-    BashTool,
     BrowserTool,
     ListDirTool,
     NoteSaveTool,
     ReadFileTool,
+    ShellTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
@@ -99,14 +99,19 @@ class AgentRunner:
         tool_whitelist: list[str] | None = None,
     ) -> ToolRegistry:
         allowed: set[str] | None = (
-            set(tool_whitelist) if tool_whitelist is not None else None
+            {
+                "shell" if name == "bash" else name
+                for name in tool_whitelist
+            }
+            if tool_whitelist is not None
+            else None
         )
 
         def _ok(name: str) -> bool:
             return allowed is None or name in allowed
 
         registry = ToolRegistry()
-        for t in [ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool()]:
+        for t in [ReadFileTool(), ShellTool(), WriteFileTool(), ListDirTool()]:
             if _ok(t.name):
                 registry.register(t)
         if self._config.web.enabled:

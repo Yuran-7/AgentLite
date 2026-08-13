@@ -5,11 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from kama_claude.core.tools.builtin.bash import BashTool, _shell_argv
+from kama_claude.core.tools.builtin.bash import (
+    ShellTool,
+    _shell_argv,
+    _shell_description,
+)
 from kama_claude.core.tools.builtin.list_dir import ListDirTool
 from kama_claude.core.tools.builtin.write_file import WriteFileTool
 
-# ── bash ──────────────────────────────────────────────────────────────────────
+# ── shell ─────────────────────────────────────────────────────────────────────
 
 # 功能：验证 POSIX 平台通过 /bin/sh 执行命令而不依赖当前用户的交互 shell
 # 设计：直接检查参数向量，避免测试环境实际 shell 配置影响跨平台选择逻辑
@@ -29,11 +33,26 @@ def test_shell_argv_uses_powershell_on_windows(monkeypatch: pytest.MonkeyPatch) 
     assert "-NonInteractive" in argv
     assert argv[-1].endswith("Write-Output hello")
 
+
+# 功能：验证公开工具名为 shell，且 Windows 描述明确约束模型使用 PowerShell 语法
+# 设计：固定解释器探测为 Windows PowerShell，直接检查发给模型的名称和关键提示语
+def test_shell_schema_describes_windows_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "kama_claude.core.tools.builtin.bash.shutil.which",
+        lambda name: "powershell.exe" if name == "powershell" else None,
+    )
+    assert ShellTool.name == "shell"
+    description = _shell_description(platform="nt")
+    assert "Windows PowerShell 5.1" in description
+    assert "Use PowerShell syntax" in description
+    assert "do not emit Bash/POSIX syntax" in description
+    assert "does not support '&&' or '||'" in description
+
 # 功能：验证成功命令的 stdout 出现在 ToolResult.content 中，is_error 为 False
 # 设计：用 echo 命令避免外部依赖，直接比较输出内容，无需 mock
 @pytest.mark.asyncio
-async def test_bash_success_stdout() -> None:
-    result = await BashTool().invoke({"command": "echo hello"})
+async def test_shell_success_stdout() -> None:
+    result = await ShellTool().invoke({"command": "echo hello"})
     assert not result.is_error
     assert "hello" in result.content
 
@@ -41,8 +60,8 @@ async def test_bash_success_stdout() -> None:
 # 功能：验证非零退出码时 is_error=True 且 content 包含退出码标注
 # 设计：`exit 2` 是最简单的非零退出；不依赖任何外部命令行为
 @pytest.mark.asyncio
-async def test_bash_nonzero_exit_is_error() -> None:
-    result = await BashTool().invoke({"command": "exit 2"})
+async def test_shell_nonzero_exit_is_error() -> None:
+    result = await ShellTool().invoke({"command": "exit 2"})
     assert result.is_error
     assert "[exit 2]" in result.content
 
@@ -50,8 +69,8 @@ async def test_bash_nonzero_exit_is_error() -> None:
 # 功能：验证命令超时后 is_error=True，error_type 为 "timeout"
 # 设计：timeout=1s 搭配 sleep 2 必然超时；验证 error_type 而非 content，避免超时消息格式耦合
 @pytest.mark.asyncio
-async def test_bash_timeout() -> None:
-    result = await BashTool().invoke({"command": "sleep 5", "timeout": 1})
+async def test_shell_timeout() -> None:
+    result = await ShellTool().invoke({"command": "sleep 5", "timeout": 1})
     assert result.is_error
     assert result.error_type == "timeout"
 
@@ -59,9 +78,9 @@ async def test_bash_timeout() -> None:
 # 功能：验证 stderr 被合并到 stdout 输出中
 # 设计：只写 stderr 的命令（>&2 echo），输出应该出现在合并后的 content 里
 @pytest.mark.asyncio
-async def test_bash_stderr_merged() -> None:
+async def test_shell_stderr_merged() -> None:
     command = '[Console]::Error.WriteLine("err")' if os.name == "nt" else "echo err >&2"
-    result = await BashTool().invoke({"command": command})
+    result = await ShellTool().invoke({"command": command})
     assert not result.is_error
     assert "err" in result.content
 

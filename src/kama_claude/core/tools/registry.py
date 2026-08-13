@@ -13,6 +13,8 @@ class ToolRegistry:
 
     # 按名称查找工具，不存在返回 None
     def get(self, name: str) -> BaseTool | None:
+        if name == "bash":  # legacy messages may still contain the former public name
+            name = "shell"
         return self._tools.get(name)
 
     # 返回所有工具的内部统一 schema 列表，由具体 LLM Provider 转换协议格式

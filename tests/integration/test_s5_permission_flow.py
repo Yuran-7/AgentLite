@@ -2,7 +2,7 @@
 S5 permission flow integration tests.
 
 No daemon subprocess needed — uses AgentRunner in-process with a mock LLM
-provider and the real PermissionManager. BashTool runs real subprocesses, so
+provider and the real PermissionManager. ShellTool runs real subprocesses, so
 commands must be safe (echo, true).
 """
 from __future__ import annotations
@@ -20,8 +20,8 @@ from kama_claude.core.runner import AgentRunner
 # ── stub providers ────────────────────────────────────────────────────────────
 
 
-class _SingleBashProvider:
-    """Step 1: bash tool call. Step 2: end_turn."""
+class _SingleShellProvider:
+    """Step 1: shell tool call. Step 2: end_turn."""
 
     def __init__(self, command: str = "echo hello") -> None:
         self._command = command
@@ -39,13 +39,13 @@ class _SingleBashProvider:
     ) -> LlmResponse:
         self._step += 1
         if self._step == 1:
-            tc = ToolCallBlock(id="tc1", name="bash", input={"command": self._command})
+            tc = ToolCallBlock(id="tc1", name="shell", input={"command": self._command})
             return LlmResponse(stop_reason="tool_use", tool_calls=[tc])
         return LlmResponse(stop_reason="end_turn", text="done")
 
 
-class _TwoBashProvider:
-    """Step 1+2: two separate bash calls. Step 3: end_turn."""
+class _TwoShellProvider:
+    """Step 1+2: two separate shell calls. Step 3: end_turn."""
 
     def __init__(self) -> None:
         self._step = 0
@@ -62,10 +62,10 @@ class _TwoBashProvider:
     ) -> LlmResponse:
         self._step += 1
         if self._step == 1:
-            tc = ToolCallBlock(id="tc1", name="bash", input={"command": "echo first"})
+            tc = ToolCallBlock(id="tc1", name="shell", input={"command": "echo first"})
             return LlmResponse(stop_reason="tool_use", tool_calls=[tc])
         if self._step == 2:
-            tc = ToolCallBlock(id="tc2", name="bash", input={"command": "echo second"})
+            tc = ToolCallBlock(id="tc2", name="shell", input={"command": "echo second"})
             return LlmResponse(stop_reason="tool_use", tool_calls=[tc])
         return LlmResponse(stop_reason="end_turn", text="done")
 
@@ -109,8 +109,8 @@ async def test_permission_allow_once_tool_executes(tmp_path: Path) -> None:
             manager.respond(getattr(e, "tool_use_id", ""), "allow_once")
 
     bus.subscribe(collect)
-    outcome = await _runner(_SingleBashProvider(), bus, manager, tmp_path).run_and_capture(
-        "run bash"
+    outcome = await _runner(_SingleShellProvider(), bus, manager, tmp_path).run_and_capture(
+        "run shell"
     )
 
     assert "permission.requested" in event_types
@@ -137,7 +137,7 @@ async def test_permission_deny_once_tool_not_executed(tmp_path: Path) -> None:
             failed_events.append(e)
 
     bus.subscribe(collect)
-    await _runner(_SingleBashProvider(), bus, manager, tmp_path).run_and_capture("run bash")
+    await _runner(_SingleShellProvider(), bus, manager, tmp_path).run_and_capture("run shell")
 
     assert "permission.requested" in event_types
     assert "tool.call_failed" in event_types
@@ -146,7 +146,7 @@ async def test_permission_deny_once_tool_not_executed(tmp_path: Path) -> None:
 
 
 # 功能：验证 always_allow 决策在 session 内缓存，第二次同名工具不再触发 permission.requested
-# 设计：两步 bash 调用；第一次 respond("always_allow")，断言 permission.requested 只出现一次；
+# 设计：两步 shell 调用；第一次 respond("always_allow")，断言 permission.requested 只出现一次；
 #       第二次工具调用命中缓存并直接执行，不挂起 Future
 async def test_always_allow_cached_within_session(tmp_path: Path) -> None:
     manager = PermissionManager()
@@ -160,8 +160,8 @@ async def test_always_allow_cached_within_session(tmp_path: Path) -> None:
             manager.respond(getattr(e, "tool_use_id", ""), "always_allow")
 
     bus.subscribe(collect)
-    outcome = await _runner(_TwoBashProvider(), bus, manager, tmp_path).run_and_capture(
-        "run two bash commands"
+    outcome = await _runner(_TwoShellProvider(), bus, manager, tmp_path).run_and_capture(
+        "run two shell commands"
     )
 
     assert perm_requested_count == 1

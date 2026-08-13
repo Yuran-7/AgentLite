@@ -146,10 +146,10 @@ def test_allow_pattern_grants_access() -> None:
 
 # ── Tier 4: tool defaults ─────────────────────────────────────────────────────
 
-# 功能：验证 bash 工具默认策略是 ASK
-# 设计：无任何 patterns 命中时，bash 必须询问用户，这是安全底线
-def test_bash_default_is_ask() -> None:
-    result = evaluate("bash", {"command": "echo hi"})
+# 功能：验证 shell 工具默认策略是 ASK
+# 设计：无任何 patterns 命中时，shell 必须询问用户，这是安全底线
+def test_shell_default_is_ask() -> None:
+    result = evaluate("shell", {"command": "echo hi"})
     assert result == PermissionDecision.ASK
 
 
@@ -193,7 +193,7 @@ def test_patterns_only_apply_to_bash() -> None:
 # 功能：验证 param_preview 对已知工具返回 key='value' 格式的摘要
 # 设计：TUI 审批卡片依赖这个摘要让用户快速理解工具要做什么，格式必须稳定
 def test_param_preview_known_tools() -> None:
-    assert param_preview("bash", {"command": "echo hi"}) == "command='echo hi'"
+    assert param_preview("shell", {"command": "echo hi"}) == "command='echo hi'"
     assert param_preview("read_file", {"path": "README.md"}) == "path='README.md'"
     assert param_preview("note_save", {"content": "Python 3.12"}) == "content='Python 3.12'"
 

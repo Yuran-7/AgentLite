@@ -149,6 +149,11 @@ def test_root_registry_registers_web_tools_and_honors_empty_whitelist(tmp_path: 
     normal = runner._build_registry(task_manager)
     denied = runner._build_registry(task_manager, tool_whitelist=[])
 
+    assert normal.get("shell") is not None
+    assert {schema["name"] for schema in normal.tool_schemas()} >= {
+        "shell", "web_search", "web_fetch"
+    }
+    assert "bash" not in {schema["name"] for schema in normal.tool_schemas()}
     assert normal.get("web_search") is not None
     assert normal.get("web_fetch") is not None
     assert denied.tool_schemas() == []

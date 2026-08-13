@@ -57,6 +57,32 @@ format = "text"    # "text" | "json"
 [session]
 dir = ".kama/sessions"  # 相对路径以 daemon 启动目录为基准
 
+[agent]
+max_steps = 20
+# 所有子 Agent 的能力上限；默认不允许联网。角色 allowed_tools 只能继续收窄。
+subagent_allowed_tools = [
+  "read_file", "bash", "write_file", "list_dir",
+  "task_create", "task_update", "task_list", "task_get",
+  "spawn_agent", "agent_result",
+]
+
+[web]
+enabled = true
+search_provider = "duckduckgo"  # duckduckgo | brave | searxng
+# search_base_url = "https://search.example.com"  # SearXNG 时必填
+search_max_results = 10
+timeout_s = 15
+fetch_max_chars = 12000
+fetch_max_bytes = 2000000
+fetch_max_redirects = 5
+browser_enabled = true
+browser_headless = true
+browser_timeout_s = 20
+browser_idle_timeout_s = 600
+browser_max_nodes = 100
+browser_max_chars = 8000
+browser_extract_limit = 10
+
 [llm]
 protocol = "anthropic"       # "anthropic" | "openai"
 default_model = "deepseek-chat"
@@ -86,9 +112,40 @@ cp .env.example .env
 | `LLM_DEFAULT_MODEL` | `deepseek-chat` | 服务端实际提供的 DeepSeek model ID |
 | `LLM_BASE_URL` | 空 | 通用 API 地址覆盖；否则读取 `ANTHROPIC_BASE_URL` 或 `OPENAI_BASE_URL` |
 | `LLM_API_KEY` | 空 | 通用密钥覆盖；否则读取 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` |
+| `KAMA_WEB_ENABLED` | `true` | 是否为根 Agent 注册联网工具 |
+| `KAMA_WEB_SEARCH_PROVIDER` | `duckduckgo` | 搜索后端：`duckduckgo`、`brave` 或 `searxng` |
+| `KAMA_WEB_SEARCH_BASE_URL` | 空 | SearXNG 实例地址 |
+| `KAMA_WEB_SEARCH_API_KEY` | 空 | Brave Search API Key；不会出现在配置日志中 |
+| `KAMA_BROWSER_ENABLED` | `true` | 是否注册受限 Playwright `browser` 工具 |
+| `KAMA_BROWSER_HEADLESS` | `true` | Chromium 是否使用无界面模式 |
+| `KAMA_BROWSER_IDLE_TIMEOUT_S` | `600` | 等待用户登录的浏览器 Session 空闲关闭秒数 |
+| `KAMA_SUBAGENT_ALLOWED_TOOLS` | 见上方 `[agent]` | 逗号分隔的子 Agent 全局工具能力上限 |
 
 OpenAI-compatible 协议使用 Chat Completions；Anthropic-compatible 协议使用 Messages API。
 可以同时在 `.env` 保存两套标准 URL 和密钥，切换时只修改 `LLM_PROTOCOL`。
+
+### 联网工具边界
+
+- `web_search` 只返回少量结构化搜索结果；默认使用免 Key 的 DuckDuckGo。
+- `web_fetch` 只读取公共 HTTP(S) 静态内容，不执行 JavaScript；会阻止 localhost、
+  私有/链路本地地址和带凭据 URL，并在每次重定向后重新检查目标。
+- `browser` 支持 `open/snapshot/click/type/extract/request_user_login/check_login/close`；
+  禁止下载、任意 JavaScript和私网访问，单次 snapshot/extract 有硬输出上限。
+- 遇到强制登录或人机验证时，根 Agent 可调用 `request_user_login`。工具会在需要时把无头
+  Chromium 重启为可见窗口并保留当前 Session；用户完成操作并回复“已登录”后，Agent 通过
+  `check_login` 复用页面继续。显式关闭 Session、关闭 core 或等待超时都会清理浏览器进程。
+- `click` 和 `type` 默认进入权限审批，可由用户的 always 决策缓存；其他读取动作默认允许。
+- 根 Agent 在 `[web].enabled = true` 时获得搜索、抓取和浏览器工具。
+- 子 Agent 默认不获得联网工具。需要时先把工具加入
+  `agent.subagent_allowed_tools`，再加入对应 `.kama/agents/<role>.toml` 的
+  `allowed_tools`；两层取交集。匿名子 Agent 只受全局能力上限约束。即使子 Agent 获得
+  `browser`，也不能发起用户登录接管。
+
+首次安装或 Playwright 升级后，需要安装 Chromium：
+
+```bash
+uv run playwright install chromium
+```
 
 ---
 

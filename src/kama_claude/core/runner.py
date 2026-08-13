@@ -26,6 +26,7 @@ from kama_claude.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from kama_claude.core.task.manager import TaskManager
 from kama_claude.core.tools.builtin import (
     BashTool,
+    BrowserTool,
     ListDirTool,
     NoteSaveTool,
     ReadFileTool,
@@ -33,8 +34,11 @@ from kama_claude.core.tools.builtin import (
     TaskGetTool,
     TaskListTool,
     TaskUpdateTool,
+    WebFetchTool,
+    WebSearchTool,
     WriteFileTool,
 )
+from kama_claude.core.tools.builtin.browser_session import BrowserSessionManager
 from kama_claude.core.tools.registry import ToolRegistry
 from kama_claude.core.trace.provider import TracingProvider
 from kama_claude.core.trace.writer import TraceWriter
@@ -64,6 +68,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
+        browser_manager: BrowserSessionManager | None = None,
     ) -> None:
         self._config = config
         self._bus = bus
@@ -73,6 +78,9 @@ class AgentRunner:
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
+        self._browser_manager = browser_manager or BrowserSessionManager(
+            config.web.browser_idle_timeout_s
+        )
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
 
@@ -90,7 +98,9 @@ class AgentRunner:
         session_id: str = "",
         tool_whitelist: list[str] | None = None,
     ) -> ToolRegistry:
-        allowed: set[str] | None = set(tool_whitelist) if tool_whitelist else None
+        allowed: set[str] | None = (
+            set(tool_whitelist) if tool_whitelist is not None else None
+        )
 
         def _ok(name: str) -> bool:
             return allowed is None or name in allowed
@@ -99,6 +109,22 @@ class AgentRunner:
         for t in [ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool()]:
             if _ok(t.name):
                 registry.register(t)
+        if self._config.web.enabled:
+            for t in [WebSearchTool(self._config.web), WebFetchTool(self._config.web)]:
+                if _ok(t.name):
+                    registry.register(t)
+            if self._config.web.browser_enabled and _ok("browser"):
+                browser_scope = session_id or f"run:{run_id or id(task_manager)}"
+                registry.register(
+                    BrowserTool(
+                        self._config.web,
+                        session_manager=self._browser_manager,
+                        session_id=browser_scope,
+                        allow_user_handoff=(
+                            session is not None and session.mode == "chat"
+                        ),
+                    )
+                )
         for t in [
             TaskCreateTool(task_manager),
             TaskUpdateTool(task_manager),
@@ -124,6 +150,8 @@ class AgentRunner:
                         task_registry=self._task_registry,
                         runs_dir=runs_dir,
                         session_id=session_id,
+                        web_config=self._config.web,
+                        subagent_allowed_tools=self._config.agent.subagent_allowed_tools,
                         depth=0,
                     )
                 )
@@ -192,6 +220,7 @@ class AgentRunner:
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
             cancelled = False
+            registry: ToolRegistry | None = None
             try:
                 provider: LLMProvider = self._provider or create_llm_provider(
                     self._config.llm
@@ -243,6 +272,9 @@ class AgentRunner:
                 )
                 if not context.is_done():
                     context.mark_failed("llm_error")
+            finally:
+                if registry is not None:
+                    await registry.aclose()
 
             await bus.publish(
                 RunFinishedEvent(

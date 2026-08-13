@@ -83,6 +83,9 @@ class PermissionManager:
 
         # Tier 2: OUTSIDE_CWD_HEURISTICS（bash only，强制 ASK，不可被任何缓存绕过）
         outside_cwd = bool(command and matches_outside_cwd(command))
+        browser_interaction = bool(
+            tool_name == "browser" and params.get("action") in {"click", "type"}
+        )
 
         if not outside_cwd:
             # Tier 3: session always 缓存
@@ -95,24 +98,29 @@ class PermissionManager:
             # Tier 4: persistent always（跨 session）
             if tool_name in self._persistent_always:
                 cached = self._persistent_always[tool_name]
-                logger.debug("permission: persistent cache hit tool=%s decision=%s", tool_name, cached)
+                logger.debug(
+                    "permission: persistent cache hit tool=%s decision=%s",
+                    tool_name,
+                    cached,
+                )
                 return cached == "allow", f"auto_{cached}"
 
-            # Tier 5: allow_patterns（bash only）
-            if command and policy:
-                for pat in policy.allow_patterns:
-                    if re.search(pat, command):
-                        return True, "auto_allow"
+            if not browser_interaction:
+                # Tier 5: allow_patterns（bash only）
+                if command and policy:
+                    for pat in policy.allow_patterns:
+                        if re.search(pat, command):
+                            return True, "auto_allow"
 
-            # Tier 6: tool default
-            if policy is not None:
-                if policy.default == PermissionDecision.ALLOW:
-                    return True, "auto_allow"
-                if policy.default == PermissionDecision.DENY:
-                    return False, "auto_deny"
+                # Tier 6: tool default
+                if policy is not None:
+                    if policy.default == PermissionDecision.ALLOW:
+                        return True, "auto_allow"
+                    if policy.default == PermissionDecision.DENY:
+                        return False, "auto_deny"
             # default == ASK（bash、unknown tool）→ fall through to Future
 
-        # ASK 路径（来自 OUTSIDE_CWD 强制 ASK，或 default=ASK）
+        # ASK 路径（越界 shell、浏览器交互或 default=ASK）
         loop = asyncio.get_event_loop() # 事件循环来自asyncio.run(CoreApp().run())
         future: asyncio.Future[str] = loop.create_future()
         self._pending[tool_use_id] = _PendingRequest(
@@ -138,7 +146,7 @@ class PermissionManager:
                 raw = await asyncio.wait_for(future, timeout=self._timeout_s)
             else:
                 raw = await future  # 卡在这里，直到执行respond的req.future.set_result(decision)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(tool_use_id, None)
             logger.info("permission: timeout tool_use_id=%s tool=%s", tool_use_id, tool_name)
             return False, "timeout"
@@ -170,7 +178,10 @@ class PermissionManager:
                     save_policy_file(self._persistent_always, self._policy_file)
                     logger.info("permission: policy.toml written path=%s", self._policy_file)
                 except Exception:
-                    logger.exception("permission: failed to write policy.toml path=%s", self._policy_file)
+                    logger.exception(
+                        "permission: failed to write policy.toml path=%s",
+                        self._policy_file,
+                    )
             else:
                 logger.warning("permission: policy_file is None, skipping persistence")
         elif decision == "always_deny":
@@ -185,7 +196,10 @@ class PermissionManager:
                     save_policy_file(self._persistent_always, self._policy_file)
                     logger.info("permission: policy.toml written path=%s", self._policy_file)
                 except Exception:
-                    logger.exception("permission: failed to write policy.toml path=%s", self._policy_file)
+                    logger.exception(
+                        "permission: failed to write policy.toml path=%s",
+                        self._policy_file,
+                    )
             else:
                 logger.warning("permission: policy_file is None, skipping persistence")
         return allow

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from rich.markdown import Markdown
+from textual.app import App, ComposeResult
 from textual.widget import Widget
+from textual.widgets import Static
 
 from kama_claude.tui.app import (
     KamaTuiApp,
@@ -10,6 +12,13 @@ from kama_claude.tui.app import (
     _param_summary,
     _preview,
 )
+
+
+class _ToolBlockHarness(App[None]):
+    # 挂载独立工具块和鼠标移出目标，供交互样式测试使用
+    def compose(self) -> ComposeResult:
+        yield ToolCallBlock("bash", {"command": "echo hi"})
+        yield Static("outside", id="outside")
 
 
 # 功能：验证 _preview 超出长度时截断并追加省略号
@@ -149,12 +158,63 @@ def test_tool_call_started_and_finished() -> None:
     assert block._output == "hi"  # type: ignore[attr-defined]
 
 
+# 功能：验证已完成工具块悬停时加粗并显示箭头，点击后箭头随折叠状态切换
+# 设计：用 Textual pilot 驱动真实鼠标进入和点击，覆盖 CSS 命中、DOM 更新及移出复原
+async def test_tool_block_hover_and_chevron_toggle() -> None:
+    app = _ToolBlockHarness()
+
+    async with app.run_test(size=(120, 20)) as pilot:
+        block = app.query_one(ToolCallBlock)
+        block.set_result("hi", 42)
+        await pilot.pause()
+
+        summary = block.query_one(".summary", Static)
+        chevron = block.query_one(".chevron", Static)
+        assert chevron.styles.opacity == 0
+
+        assert await pilot.hover(".summary")
+        await pilot.pause(0.2)
+        assert "hovered" in block.classes
+        assert summary.styles.text_style.bold
+        assert chevron.styles.opacity == 1
+        assert chevron.region.x == summary.region.right + 1
+        assert str(chevron.content) == ">"
+
+        assert await pilot.click(".summary")
+        await pilot.pause()
+        assert "expanded" in block.classes
+        assert str(chevron.content) == "▾"
+
+        assert await pilot.hover("#outside")
+        await pilot.pause(0.2)
+        assert "expanded" in block.classes
+        assert "hovered" not in block.classes
+        assert chevron.styles.opacity == 0
+        assert str(chevron.content) == "▾"
+
+        assert await pilot.hover(".summary")
+        assert await pilot.click(".summary")
+        await pilot.pause(0.2)
+        assert "expanded" not in block.classes
+        assert chevron.styles.opacity == 1
+        assert str(chevron.content) == ">"
+
+
 # 功能：验证 note_save 成功完成时工具块摘要显示 remembered
 # 设计：直接操作 ToolCallBlock，覆盖 note_save 的特殊低噪声展示策略
 def test_note_save_tool_block_shows_remembered() -> None:
     block = ToolCallBlock("note_save", {"content": "Python 3.12"})
     block.set_result("saved", 3)
     assert "remembered" in block._summary()  # type: ignore[attr-defined]
+
+
+# 功能：验证 TUI 使用 VS Code 终端可传递的 Ctrl+C 退出且具有应用级优先级
+# 设计：直接检查声明式绑定，防止退回会被 VS Code 截获的 Ctrl+Q 或被输入框覆盖
+def test_quit_binding_uses_priority_ctrl_c() -> None:
+    quit_bindings = [binding for binding in KamaTuiApp.BINDINGS if binding.action == "quit"]
+    assert len(quit_bindings) == 1
+    assert quit_bindings[0].key == "ctrl+c"
+    assert quit_bindings[0].priority
 
 
 # 功能：验证提交用户输入时会追加 user turn，并进入 busy 状态

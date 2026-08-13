@@ -12,7 +12,7 @@ from rich.markdown import Markdown
 from textual import events
 from textual.app import App, ComposeResult  # Textual 是用于构建终端用户界面（TUI）的第三方库
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
@@ -81,7 +81,28 @@ class ToolCallBlock(Widget):
 
     DEFAULT_CSS = """
     ToolCallBlock { height: auto; padding: 0 2; color: $text-muted; }
-    ToolCallBlock > .summary { color: $text-muted; }
+    ToolCallBlock > .summary-row { height: 1; }
+    ToolCallBlock > .summary-row > .summary {
+        width: auto;
+        color: $text-muted;
+        transition: color 120ms linear;
+    }
+    ToolCallBlock > .summary-row > .chevron {
+        width: 1;
+        margin-left: 1;
+        opacity: 0%;
+        color: $text-muted;
+        transition: opacity 120ms linear, color 120ms linear;
+    }
+    ToolCallBlock.expandable.hovered > .summary-row > .summary {
+        color: $text;
+        text-style: bold;
+    }
+    ToolCallBlock.expandable.hovered > .summary-row > .chevron {
+        opacity: 100%;
+        color: $text;
+        text-style: bold;
+    }
     ToolCallBlock > .detail { display: none; padding: 0 2 0 4; color: $text-muted; }
     ToolCallBlock.expanded > .detail { display: block; }
     """
@@ -97,9 +118,16 @@ class ToolCallBlock(Widget):
         self._is_error = False
         self._finished = False
 
+    # 组合工具摘要、悬停箭头和折叠详情区域
     def compose(self) -> ComposeResult:
-        yield Static(self._summary(), classes="summary")
+        with Horizontal(classes="summary-row"):
+            yield Static(self._summary(), classes="summary")
+            yield Static(self._chevron(), classes="chevron")
         yield Static("", classes="detail")
+
+    # 根据折叠状态返回与 Codex 风格一致的方向提示
+    def _chevron(self) -> str:
+        return "▾" if "expanded" in self.classes else ">"
 
     # 生成摘要行文本
     def _summary(self) -> str:
@@ -123,8 +151,19 @@ class ToolCallBlock(Widget):
         self._elapsed_ms = elapsed_ms
         self._is_error = is_error
         self._finished = True
+        self.add_class("expandable")
         if self.children:
             self.query_one(".summary", Static).update(self._summary())
+            self.query_one(".chevron", Static).update(self._chevron())
+
+    # 鼠标进入工具块或其子控件时启用可点击的悬停样式
+    def on_enter(self, event: events.Enter) -> None:
+        if self._finished:
+            self.add_class("hovered")
+
+    # 鼠标离开当前命中区域时清除悬停样式，进入相邻子控件会立即重新启用
+    def on_leave(self, event: events.Leave) -> None:
+        self.remove_class("hovered")
 
     # 点击时切换展开/折叠状态
     def on_click(self) -> None:
@@ -140,6 +179,7 @@ class ToolCallBlock(Widget):
                 f"[dim]elapsed:[/dim] {self._elapsed_ms}ms"
             )
             self.add_class("expanded")
+        self.query_one(".chevron", Static).update(self._chevron())
 
 
 class PermissionSelect(Static):
@@ -466,7 +506,7 @@ class KamaTuiApp(App[None]):
 
     TITLE = "KamaClaude"
     BINDINGS = [
-        Binding("ctrl+q", "quit", "quit"),
+        Binding("ctrl+c", "quit", "quit", priority=True),
     ]
     CSS = """
     Screen { background: $background; }

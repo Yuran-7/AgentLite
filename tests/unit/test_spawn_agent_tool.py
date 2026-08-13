@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from kama_claude.core.agents.loader import AgentProfile
+from kama_claude.core.config import WebConfig
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.types import LlmResponse, UsageStats
 from kama_claude.core.subagent.registry import BackgroundTaskRegistry
@@ -189,3 +191,84 @@ async def test_foreground_publishes_started_event(tmp_path: Path) -> None:
     assert len(started) == 1
     assert started[0].parent_run_id == "parent-run-01"
     assert started[0].description == "test task"
+
+
+# 功能：默认子 agent 能力上限不包含联网工具
+# 设计：即使传入启用的 WebConfig，未显式加入全局上限时 registry 也不注册 web 工具
+def test_default_child_cap_blocks_web_tools(tmp_path: Path) -> None:
+    tool, _, bus = _make_tool(tmp_path)
+    tool._web_config = WebConfig()
+
+    registry = tool._build_child_registry(bus, "child-run", profile=None)
+
+    assert registry.get("web_search") is None
+    assert registry.get("web_fetch") is None
+
+
+# 功能：全局能力上限可显式向匿名子 agent 开放联网工具
+# 设计：同时配置 web 和 allowlist，确认两个条件缺一不可
+def test_child_cap_can_explicitly_allow_web_tools(tmp_path: Path) -> None:
+    bus = EventBus()
+    tool = SpawnAgentTool(
+        provider=_make_provider(),
+        parent_bus=bus,
+        parent_run_id="parent",
+        permission_manager=None,
+        max_steps=5,
+        task_registry=BackgroundTaskRegistry(),
+        runs_dir=tmp_path,
+        session_id="session",
+        web_config=WebConfig(),
+        subagent_allowed_tools=["read_file", "web_search", "web_fetch"],
+    )
+
+    registry = tool._build_child_registry(bus, "child-run", profile=None)
+
+    assert registry.get("web_search") is not None
+    assert registry.get("web_fetch") is not None
+    assert registry.get("bash") is None
+
+
+# 功能：角色白名单只能继续收窄全局能力上限，不能因为全局允许而自动获得联网能力
+# 设计：全局包含 web_search，但角色只包含 read_file，最终 registry 不应含 web_search
+def test_profile_allowlist_intersects_global_child_cap(tmp_path: Path) -> None:
+    bus = EventBus()
+    tool = SpawnAgentTool(
+        provider=_make_provider(),
+        parent_bus=bus,
+        parent_run_id="parent",
+        permission_manager=None,
+        max_steps=5,
+        task_registry=BackgroundTaskRegistry(),
+        runs_dir=tmp_path,
+        session_id="session",
+        web_config=WebConfig(),
+        subagent_allowed_tools=["read_file", "web_search"],
+    )
+    profile = AgentProfile(
+        name="reader",
+        description="read only",
+        system_prompt="read",
+        allowed_tools=["read_file"],
+    )
+
+    registry = tool._build_child_registry(bus, "child-run", profile=profile)
+
+    assert registry.get("read_file") is not None
+    assert registry.get("web_search") is None
+
+
+# 功能：未知角色不能静默降级为拥有匿名子 agent 权限的运行
+# 设计：命名不存在的 profile，确认在创建 child registry 前直接失败
+@pytest.mark.asyncio
+async def test_unknown_profile_is_rejected(tmp_path: Path) -> None:
+    tool, _, _ = _make_tool(tmp_path)
+    result = await tool.invoke(
+        {
+            "description": "unknown role",
+            "prompt": "do work",
+            "subagent_type": "does-not-exist",
+        }
+    )
+    assert result.is_error
+    assert result.error_type == "schema_error"

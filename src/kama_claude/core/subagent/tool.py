@@ -17,16 +17,20 @@ from kama_claude.core.runs import new_run_id
 from kama_claude.core.subagent.registry import BackgroundTaskRegistry
 from kama_claude.core.tools.base import BaseTool, ToolResult
 from kama_claude.core.tools.builtin.bash import BashTool
+from kama_claude.core.tools.builtin.browser import BrowserTool
 from kama_claude.core.tools.builtin.list_dir import ListDirTool
 from kama_claude.core.tools.builtin.read_file import ReadFileTool
 from kama_claude.core.tools.builtin.task_create import TaskCreateTool
 from kama_claude.core.tools.builtin.task_get import TaskGetTool
 from kama_claude.core.tools.builtin.task_list import TaskListTool
 from kama_claude.core.tools.builtin.task_update import TaskUpdateTool
+from kama_claude.core.tools.builtin.web_fetch import WebFetchTool
+from kama_claude.core.tools.builtin.web_search import WebSearchTool
 from kama_claude.core.tools.builtin.write_file import WriteFileTool
 from kama_claude.core.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
+    from kama_claude.core.config import WebConfig
     from kama_claude.core.llm.base import LLMProvider
     from kama_claude.core.permissions.manager import PermissionManager
 
@@ -92,6 +96,8 @@ class SpawnAgentTool(BaseTool):
         task_registry: BackgroundTaskRegistry,
         runs_dir: Path,
         session_id: str,
+        web_config: WebConfig | None = None,
+        subagent_allowed_tools: list[str] | None = None,
         depth: int = 0,
     ) -> None:
         self._provider = provider
@@ -102,6 +108,23 @@ class SpawnAgentTool(BaseTool):
         self._task_registry = task_registry
         self._runs_dir = runs_dir
         self._session_id = session_id
+        self._web_config = web_config
+        self._subagent_allowed_tools = (
+            set(subagent_allowed_tools)
+            if subagent_allowed_tools is not None
+            else {
+                "read_file",
+                "bash",
+                "write_file",
+                "list_dir",
+                "task_create",
+                "task_update",
+                "task_list",
+                "task_get",
+                "spawn_agent",
+                "agent_result",
+            }
+        )
         self._depth = depth
 
     # 派生子 agent，前台时阻塞直到完成并返回结果，后台时立即返回 run_id
@@ -118,6 +141,12 @@ class SpawnAgentTool(BaseTool):
         profile: AgentProfile | None = None
         if p.subagent_type:
             profile = _profile_loader.load(p.subagent_type)
+            if profile is None:
+                return ToolResult(
+                    content=f"Unknown or invalid subagent profile: {p.subagent_type}",
+                    is_error=True,
+                    error_type="schema_error",
+                )
 
         child_run_id = new_run_id()
         child_context = ExecutionContext(
@@ -159,7 +188,12 @@ class SpawnAgentTool(BaseTool):
         if p.run_in_background:
             task: asyncio.Task[None] = asyncio.create_task(
                 self._run_background(
-                    child_loop, child_context, child_bus, child_run_path, child_run_id
+                    child_loop,
+                    child_context,
+                    child_bus,
+                    child_run_path,
+                    child_run_id,
+                    child_registry,
                 )
             )
             self._task_registry.register(child_run_id, task, child_context)
@@ -170,9 +204,12 @@ class SpawnAgentTool(BaseTool):
                 )
             )
 
-        async with EventWriter(child_run_path / "events.jsonl") as writer:
-            writer.subscribe(child_bus)
-            await child_loop.run(child_context)
+        try:
+            async with EventWriter(child_run_path / "events.jsonl") as writer:
+                writer.subscribe(child_bus)
+                await child_loop.run(child_context)
+        finally:
+            await child_registry.aclose()
 
         await self._parent_bus.publish(
             SubagentFinishedEvent(
@@ -204,10 +241,14 @@ class SpawnAgentTool(BaseTool):
         bus: EventBus,
         run_path: Path,
         run_id: str,
+        registry: ToolRegistry,
     ) -> None:
-        async with EventWriter(run_path / "events.jsonl") as writer:
-            writer.subscribe(bus)
-            await loop.run(context)
+        try:
+            async with EventWriter(run_path / "events.jsonl") as writer:
+                writer.subscribe(bus)
+                await loop.run(context)
+        finally:
+            await registry.aclose()
         await self._parent_bus.publish(
             SubagentFinishedEvent(
                 run_id=run_id,
@@ -226,12 +267,14 @@ class SpawnAgentTool(BaseTool):
     ) -> ToolRegistry:
         from kama_claude.core.task.manager import TaskManager
 
-        allowed: set[str] | None = (
-            set(profile.allowed_tools) if profile and profile.allowed_tools else None
+        profile_allowed: set[str] | None = (
+            set(profile.allowed_tools) if profile is not None else None
         )
 
         def _allowed(name: str) -> bool:
-            return allowed is None or name in allowed
+            within_global_cap = name in self._subagent_allowed_tools
+            within_profile = profile_allowed is None or name in profile_allowed
+            return within_global_cap and within_profile
 
         registry = ToolRegistry()
         _all_tools = [
@@ -243,6 +286,13 @@ class SpawnAgentTool(BaseTool):
         for t in _all_tools:
             if _allowed(t.name):
                 registry.register(t)
+
+        if self._web_config is not None and self._web_config.enabled:
+            for t in [WebSearchTool(self._web_config), WebFetchTool(self._web_config)]:
+                if _allowed(t.name):
+                    registry.register(t)
+            if self._web_config.browser_enabled and _allowed("browser"):
+                registry.register(BrowserTool(self._web_config))
 
         child_task_manager = TaskManager(self._runs_dir / child_run_id / ".tasks")
         for t in [
@@ -264,6 +314,8 @@ class SpawnAgentTool(BaseTool):
                 task_registry=self._task_registry,
                 runs_dir=self._runs_dir,
                 session_id=self._session_id,
+                web_config=self._web_config,
+                subagent_allowed_tools=sorted(self._subagent_allowed_tools),
                 depth=self._depth + 1,
             )
             if _allowed("spawn_agent"):

@@ -19,6 +19,18 @@ _DEFAULT_LLM_PROTOCOL = "anthropic"
 _DEFAULT_MODEL = "deepseek-chat"
 _DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
 _DEFAULT_SESSIONS_DIR = ".kama/sessions"
+_DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
+    "read_file",
+    "bash",
+    "write_file",
+    "list_dir",
+    "task_create",
+    "task_update",
+    "task_list",
+    "task_get",
+    "spawn_agent",
+    "agent_result",
+]
 
 
 @dataclass
@@ -31,6 +43,31 @@ class LoggingConfig:
 @dataclass
 class AgentConfig:
     max_steps: int = _DEFAULT_MAX_STEPS
+    # Global capability ceiling for every child agent. Role allowlists can only narrow it.
+    subagent_allowed_tools: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_SUBAGENT_ALLOWED_TOOLS)
+    )
+
+
+@dataclass
+class WebConfig:
+    enabled: bool = True
+    search_provider: str = "duckduckgo"  # "duckduckgo" | "brave" | "searxng"
+    search_base_url: str = ""             # required only for searxng
+    search_api_key: str = field(default="", repr=False)
+    search_max_results: int = 10
+    timeout_s: float = 15.0
+    fetch_max_chars: int = 12_000
+    fetch_max_bytes: int = 2_000_000
+    fetch_max_redirects: int = 5
+    browser_enabled: bool = True
+    browser_headless: bool = True
+    browser_timeout_s: float = 20.0
+    browser_idle_timeout_s: float = 600.0
+    browser_max_nodes: int = 100
+    browser_max_chars: int = 8_000
+    browser_extract_limit: int = 10
+    user_agent: str = "KamaClaude/0.0.1 (+https://github.com/)"
 
 
 @dataclass
@@ -55,7 +92,8 @@ class PermissionConfig:
 
 @dataclass
 class CompactionConfig:
-    auto_threshold: float = 0.0    # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
+    # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
+    auto_threshold: float = 0.0
     tool_result_limit: int = 8_000  # tool_result 截断触发字符数
     tool_result_keep: int = 4_000   # 截断后保留的前缀字符数
 
@@ -88,6 +126,7 @@ class KamaConfig:
     port: int = _DEFAULT_PORT
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
@@ -129,7 +168,7 @@ def get_config() -> KamaConfig:
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
     known_sections = {
-        "core", "logging", "agent", "llm", "trace", "permission",
+        "core", "logging", "agent", "web", "llm", "trace", "permission",
         "compaction", "mcp", "session",
     }
     unknown = set(data.keys()) - known_sections
@@ -172,7 +211,9 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         agent = data["agent"]
         if not isinstance(agent, dict):
             raise SystemExit("Config error: [agent] must be a table")
-        unknown_agent: set[str] = set(agent.keys()) - {"max_steps"}
+        unknown_agent: set[str] = set(agent.keys()) - {
+            "max_steps", "subagent_allowed_tools",
+        }
         if unknown_agent:
             raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
         if "max_steps" in agent:
@@ -180,6 +221,90 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, int) or val <= 0:
                 raise SystemExit("Config error: agent.max_steps must be a positive integer")
             config.agent.max_steps = val
+        if "subagent_allowed_tools" in agent:
+            val = agent["subagent_allowed_tools"]
+            if not isinstance(val, list) or not all(isinstance(item, str) for item in val):
+                raise SystemExit(
+                    "Config error: agent.subagent_allowed_tools must be an array of strings"
+                )
+            config.agent.subagent_allowed_tools = list(dict.fromkeys(val))
+
+    if "web" in data:
+        web = data["web"]
+        if not isinstance(web, dict):
+            raise SystemExit("Config error: [web] must be a table")
+        allowed_web_keys = {
+            "enabled",
+            "search_provider",
+            "search_base_url",
+            "search_max_results",
+            "timeout_s",
+            "fetch_max_chars",
+            "fetch_max_bytes",
+            "fetch_max_redirects",
+            "browser_enabled",
+            "browser_headless",
+            "browser_timeout_s",
+            "browser_idle_timeout_s",
+            "browser_max_nodes",
+            "browser_max_chars",
+            "browser_extract_limit",
+            "user_agent",
+        }
+        unknown_web: set[str] = set(web.keys()) - allowed_web_keys
+        if unknown_web:
+            raise SystemExit(f"Unknown [web] keys: {', '.join(sorted(unknown_web))}")
+        if "enabled" in web:
+            val = web["enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: web.enabled must be a boolean")
+            config.web.enabled = val
+        for key in ("browser_enabled", "browser_headless"):
+            if key in web:
+                val = web[key]
+                if not isinstance(val, bool):
+                    raise SystemExit(f"Config error: web.{key} must be a boolean")
+                setattr(config.web, key, val)
+        if "search_provider" in web:
+            val = web["search_provider"]
+            if val not in {"duckduckgo", "brave", "searxng"}:
+                raise SystemExit(
+                    "Config error: web.search_provider must be duckduckgo, brave, or searxng"
+                )
+            config.web.search_provider = val
+        for key in ("search_base_url", "user_agent"):
+            if key in web:
+                val = web[key]
+                if not isinstance(val, str):
+                    raise SystemExit(f"Config error: web.{key} must be a string")
+                setattr(config.web, key, val)
+        for key in (
+            "search_max_results",
+            "fetch_max_chars",
+            "fetch_max_bytes",
+            "fetch_max_redirects",
+            "browser_max_nodes",
+            "browser_max_chars",
+            "browser_extract_limit",
+        ):
+            if key in web:
+                val = web[key]
+                if not isinstance(val, int) or val <= 0:
+                    raise SystemExit(f"Config error: web.{key} must be a positive integer")
+                setattr(config.web, key, val)
+        if "timeout_s" in web:
+            val = web["timeout_s"]
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise SystemExit("Config error: web.timeout_s must be a positive number")
+            config.web.timeout_s = float(val)
+        for key in ("browser_timeout_s", "browser_idle_timeout_s"):
+            if key in web:
+                val = web[key]
+                if not isinstance(val, (int, float)) or val <= 0:
+                    raise SystemExit(
+                        f"Config error: web.{key} must be a positive number"
+                    )
+                setattr(config.web, key, float(val))
 
     if "llm" in data:
         llm = data["llm"]
@@ -268,7 +393,9 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         comp = data["compaction"]
         if not isinstance(comp, dict):
             raise SystemExit("Config error: [compaction] must be a table")
-        unknown_comp: set[str] = set(comp.keys()) - {"auto_threshold", "tool_result_limit", "tool_result_keep"}
+        unknown_comp: set[str] = set(comp.keys()) - {
+            "auto_threshold", "tool_result_limit", "tool_result_keep",
+        }
         if unknown_comp:
             raise SystemExit(f"Unknown [compaction] keys: {', '.join(sorted(unknown_comp))}")
         if "auto_threshold" in comp:
@@ -279,12 +406,16 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         if "tool_result_limit" in comp:
             val = comp["tool_result_limit"]
             if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: compaction.tool_result_limit must be a positive integer")
+                raise SystemExit(
+                    "Config error: compaction.tool_result_limit must be a positive integer"
+                )
             config.compaction.tool_result_limit = val
         if "tool_result_keep" in comp:
             val = comp["tool_result_keep"]
             if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: compaction.tool_result_keep must be a positive integer")
+                raise SystemExit(
+                    "Config error: compaction.tool_result_keep must be a positive integer"
+                )
             config.compaction.tool_result_keep = val
 
     if "mcp" in data:
@@ -305,7 +436,9 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit(f"Config error: mcp.servers[{i}].name must be a non-empty string")
             transport = srv.get("transport", "stdio")
             if transport not in ("stdio", "tcp"):
-                raise SystemExit(f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'")
+                raise SystemExit(
+                    f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'"
+                )
             s = McpServerConfig(name=name, transport=transport)
             if "command" in srv:
                 val = srv["command"]
@@ -381,6 +514,55 @@ def _apply_env(config: KamaConfig) -> None:
                 f"Config error: KAMA_MAX_STEPS must be an integer, got: {max_steps_str!r}"
             )
 
+    subagent_tools = os.environ.get("KAMA_SUBAGENT_ALLOWED_TOOLS")
+    if subagent_tools is not None:
+        config.agent.subagent_allowed_tools = list(
+            dict.fromkeys(item.strip() for item in subagent_tools.split(",") if item.strip())
+        )
+
+    web_enabled = os.environ.get("KAMA_WEB_ENABLED")
+    if web_enabled is not None:
+        config.web.enabled = web_enabled.lower() not in ("0", "false", "no")
+
+    web_provider = os.environ.get("KAMA_WEB_SEARCH_PROVIDER")
+    if web_provider is not None:
+        web_provider = web_provider.lower()
+        if web_provider not in {"duckduckgo", "brave", "searxng"}:
+            raise SystemExit(
+                "Config error: KAMA_WEB_SEARCH_PROVIDER must be duckduckgo, brave, or searxng"
+            )
+        config.web.search_provider = web_provider
+
+    web_base_url = os.environ.get("KAMA_WEB_SEARCH_BASE_URL")
+    if web_base_url is not None:
+        config.web.search_base_url = web_base_url
+
+    web_api_key = os.environ.get("KAMA_WEB_SEARCH_API_KEY")
+    if web_api_key is not None:
+        config.web.search_api_key = web_api_key
+
+    browser_enabled = os.environ.get("KAMA_BROWSER_ENABLED")
+    if browser_enabled is not None:
+        config.web.browser_enabled = browser_enabled.lower() not in ("0", "false", "no")
+
+    browser_headless = os.environ.get("KAMA_BROWSER_HEADLESS")
+    if browser_headless is not None:
+        config.web.browser_headless = browser_headless.lower() not in ("0", "false", "no")
+
+    browser_idle_timeout = os.environ.get("KAMA_BROWSER_IDLE_TIMEOUT_S")
+    if browser_idle_timeout is not None:
+        try:
+            value = float(browser_idle_timeout)
+        except ValueError as exc:
+            raise SystemExit(
+                "Config error: KAMA_BROWSER_IDLE_TIMEOUT_S must be a positive number"
+            ) from exc
+        if value <= 0:
+            raise SystemExit(
+                "Config error: KAMA_BROWSER_IDLE_TIMEOUT_S must be a positive number"
+            )
+        config.web.browser_idle_timeout_s = value
+
     default_model = os.environ.get("LLM_DEFAULT_MODEL")
     if default_model is not None:
         if not default_model.strip():
@@ -433,7 +615,8 @@ def _apply_env(config: KamaConfig) -> None:
             compact_threshold_val = float(compact_threshold)
             if not (0.0 <= compact_threshold_val <= 1.0):
                 raise SystemExit(
-                    f"Config error: KAMA_COMPACT_THRESHOLD must be between 0 and 1, got: {compact_threshold!r}"
+                    "Config error: KAMA_COMPACT_THRESHOLD must be between 0 and 1, "
+                    f"got: {compact_threshold!r}"
                 )
             config.compaction.auto_threshold = compact_threshold_val
         except ValueError:
@@ -447,12 +630,14 @@ def _apply_env(config: KamaConfig) -> None:
             compact_tool_limit_val = int(compact_tool_limit)
             if compact_tool_limit_val <= 0:
                 raise SystemExit(
-                    f"Config error: KAMA_COMPACT_TOOL_LIMIT must be a positive integer, got: {compact_tool_limit!r}"
+                    "Config error: KAMA_COMPACT_TOOL_LIMIT must be a positive integer, "
+                    f"got: {compact_tool_limit!r}"
                 )
             config.compaction.tool_result_limit = compact_tool_limit_val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_COMPACT_TOOL_LIMIT must be an integer, got: {compact_tool_limit!r}"
+                "Config error: KAMA_COMPACT_TOOL_LIMIT must be an integer, "
+                f"got: {compact_tool_limit!r}"
             )
 
     compact_tool_keep = os.environ.get("KAMA_COMPACT_TOOL_KEEP")
@@ -461,10 +646,12 @@ def _apply_env(config: KamaConfig) -> None:
             compact_tool_keep_val = int(compact_tool_keep)
             if compact_tool_keep_val <= 0:
                 raise SystemExit(
-                    f"Config error: KAMA_COMPACT_TOOL_KEEP must be a positive integer, got: {compact_tool_keep!r}"
+                    "Config error: KAMA_COMPACT_TOOL_KEEP must be a positive integer, "
+                    f"got: {compact_tool_keep!r}"
                 )
             config.compaction.tool_result_keep = compact_tool_keep_val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_COMPACT_TOOL_KEEP must be an integer, got: {compact_tool_keep!r}"
+                "Config error: KAMA_COMPACT_TOOL_KEEP must be an integer, "
+                f"got: {compact_tool_keep!r}"
             )

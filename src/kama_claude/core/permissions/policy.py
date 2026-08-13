@@ -50,6 +50,9 @@ DEFAULT_POLICIES: dict[str, ToolPolicy] = {
     "read_file":  ToolPolicy(default=PermissionDecision.ALLOW),
     "list_dir":   ToolPolicy(default=PermissionDecision.ALLOW),
     "note_save":  ToolPolicy(default=PermissionDecision.ALLOW),
+    "web_search": ToolPolicy(default=PermissionDecision.ALLOW),
+    "web_fetch":  ToolPolicy(default=PermissionDecision.ALLOW),
+    "browser":    ToolPolicy(default=PermissionDecision.ALLOW),
 }
 
 # 未在 DEFAULT_POLICIES 中登记的工具的兜底策略
@@ -62,6 +65,9 @@ _PREVIEW_KEY: dict[str, str] = {
     "write_file": "path",
     "list_dir":   "path",
     "note_save":  "content",
+    "web_search": "query",
+    "web_fetch":  "url",
+    "browser":    "action",
 }
 _PREVIEW_MAX = 60
 
@@ -89,6 +95,9 @@ def evaluate(
 
     if policy is None:
         return _UNKNOWN_TOOL_DEFAULT
+
+    if tool_name == "browser" and params.get("action") in {"click", "type"}:
+        return PermissionDecision.ASK
 
     command = str(params.get("command", "")) if tool_name == "bash" else ""
 

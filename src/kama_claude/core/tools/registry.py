@@ -25,3 +25,11 @@ class ToolRegistry:
             }
             for tool in self._tools.values()
         ]
+
+    # run 结束时释放所有有状态工具；单个工具清理失败不阻止其他工具关闭
+    async def aclose(self) -> None:
+        for tool in self._tools.values():
+            try:
+                await tool.aclose()
+            except Exception:
+                continue

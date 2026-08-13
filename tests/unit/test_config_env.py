@@ -194,3 +194,27 @@ def test_invalid_llm_protocol_rejected(
 
     with pytest.raises(SystemExit, match="LLM_PROTOCOL"):
         get_config()
+
+
+# 功能：联网配置与子 agent 能力上限可通过 TOML 显式控制
+# 设计：同时验证 provider、抓取上限和工具列表，避免新增配置被严格键检查拒绝
+def test_web_and_subagent_tool_policy_toml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toml_path = tmp_path / "kama.toml"
+    toml_path.write_text(
+        '[agent]\nsubagent_allowed_tools = ["read_file", "web_search"]\n'
+        '[web]\nsearch_provider = "searxng"\n'
+        'search_base_url = "https://search.example.com"\nfetch_max_chars = 6000\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KAMA_CONFIG", str(toml_path))
+
+    cfg = get_config()
+
+    assert cfg.agent.subagent_allowed_tools == ["read_file", "web_search"]
+    assert cfg.web.search_provider == "searxng"
+    assert cfg.web.search_base_url == "https://search.example.com"
+    assert cfg.web.fetch_max_chars == 6000

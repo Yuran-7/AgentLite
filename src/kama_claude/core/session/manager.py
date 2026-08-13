@@ -24,6 +24,7 @@ from kama_claude.core.skills.loader import SkillLoader
 if TYPE_CHECKING:
     from kama_claude.core.llm.base import LLMProvider
     from kama_claude.core.runner import AgentRunner
+    from kama_claude.core.tools.builtin.browser_session import BrowserSessionManager
 
 SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
@@ -43,11 +44,13 @@ class SessionManager:
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
         provider: LLMProvider | None = None,
+        browser_manager: BrowserSessionManager | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
         self._provider = provider
+        self._browser_manager = browser_manager
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
@@ -133,6 +136,8 @@ class SessionManager:
             session.updated_at = _now()
             if session.mode == "one_shot":
                 session.status = "closed"
+                if self._browser_manager is not None:
+                    await self._browser_manager.close_session(sid)
                 await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
             else:
                 session.status = "waiting_for_input"
@@ -154,6 +159,8 @@ class SessionManager:
             raise HandlerError(SESSION_BUSY, "session busy")
         async with lock:
             session.status = "closed"
+            if self._browser_manager is not None:
+                await self._browser_manager.close_session(sid)
             session.updated_at = _now()
             self._store.write_meta(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))

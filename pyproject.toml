@@ -17,6 +17,7 @@ dependencies = [
     "openai>=1.0",         # OpenAI-compatible Chat Completions SDK
     "textual>=0.75",       # 终端 UI 框架（kama-tui）
     "httpx[socks]>=0.28.1",
+    "playwright>=1.50,<2",
 ]
 
 # 安装后可在 PATH 中执行的入口：`kama` / `kama-core` / `kama-tui`

@@ -149,6 +149,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `type` | `string` | no |
 | `goal` | `string` | yes |
+| `workspace_root` | `string | null` | no |
 
 ```json
 {
@@ -162,6 +163,18 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "goal": {
       "title": "Goal",
       "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
     }
   },
   "required": [
@@ -338,6 +351,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `mode` | `string` | no |
 | `title` | `string` | no |
+| `workspace_root` | `string | null` | no |
 
 ```json
 {
@@ -361,6 +375,18 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "default": "",
       "title": "Title",
       "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
     }
   },
   "title": "SessionCreateCommand",
@@ -388,6 +414,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `session_id` | `string` | yes |
 | `status` | `string` | yes |
+| `workspace_root` | `string | null` | no |
 
 ```json
 {
@@ -404,6 +431,18 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       ],
       "title": "Status",
       "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
     }
   },
   "required": [
@@ -424,6 +463,89 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "result": {
     "session_id": "sess-abc123def456",
     "status": "active"
+  }
+}
+```
+
+### SessionSetWorkspaceCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `workspace_root` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.set_workspace",
+      "default": "session.set_workspace",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "workspace_root": {
+      "title": "Workspace Root",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "workspace_root"
+  ],
+  "title": "SessionSetWorkspaceCommand",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "u-4-workspace",
+  "method": "session.set_workspace",
+  "params": {
+    "session_id": "sess-abc123def456",
+    "workspace_root": "D:\\path\\to\\repo"
+  }
+}
+```
+
+### SessionSetWorkspaceResult
+
+| Field | Type | Required |
+|---|---|---|
+| `workspace_root` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "workspace_root": {
+      "title": "Workspace Root",
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace_root"
+  ],
+  "title": "SessionSetWorkspaceResult",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "u-4-workspace",
+  "result": {
+    "workspace_root": "D:\\path\\to\\repo"
   }
 }
 ```
@@ -1435,6 +1557,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 | `type` | `string` | no |
 | `session_id` | `string` | yes |
 | `mode` | `string` | yes |
+| `workspace_root` | `string | null` | no |
 | `ts` | `string` | yes |
 
 ```json
@@ -1453,6 +1576,18 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
     "mode": {
       "title": "Mode",
       "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
     },
     "ts": {
       "title": "Ts",
@@ -1476,6 +1611,58 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
   "type": "session.created",
   "session_id": "sess-abc123def456",
   "mode": "chat",
+  "ts": "2026-05-16T10:00:00.001Z"
+}
+```
+
+### SessionWorkspaceSetEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `workspace_root` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.workspace_set",
+      "default": "session.workspace_set",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "workspace_root": {
+      "title": "Workspace Root",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "workspace_root",
+    "ts"
+  ],
+  "title": "SessionWorkspaceSetEvent",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "type": "session.workspace_set",
+  "session_id": "sess-abc123def456",
+  "workspace_root": "D:\\path\\to\\repo",
   "ts": "2026-05-16T10:00:00.001Z"
 }
 ```
@@ -1684,3 +1871,4 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 | -32602 | Invalid Params | Parameter validation failed |
 | -32603 | Internal Error | Handler raised an unhandled exception |
 | -32000 | Application Error | e.g. another run already in progress |
+| -32013 | Session Workspace Already Set | A session cannot switch workspaces |

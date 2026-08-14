@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -15,6 +16,7 @@ class ExecutionContext:
     session_notes: str = ""
     global_context: str = ""
     project_context: str = ""
+    workspace_root: Path | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     step: int = 0
     status: str = "running"  # "running" | "success" | "failed"
@@ -37,6 +39,12 @@ class ExecutionContext:
             parts.append("\n\n## Global Context\n" + self.global_context.strip())
         if self.project_context.strip():
             parts.append("\n\n## Project Context\n" + self.project_context.strip())
+        if self.workspace_root is not None:
+            parts.append(
+                "\n\n## Workspace\n"
+                f"Root: {self.workspace_root}\n"
+                "Resolve relative file and shell paths from this workspace root."
+            )
         if self.session_notes.strip():
             parts.append(
                 "\n\n## Session Notes\n"

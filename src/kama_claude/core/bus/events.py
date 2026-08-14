@@ -112,6 +112,14 @@ class SessionCreatedEvent(BaseModel):
     type: Literal["session.created"] = "session.created"
     session_id: str
     mode: str
+    workspace_root: str | None = None
+    ts: str
+
+
+class SessionWorkspaceSetEvent(BaseModel):
+    type: Literal["session.workspace_set"] = "session.workspace_set"
+    session_id: str
+    workspace_root: str
     ts: str
 
 
@@ -222,6 +230,7 @@ Event = Annotated[
     | LlmModelSelectedEvent
     | LogLineEvent
     | SessionCreatedEvent
+    | SessionWorkspaceSetEvent
     | SessionMessageReceivedEvent
     | SessionWaitingForInputEvent
     | SessionResumedEvent

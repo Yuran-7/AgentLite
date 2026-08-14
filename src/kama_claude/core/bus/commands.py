@@ -29,6 +29,7 @@ class CoreShutdownResult(BaseModel):
 class AgentRunCommand(BaseModel):
     type: Literal["agent.run"] = "agent.run"
     goal: str
+    workspace_root: str | None = None
 
 
 class AgentRunResult(BaseModel):
@@ -51,11 +52,23 @@ class SessionCreateCommand(BaseModel):
     type: Literal["session.create"] = "session.create"
     mode: SessionMode = "chat"
     title: str = ""
+    workspace_root: str | None = None
 
 
 class SessionCreateResult(BaseModel):
     session_id: str
     status: SessionStatus
+    workspace_root: str | None = None
+
+
+class SessionSetWorkspaceCommand(BaseModel):
+    type: Literal["session.set_workspace"] = "session.set_workspace"
+    session_id: str
+    workspace_root: str
+
+
+class SessionSetWorkspaceResult(BaseModel):
+    workspace_root: str
 
 
 class SessionSendMessageCommand(BaseModel):
@@ -115,6 +128,7 @@ Command = Annotated[
     | AgentRunCommand
     | EventSubscribeCommand
     | SessionCreateCommand
+    | SessionSetWorkspaceCommand
     | SessionSendMessageCommand
     | SessionGetHistoryCommand
     | SessionCloseCommand

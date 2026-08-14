@@ -4,15 +4,17 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kama_claude.core.bus.envelope import HandlerError
+from kama_claude.core.bus.envelope import INVALID_PARAMS, HandlerError
 from kama_claude.core.bus.events import (
     SessionClosedEvent,
     SessionCreatedEvent,
     SessionMessageReceivedEvent,
     SessionResumedEvent,
     SessionWaitingForInputEvent,
+    SessionWorkspaceSetEvent,
     SkillInvokedEvent,
 )
 from kama_claude.core.events.bus import EventBus
@@ -29,11 +31,34 @@ if TYPE_CHECKING:
 SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
 SESSION_BUSY = -32012
+SESSION_WORKSPACE_ALREADY_SET = -32013
 
 
 # 返回当前 UTC 时间的 ISO 8601 字符串
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# 将可选工作区规范化为绝对目录路径，无工作区时返回 None
+def _normalize_workspace_root(workspace_root: str | None) -> str | None:
+    if workspace_root is None or not workspace_root.strip():
+        return None
+    candidate = Path(workspace_root).expanduser()
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HandlerError(
+            INVALID_PARAMS,
+            "workspace_root does not exist or cannot be resolved",
+            {"workspace_root": workspace_root},
+        ) from exc
+    if not resolved.is_dir():
+        raise HandlerError(
+            INVALID_PARAMS,
+            "workspace_root must be a directory",
+            {"workspace_root": workspace_root},
+        )
+    return str(resolved)
 
 
 class SessionManager:
@@ -56,9 +81,15 @@ class SessionManager:
         self._skill_loader = SkillLoader()
 
     # 创建新 session 并写入 meta.json
-    async def create(self, mode: SessionMode, title: str = "") -> Session:
+    async def create(
+        self,
+        mode: SessionMode,
+        title: str = "",
+        workspace_root: str | None = None,
+    ) -> Session:
         sid = f"sess-{uuid.uuid4().hex[:12]}"
         ts = _now()
+        normalized_workspace = _normalize_workspace_root(workspace_root)
         session = Session(
             id=sid,
             mode=mode,
@@ -66,13 +97,59 @@ class SessionManager:
             title=title,
             created_at=ts,
             updated_at=ts,
+            workspace_root=normalized_workspace,
             run_ids=[],
         )
         self._sessions[sid] = session
         self._locks[sid] = asyncio.Lock()
         self._store.write_meta(session)
-        await self._bus.publish(SessionCreatedEvent(session_id=sid, mode=mode, ts=ts))
+        await self._bus.publish(
+            SessionCreatedEvent(
+                session_id=sid,
+                mode=mode,
+                workspace_root=normalized_workspace,
+                ts=ts,
+            )
+        )
         return session
+
+    # 为未绑定工作区的空闲 session 首次设置工作区并持久化
+    async def set_workspace(self, sid: str, workspace_root: str) -> str:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+
+        async with lock:
+            if session.status == "closed":
+                raise HandlerError(SESSION_CLOSED, "session already closed")
+
+            normalized_workspace = _normalize_workspace_root(workspace_root)
+            if normalized_workspace is None:
+                raise HandlerError(INVALID_PARAMS, "workspace_root must not be empty")
+            if session.workspace_root == normalized_workspace:
+                return normalized_workspace
+            if session.workspace_root is not None:
+                raise HandlerError(
+                    SESSION_WORKSPACE_ALREADY_SET,
+                    "session workspace is already set; create a new session to switch it",
+                    {
+                        "workspace_root": session.workspace_root,
+                        "requested_workspace_root": normalized_workspace,
+                    },
+                )
+
+            session.workspace_root = normalized_workspace
+            session.updated_at = _now()
+            self._store.write_meta(session)
+            await self._bus.publish(
+                SessionWorkspaceSetEvent(
+                    session_id=sid,
+                    workspace_root=normalized_workspace,
+                    ts=session.updated_at,
+                )
+            )
+            return normalized_workspace
 
     # 处理用户消息，追加 thread 并启动一次 agent run
     async def send_message(self, sid: str, content: str, *, run_id: str | None = None) -> str:

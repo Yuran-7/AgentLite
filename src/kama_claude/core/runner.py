@@ -96,6 +96,7 @@ class AgentRunner:
         bus: EventBus | None = None,
         child_runs_dir: Path | None = None,
         session_id: str = "",
+        workspace_root: Path | None = None,
         tool_whitelist: list[str] | None = None,
     ) -> ToolRegistry:
         allowed: set[str] | None = (
@@ -111,7 +112,12 @@ class AgentRunner:
             return allowed is None or name in allowed
 
         registry = ToolRegistry()
-        for t in [ReadFileTool(), ShellTool(), WriteFileTool(), ListDirTool()]:
+        for t in [
+            ReadFileTool(workspace_root),
+            ShellTool(workspace_root),
+            WriteFileTool(workspace_root),
+            ListDirTool(workspace_root),
+        ]:
             if _ok(t.name):
                 registry.register(t)
         if self._config.web.enabled:
@@ -155,6 +161,7 @@ class AgentRunner:
                         task_registry=self._task_registry,
                         runs_dir=runs_dir,
                         session_id=session_id,
+                        workspace_root=workspace_root,
                         web_config=self._config.web,
                         subagent_allowed_tools=self._config.agent.subagent_allowed_tools,
                         depth=0,
@@ -195,8 +202,17 @@ class AgentRunner:
             notes = ""
         run_path.mkdir(parents=True, exist_ok=True)
 
+        workspace_root = (
+            Path(session.workspace_root)
+            if session is not None and session.workspace_root is not None
+            else None
+        )
         global_ctx = load_context_file(Path("~/.kama/context.md").expanduser())
-        project_ctx = load_context_file(Path(".kama/context.md"))
+        project_ctx = (
+            load_context_file(workspace_root / ".kama" / "context.md")
+            if workspace_root is not None
+            else ""
+        )
 
         task_manager = TaskManager(run_path / ".tasks")
 
@@ -214,6 +230,7 @@ class AgentRunner:
             session_notes=notes,
             global_context=global_ctx,
             project_context=project_ctx,
+            workspace_root=workspace_root,
             system_prompt_override=system_prompt_override,
         )
         prefill_len = len(history)
@@ -251,6 +268,7 @@ class AgentRunner:
                     bus=bus,
                     child_runs_dir=child_runs_dir,
                     session_id=session_id_str,
+                    workspace_root=workspace_root,
                     tool_whitelist=tool_whitelist,
                 )
                 session_dir = (

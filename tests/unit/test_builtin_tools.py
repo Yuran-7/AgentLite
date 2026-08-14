@@ -57,6 +57,18 @@ async def test_shell_success_stdout() -> None:
     assert "hello" in result.content
 
 
+# 功能：验证设置工作目录后 shell 子进程继承该目录
+# 设计：由 Python 子进程输出 os.getcwd，跨 Windows/POSIX 验证 cwd 注入而不依赖 shell 专属命令
+@pytest.mark.asyncio
+async def test_shell_uses_working_directory(tmp_path: Path) -> None:
+    result = await ShellTool(tmp_path).invoke(
+        {"command": 'python -c "import os; print(os.getcwd())"'}
+    )
+
+    assert not result.is_error
+    assert str(tmp_path.resolve()).lower() in result.content.strip().lower()
+
+
 # 功能：验证非零退出码时 is_error=True 且 content 包含退出码标注
 # 设计：`exit 2` 是最简单的非零退出；不依赖任何外部命令行为
 @pytest.mark.asyncio
@@ -98,6 +110,23 @@ async def test_write_file_creates_and_returns_size(tmp_path: Path) -> None:
     assert not result.is_error
     assert "11" in result.content  # "hello world" = 11 bytes
     assert target.read_text() == "hello world"
+
+
+# 功能：验证 write_file 和 list_dir 都从注入工作目录解析相对路径
+# 设计：先相对写入再相对列目录，以一个闭环覆盖两个工具共享的工作区路径解析规则
+@pytest.mark.asyncio
+async def test_file_tools_use_working_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    written = await WriteFileTool(workspace).invoke(
+        {"path": "src/new.py", "content": "value = 1"}
+    )
+    listed = await ListDirTool(workspace).invoke({"path": "src"})
+
+    assert not written.is_error
+    assert (workspace / "src" / "new.py").read_text() == "value = 1"
+    assert "new.py" in listed.content
 
 
 # 功能：验证 write_file 自动创建不存在的父目录

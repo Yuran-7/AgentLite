@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,43 @@ from kama_claude.core.transport.socket_client import IpcError, SocketClient
 
 def _preview(s: str, n: int) -> str:
     return s[:n] + "…" if len(s) > n else s
+
+
+# 将秒数压缩为适合单行状态栏的时长文本
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, whole_seconds = divmod(int(seconds), 60)
+    return f"{minutes}m{whole_seconds:02d}s"
+
+
+# 将 token 数量压缩为 K/M 单位，保留有意义的一位小数
+def _format_token_count(count: int) -> str:
+    if count >= 1_000_000:
+        value = count / 1_000_000
+        compact = f"{value:.0f}" if value >= 100 else f"{value:.1f}".rstrip("0").rstrip(".")
+        return f"{compact}M"
+    if count >= 1_000:
+        value = count / 1_000
+        compact = f"{value:.0f}" if value >= 100 else f"{value:.1f}".rstrip("0").rstrip(".")
+        return f"{compact}K"
+    return str(count)
+
+
+# 将 TUI 中输入的工作区参数解析为本机绝对目录
+def _resolve_workspace_argument(argument: str) -> str:
+    value = argument.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1].strip()
+    if not value:
+        raise ValueError("workspace path is required")
+    try:
+        resolved = Path(value).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"workspace does not exist or cannot be resolved: {value}") from exc
+    if not resolved.is_dir():
+        raise ValueError(f"workspace must be a directory: {value}")
+    return str(resolved)
 
 
 
@@ -335,8 +373,11 @@ class PermissionBlock(Static):
         self.post_message(self.Resolved(self, decision))
 
 
+SlashItem = tuple[str, str, bool]  # name, description, is_skill
+
+
 class SlashCompleteWidget(Static):
-    """斜杠命令自动补全弹出框：输入 / 时显示可用 skill 列表并支持键盘筛选与选择。"""
+    """斜杠命令自动补全弹出框：区分通用命令和 Skill，并支持筛选与选择。"""
 
     can_focus = False
 
@@ -357,17 +398,17 @@ class SlashCompleteWidget(Static):
             self.skill_name = skill_name
             super().__init__()
 
-    # 初始化，接收全量 (name, description) 列表
-    def __init__(self, items: list[tuple[str, str]]) -> None:
+    # 初始化，接收全量 (name, description, is_skill) 列表
+    def __init__(self, items: list[SlashItem]) -> None:
         super().__init__("")
         self._all_items = items
-        self._filtered: list[tuple[str, str]] = list(items)
+        self._filtered: list[SlashItem] = list(items)
         self._cursor = 0
 
     # 根据查询字符串筛选列表，重置光标并重新渲染
     def set_query(self, query: str) -> None:
         q = query.lower()
-        self._filtered = [(n, d) for n, d in self._all_items if not q or q in n.lower()]
+        self._filtered = [item for item in self._all_items if not q or q in item[0].lower()]
         self._cursor = min(self._cursor, max(0, len(self._filtered) - 1))
         if self.is_attached:
             self._redraw()
@@ -402,7 +443,11 @@ class SlashCompleteWidget(Static):
             self.update("[dim]  no matching commands[/dim]")
             return
         lines: list[str] = []
-        for i, (name, desc) in enumerate(self._filtered):
+        skills_heading_added = False
+        for i, (name, desc, is_skill) in enumerate(self._filtered):
+            if is_skill and not skills_heading_added:
+                lines.append("[dim]  Skills[/dim]")
+                skills_heading_added = True
             desc_part = f"  [dim]{desc}[/dim]" if desc else ""
             if i == self._cursor:
                 lines.append(f"  [bold cyan]❯ /{name}[/bold cyan]{desc_part}")
@@ -423,7 +468,7 @@ class ChatTextArea(TextArea):
         border: round $surface-lighten-2;
         background: $background;
         padding: 0 1;
-        margin: 1 2;
+        margin: 1 2 0 2;
         scrollbar-size-vertical: 1;
     }
     ChatTextArea:focus {
@@ -503,9 +548,9 @@ class ChatTextArea(TextArea):
 
 
 class KamaTuiApp(App[None]):
-    """KamaClaude TUI：终端滚屏风格，实时展示 agent 执行过程。"""
+    """AgentLite TUI：终端滚屏风格，实时展示 agent 执行过程。"""
 
-    TITLE = "KamaClaude"
+    TITLE = "AgentLite"
     BINDINGS = [
         Binding("ctrl+c", "quit", "quit", priority=True),
     ]
@@ -528,26 +573,40 @@ class KamaTuiApp(App[None]):
     Static.step-divider { color: $text-muted; padding: 0 2; }
     Static.run-ok { color: green; padding: 0 2 1 2; }
     Static.run-err { color: red; padding: 0 2 1 2; }
-    Static.usage { padding: 0 2; }
+    #context-status {
+        height: 1;
+        padding: 0 3;
+        margin-bottom: 1;
+        color: $text-muted;
+    }
     Static.log-line { padding: 0 2; }
     """
 
     _BANNER = (
-        "[bold cyan]██╗  ██╗ █████╗ ███╗   ███╗ █████╗  ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗[/bold cyan]\n"
-        "[bold cyan]██║ ██╔╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝[/bold cyan]\n"
-        "[bold cyan]█████╔╝ ███████║██╔████╔██║███████║██║     ██║     ███████║██║   ██║██║  ██║█████╗  [/bold cyan]\n"
-        "[bold cyan]██╔═██╗ ██╔══██║██║╚██╔╝██║██╔══██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"
-        "[bold cyan]██║  ██╗██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"
-        "[bold cyan]╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"
+        "[bold cyan] █████╗  ██████╗ ███████╗███╗   ██╗████████╗██╗     ██╗████████╗███████╗[/bold cyan]\n"
+        "[bold cyan]██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██║     ██║╚══██╔══╝██╔════╝[/bold cyan]\n"
+        "[bold cyan]███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ██║     ██║   ██║   █████╗  [/bold cyan]\n"
+        "[bold cyan]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██║     ██║   ██║   ██╔══╝  [/bold cyan]\n"
+        "[bold cyan]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████╗██║   ██║   ███████╗[/bold cyan]\n"
+        "[bold cyan]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝   ╚═╝   ╚══════╝[/bold cyan]\n"
         "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
     )
 
     # 初始化连接参数和 TUI 内部状态
-    def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        replay_run_id: str | None = None,
+        llm_protocol: str = "anthropic",
+        workspace_root: str | None = None,
+    ) -> None:
         super().__init__()
         self._host = host
         self._port = port
         self._replay_run_id = replay_run_id
+        self._llm_protocol = llm_protocol
+        self._workspace_root = workspace_root
         self._client: SocketClient | None = None
         self._current_llm: LLMStreamBlock | None = None
         self._pending_tool_blocks: dict[str, ToolCallBlock] = {}
@@ -555,14 +614,28 @@ class KamaTuiApp(App[None]):
         self._session_id: str | None = None
         self._busy = False
         self._last_context_pct: float = 0.0
-        self._slash_items: list[tuple[str, str]] = []
+        self._last_usage: tuple[int, int, int] = (0, 0, 0)
+        self._rounds = 0
+        self._steps = 0
+        self._llm_elapsed_s = 0.0
+        self._tool_elapsed_s = 0.0
+        self._ttft_total_s = 0.0
+        self._ttft_samples = 0
+        self._generation_elapsed_s = 0.0
+        self._throughput_output_tokens = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_cache_read_tokens = 0
+        self._llm_calls: dict[str, tuple[float, float | None]] = {}
+        self._slash_items: list[SlashItem] = []
         self._subagent_run_ids: dict[str, str] = {}  # child run_id -> description
         self._subagent_start_times: dict[str, float] = {}  # child run_id -> start time
 
     def compose(self) -> ComposeResult:
-        yield Label("[bold]KamaClaude[/bold]  [dim]connecting...[/dim]", id="header")
+        yield Label("[bold]AgentLite[/bold]  [dim]connecting...[/dim]", id="header")
         yield VerticalScroll(id="log-view")
         yield ChatTextArea(id="prompt", show_line_numbers=False)
+        yield Static(self._render_context_status(), id="context-status")
 
     def on_mount(self) -> None:
         self._slash_items = self._build_slash_items()
@@ -573,18 +646,29 @@ class KamaTuiApp(App[None]):
         prompt.border_title = "connecting..."
 
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
-    def _build_slash_items(self) -> list[tuple[str, str]]:
-        items: list[tuple[str, str]] = [("compact", "compress context window")]
+    def _build_slash_items(self) -> list[SlashItem]:
+        items: list[SlashItem] = [
+            ("new", "start a new session", False),
+            ("workspace", "attach a workspace to this session", False),
+            ("compact", "compress context window", False),
+        ]
         try:
             loader = SkillLoader()
             for skill in loader.list_all_skills():
                 desc = skill.description.splitlines()[0] if skill.description else ""
                 if len(desc) > 60:
                     desc = desc[:57] + "..."
-                items.append((skill.name, desc))
+                items.append((skill.name, desc, True))
         except Exception:
             pass
         return items
+
+    # 构造新会话参数，仅在用户设置工作区时携带 workspace_root
+    def _session_create_params(self) -> dict[str, Any]:
+        params: dict[str, Any] = {"mode": "chat"}
+        if self._workspace_root is not None:
+            params["workspace_root"] = self._workspace_root
+        return params
 
     # 根据 / 前缀查询字符串挂载、更新或移除自动补全弹窗
     def on_chat_text_area_slash_changed(self, event: ChatTextArea.SlashChanged) -> None:
@@ -656,6 +740,58 @@ class KamaTuiApp(App[None]):
         content = event.value.strip()
         if not content:
             return
+        # 检测 /new 指令
+        if content == "/new":
+            event.text_area.text = ""
+            if self._client is None or self._session_id is None or self._busy:
+                self._append(
+                    Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line")
+                )
+                return
+            self._busy = True
+            event.text_area.disabled = True
+            event.text_area.border_title = "starting a new session..."
+            self._update_header("connecting")
+            self.run_worker(self._do_new_session(), name="new_session", exclusive=False)
+            return
+        # 检测 /workspace 指令
+        if content == "/workspace" or content.startswith("/workspace "):
+            event.text_area.text = ""
+            argument = content[len("/workspace"):].strip()
+            if not argument or argument == "show":
+                current = self._workspace_root or "not set"
+                self._append(
+                    Static(
+                        f"[dim]workspace: {current}[/dim]"
+                        "\n[dim]usage: /workspace <directory>[/dim]",
+                        classes="log-line",
+                    )
+                )
+                return
+            if argument == "clear":
+                self._append(
+                    Static(
+                        "[yellow]workspace cannot be cleared from the current session; "
+                        "start the TUI without --workspace for an unbound session[/yellow]",
+                        classes="log-line",
+                    )
+                )
+                return
+            if self._client is None or self._session_id is None or self._busy:
+                self._append(
+                    Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line")
+                )
+                return
+            self._busy = True
+            event.text_area.disabled = True
+            event.text_area.border_title = "attaching workspace..."
+            self._update_header("running")
+            self.run_worker(
+                self._do_set_workspace(argument),
+                name="set_workspace",
+                exclusive=False,
+            )
+            return
         # 检测 /compact 指令
         if content == "/compact":
             event.text_area.text = ""
@@ -688,6 +824,8 @@ class KamaTuiApp(App[None]):
             summary_tokens = result.get("summary_tokens", 0)
             saved_tokens = result.get("saved_tokens", 0)
             self._last_context_pct = 0.0
+            self._last_usage = (int(summary_tokens or 0), 0, 0)
+            self._update_context_status()
             self._append(Static(
                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
                 f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
@@ -695,6 +833,100 @@ class KamaTuiApp(App[None]):
             ))
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+
+    # 在 worker 中校验本地目录并为当前 session 首次绑定工作区
+    async def _do_set_workspace(self, argument: str) -> None:
+        if self._client is None or self._session_id is None:
+            self._busy = False
+            return
+        try:
+            requested_workspace = _resolve_workspace_argument(argument)
+            result = await self._client.send_command(
+                "session.set_workspace",
+                {
+                    "session_id": self._session_id,
+                    "workspace_root": requested_workspace,
+                },
+            )
+            self._workspace_root = str(result["workspace_root"])
+            self._append(
+                Static(
+                    f"[bold green]workspace attached[/bold green]  "
+                    f"[dim]{self._workspace_root}[/dim]",
+                    classes="log-line",
+                )
+            )
+        except (IpcError, RuntimeError, OSError, ValueError, KeyError) as exc:
+            self._append(
+                Static(f"[red]workspace error: {exc}[/red]", classes="log-line")
+            )
+        finally:
+            self._busy = False
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = (
+                    "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                )
+                prompt.focus()
+            self._update_header("ready")
+
+    # 关闭旧会话、创建新会话并将 TUI 恢复到干净的初始状态
+    async def _do_new_session(self) -> None:
+        if self._client is None or self._session_id is None:
+            self._busy = False
+            return
+        old_session_id = self._session_id
+        self._session_id = None
+        try:
+            created = await self._client.send_command(
+                "session.create", self._session_create_params()
+            )
+            self._session_id = str(created["session_id"])
+            self._workspace_root = (
+                str(created["workspace_root"])
+                if created.get("workspace_root") is not None
+                else None
+            )
+            try:
+                await self._client.send_command(
+                    "session.close", {"session_id": old_session_id}
+                )
+            except (IpcError, RuntimeError, OSError):
+                log.warning("failed to close previous session session_id=%s", old_session_id)
+            self._break_llm()
+            self._pending_tool_blocks.clear()
+            self._pending_permission_blocks.clear()
+            self._subagent_run_ids.clear()
+            self._subagent_start_times.clear()
+            self._reset_session_stats()
+
+            log_view = self.query_one("#log-view", VerticalScroll)
+            await log_view.remove_children()
+            await log_view.mount(Static(self._BANNER, id="banner"))
+            self._update_context_status()
+            self._busy = False
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = (
+                    "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                )
+                prompt.focus()
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError, KeyError) as exc:
+            self._session_id = old_session_id
+            self._busy = False
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = "new session failed"
+                prompt.focus()
+            self._update_header("ready")
+            self._append(Static(f"[red]new session error: {exc}[/red]", classes="log-line"))
 
     # 在 worker 中执行 IPC 发送，使 App 消息泵在 agent 运行期间仍能处理键盘/焦点等消息
     async def _do_send_message(self, content: str) -> None:
@@ -766,18 +998,81 @@ class KamaTuiApp(App[None]):
         except Exception:
             return None
 
-    # 生成 context 占用率的彩色进度条字符串
-    def _render_ctx_bar(self, pct: float) -> str:
-        filled = int(pct * 20)
-        bar = "█" * filled + "░" * (20 - filled)
-        label = f"ctx:{pct * 100:.1f}%"
+    # 重置新会话的上下文和性能统计，不保留旧 session 数据
+    def _reset_session_stats(self) -> None:
+        self._last_context_pct = 0.0
+        self._last_usage = (0, 0, 0)
+        self._rounds = 0
+        self._steps = 0
+        self._llm_elapsed_s = 0.0
+        self._tool_elapsed_s = 0.0
+        self._ttft_total_s = 0.0
+        self._ttft_samples = 0
+        self._generation_elapsed_s = 0.0
+        self._throughput_output_tokens = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_cache_read_tokens = 0
+        self._llm_calls.clear()
+
+    # 生成输入框下方的分组统计，窄屏时从右向左整组隐藏
+    def _render_context_status(self, width: int | None = None) -> str:
+        pct = self._last_context_pct
         if pct >= 0.85:
             color = "bold red"
         elif pct >= 0.70:
             color = "yellow"
         else:
             color = "dim"
-        return f"[{color}]{label} {bar}[/{color}]"
+
+        average_ttft = (
+            self._ttft_total_s / self._ttft_samples if self._ttft_samples else 0.0
+        )
+        tokens_per_second = (
+            self._throughput_output_tokens / self._generation_elapsed_s
+            if self._generation_elapsed_s > 0
+            else 0.0
+        )
+        cache_hit_pct = (
+            self._total_cache_read_tokens / self._total_input_tokens * 100
+            if self._total_input_tokens > 0
+            else 0.0
+        )
+        plain_groups = [
+            f"ctx {pct * 100:.1f}%",
+            f"{self._rounds}轮 · {self._steps}步",
+            f"LLM {_format_duration(self._llm_elapsed_s)}"
+            f" · tools {_format_duration(self._tool_elapsed_s)}",
+            f"TTFT {_format_duration(average_ttft)} · {tokens_per_second:.0f} tok/s",
+            f"cache {cache_hit_pct:.0f}%",
+            f"↑{_format_token_count(self._total_input_tokens)}"
+            f" · ↓{_format_token_count(self._total_output_tokens)}",
+        ]
+        visible_count = len(plain_groups)
+        if width is not None and width > 0:
+            while (
+                visible_count > 1
+                and len("  |  ".join(plain_groups[:visible_count])) > width
+            ):
+                visible_count -= 1
+
+        rendered_groups = [
+            f"[{color}]{plain_groups[0]}[/{color}]",
+            *[f"[dim]{group}[/dim]" for group in plain_groups[1:visible_count]],
+        ]
+        return "  |  ".join(rendered_groups)
+
+    # 使用最近一次根 Agent usage 刷新固定状态栏，未挂载时静默跳过
+    def _update_context_status(self) -> None:
+        try:
+            status = self.query_one("#context-status", Static)
+        except NoMatches:
+            return
+        status.update(self._render_context_status(status.content_size.width))
+
+    # 终端尺寸变化时重算状态栏可见分组，避免窄屏截断指标
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_context_status()
 
     # 根据连接和运行状态刷新顶部标题
     def _update_header(self, state: str) -> None:
@@ -786,6 +1081,11 @@ class KamaTuiApp(App[None]):
         except NoMatches:
             return
         session = f"  [dim]{self._session_id}[/dim]" if self._session_id else ""
+        workspace = (
+            f"  [dim]ws:{Path(self._workspace_root).name}[/dim]"
+            if self._workspace_root is not None
+            else ""
+        )
         color = {
             "ready": "green",
             "running": "yellow",
@@ -793,8 +1093,8 @@ class KamaTuiApp(App[None]):
             "connecting": "dim",
         }.get(state, "dim")
         header.update(
-            f"[bold]KamaClaude[/bold]  [dim]{self._host}:{self._port}[/dim]"
-            f"{session}  [{color}]{state}[/{color}]"
+            f"[bold]AgentLite[/bold]  [dim]{self._host}:{self._port}[/dim]"
+            f"{session}{workspace}  [{color}]{state}[/{color}]"
         )
 
     # 管理 SocketClient 生命周期：连接、订阅事件、断线重连
@@ -834,8 +1134,7 @@ class KamaTuiApp(App[None]):
                         "run.*",
                         "step.*",
                         "tool.*",
-                        "llm.token",
-                        "llm.usage",
+                        "llm.*",
                         "log.*",
                         "permission.*",
                         "context.*",
@@ -847,8 +1146,15 @@ class KamaTuiApp(App[None]):
                 if self._replay_run_id is not None:
                     params["replay_from_run"] = self._replay_run_id
                 await client.send_command("event.subscribe", params)
-                created = await client.send_command("session.create", {"mode": "chat"})
+                created = await client.send_command(
+                    "session.create", self._session_create_params()
+                )
                 self._session_id = str(created["session_id"])
+                self._workspace_root = (
+                    str(created["workspace_root"])
+                    if created.get("workspace_root") is not None
+                    else None
+                )
                 log.info("session created session_id=%s", self._session_id)
                 prompt = self._prompt()
                 if prompt is not None:
@@ -859,7 +1165,7 @@ class KamaTuiApp(App[None]):
                 self._update_header("ready")
                 await loop_task
             except IpcError as e:
-                header.update(f"[bold]KamaClaude[/bold]  [red]subscribe error: {e}[/red]")
+                header.update(f"[bold]AgentLite[/bold]  [red]subscribe error: {e}[/red]")
             finally:
                 if not loop_task.done():
                     loop_task.cancel()
@@ -888,6 +1194,10 @@ class KamaTuiApp(App[None]):
         t = event.get("type", "")
 
         if t == "llm.token":
+            run_id = str(event.get("run_id") or "")
+            call = self._llm_calls.get(run_id)
+            if call is not None and call[1] is None:
+                self._llm_calls[run_id] = (call[0], time.monotonic())
             token = event.get("token", "")
             if self._current_llm is None:
                 llm_block = LLMStreamBlock()
@@ -899,6 +1209,9 @@ class KamaTuiApp(App[None]):
         self._break_llm()
 
         if t == "session.waiting_for_input":
+            session_id = str(event.get("session_id") or "")
+            if session_id and session_id != self._session_id:
+                return
             self._busy = False
             prompt = self._prompt()
             if prompt is not None:
@@ -906,9 +1219,13 @@ class KamaTuiApp(App[None]):
                 prompt.read_only = False
                 prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
                 prompt.focus()
+            self._update_context_status()
             self._update_header("ready")
 
         elif t == "session.closed":
+            session_id = str(event.get("session_id") or "")
+            if session_id and session_id != self._session_id:
+                return
             self._busy = False
             prompt = self._prompt()
             if prompt is not None:
@@ -924,6 +1241,11 @@ class KamaTuiApp(App[None]):
                 f"[dim]run[/dim]  [cyan]{run_id}[/cyan]  [dim]{_preview(goal, 96)}[/dim]",
                 classes="run-header",
             ))
+
+        elif t == "llm.model_selected":
+            run_id = str(event.get("run_id") or "")
+            if run_id not in self._subagent_run_ids:
+                self._llm_calls[run_id] = (time.monotonic(), None)
 
         elif t == "skill.invoked":
             skill_name = event.get("skill_name", "")
@@ -988,6 +1310,9 @@ class KamaTuiApp(App[None]):
         elif t == "tool.call_finished":
             tool_use_id = str(event.get("tool_use_id", ""))
             elapsed_ms = int(event.get("elapsed_ms") or 0)
+            run_id = str(event.get("run_id") or "")
+            if run_id not in self._subagent_run_ids:
+                self._tool_elapsed_s += elapsed_ms / 1_000
             output = str(event.get("output") or "")
             if tool_use_id in self._pending_tool_blocks:
                 tc_done = self._pending_tool_blocks.pop(tool_use_id)
@@ -996,15 +1321,22 @@ class KamaTuiApp(App[None]):
         elif t == "tool.call_failed":
             tool_use_id = str(event.get("tool_use_id", ""))
             elapsed_ms = int(event.get("elapsed_ms") or 0)
+            run_id = str(event.get("run_id") or "")
+            if run_id not in self._subagent_run_ids:
+                self._tool_elapsed_s += elapsed_ms / 1_000
             error_msg = str(event.get("error_message") or "")
             if tool_use_id in self._pending_tool_blocks:
                 tc_done = self._pending_tool_blocks.pop(tool_use_id)
                 tc_done.set_result(error_msg, elapsed_ms, is_error=True)
 
         elif t == "run.finished":
+            run_id = str(event.get("run_id") or "")
             status = event.get("status", "")
-            steps = event.get("steps", 0)
+            steps = int(event.get("steps") or 0)
             reason = event.get("reason") or ""
+            if run_id not in self._subagent_run_ids:
+                self._rounds += 1
+                self._steps += steps
             if status == "success":
                 self._append(Static(
                     f"[bold green]✓ completed[/bold green]  [dim]{steps} steps[/dim]",
@@ -1016,27 +1348,44 @@ class KamaTuiApp(App[None]):
                     f"[bold red]✗ failed[/bold red]{detail}  [dim]{steps} steps[/dim]",
                     classes="run-err",
                 ))
-
         elif t == "llm.usage":
-            run_id = event.get("run_id", "")
+            run_id = str(event.get("run_id") or "")
             if run_id in self._subagent_run_ids:
                 return
+            now = time.monotonic()
+            call = self._llm_calls.pop(run_id, None)
+            output_tokens = int(event.get("output_tokens") or 0)
+            if call is not None:
+                started_at, first_token_at = call
+                self._llm_elapsed_s += max(0.0, now - started_at)
+                if first_token_at is not None:
+                    self._ttft_total_s += max(0.0, first_token_at - started_at)
+                    self._ttft_samples += 1
+                    self._generation_elapsed_s += max(0.0, now - first_token_at)
+                    self._throughput_output_tokens += output_tokens
             pct = float(event.get("context_pct") or 0.0)
             self._last_context_pct = pct
-            ctx_bar = self._render_ctx_bar(pct)
-            self._append(Static(
-                f"[dim]  tokens  "
-                f"in={event.get('input_tokens')} "
-                f"out={event.get('output_tokens')} "
-                f"cache={event.get('cache_read_input_tokens')}[/dim]"
-                f"  {ctx_bar}",
-                classes="usage",
-            ))
+            input_tokens = int(event.get("input_tokens") or 0)
+            cache_read_tokens = int(event.get("cache_read_input_tokens") or 0)
+            cache_creation_tokens = int(event.get("cache_creation_input_tokens") or 0)
+            total_input_tokens = input_tokens
+            if self._llm_protocol == "anthropic":
+                total_input_tokens += cache_read_tokens + cache_creation_tokens
+            self._last_usage = (
+                total_input_tokens,
+                output_tokens,
+                cache_read_tokens,
+            )
+            self._total_input_tokens += total_input_tokens
+            self._total_output_tokens += output_tokens
+            self._total_cache_read_tokens += cache_read_tokens
 
         elif t == "context.compacted":
             orig = event.get("original_tokens", 0)
             summary = event.get("summary_tokens", 0)
             self._last_context_pct = 0.0
+            self._last_usage = (int(summary or 0), 0, 0)
+            self._update_context_status()
             self._append(Static(
                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
                 f"  [dim]original≈{orig} tokens → summary={summary} tokens[/dim]",
@@ -1098,5 +1447,10 @@ class KamaTuiApp(App[None]):
 
 # TUI 入口：读取配置并启动 KamaTuiApp
 def run(config: KamaConfig, replay_run_id: str | None = None) -> None:
-    app = KamaTuiApp(config.host, config.port, replay_run_id=replay_run_id)
+    app = KamaTuiApp(
+        config.host,
+        config.port,
+        replay_run_id=replay_run_id,
+        llm_protocol=config.llm.protocol,
+    )
     app.run()

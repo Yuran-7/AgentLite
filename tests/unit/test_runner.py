@@ -258,6 +258,37 @@ async def test_session_history_and_notes_injected(tmp_path: Path) -> None:
     assert not (tmp_path / "runs" / "run-new").exists()
 
 
+# 功能：验证 session 工作区决定项目 context 的加载位置并进入 system prompt
+# 设计：在工作区和 daemon cwd 解耦的目录写 context，用捕获型 provider 检查 runner 的作用域传播
+async def test_session_workspace_loads_project_context(tmp_path: Path) -> None:
+    from kama_claude.core.session.model import Session
+    from kama_claude.core.session.store import SessionStore
+
+    workspace = tmp_path / "repo"
+    context_dir = workspace / ".kama"
+    context_dir.mkdir(parents=True)
+    (context_dir / "context.md").write_text("workspace-specific rule", encoding="utf-8")
+    store = SessionStore(tmp_path / "sessions")
+    session = Session(
+        id="sess-workspace",
+        mode="chat",
+        status="active",
+        title="",
+        created_at="t",
+        updated_at="t",
+        workspace_root=str(workspace.resolve()),
+    )
+    store.append_message(session.id, "user", "inspect project")
+    provider = _CapturingProvider(LlmResponse(stop_reason="end_turn", text="done"))
+    runner = AgentRunner(_config(), provider=provider, runs_dir=tmp_path / "runs")
+
+    await runner.run_and_capture("inspect project", session=session, store=store)
+
+    assert provider.system is not None
+    assert "workspace-specific rule" in provider.system
+    assert str(workspace.resolve()) in provider.system
+
+
 # 功能：验证 session run 中注册了 note_save，工具调用会写入 notes.md
 # 设计：mock provider 第一步请求 note_save、第二步 end_turn，覆盖 runner→registry→tool invocation 的完整路径
 async def test_session_registers_note_save_tool(tmp_path: Path) -> None:

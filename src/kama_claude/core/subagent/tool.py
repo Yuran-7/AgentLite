@@ -96,6 +96,7 @@ class SpawnAgentTool(BaseTool):
         task_registry: BackgroundTaskRegistry,
         runs_dir: Path,
         session_id: str,
+        workspace_root: Path | None = None,
         web_config: WebConfig | None = None,
         subagent_allowed_tools: list[str] | None = None,
         depth: int = 0,
@@ -108,6 +109,7 @@ class SpawnAgentTool(BaseTool):
         self._task_registry = task_registry
         self._runs_dir = runs_dir
         self._session_id = session_id
+        self._workspace_root = workspace_root
         self._web_config = web_config
         self._subagent_allowed_tools = (
             {
@@ -156,6 +158,7 @@ class SpawnAgentTool(BaseTool):
             run_id=child_run_id,
             goal=p.prompt,
             max_steps=self._max_steps,
+            workspace_root=self._workspace_root,
             system_prompt_override=profile.system_prompt if profile else None,
         )
 
@@ -281,10 +284,10 @@ class SpawnAgentTool(BaseTool):
 
         registry = ToolRegistry()
         _all_tools = [
-            ReadFileTool(),
-            ShellTool(),
-            WriteFileTool(),
-            ListDirTool(),
+            ReadFileTool(self._workspace_root),
+            ShellTool(self._workspace_root),
+            WriteFileTool(self._workspace_root),
+            ListDirTool(self._workspace_root),
         ]
         for t in _all_tools:
             if _allowed(t.name):
@@ -317,6 +320,7 @@ class SpawnAgentTool(BaseTool):
                 task_registry=self._task_registry,
                 runs_dir=self._runs_dir,
                 session_id=self._session_id,
+                workspace_root=self._workspace_root,
                 web_config=self._web_config,
                 subagent_allowed_tools=sorted(self._subagent_allowed_tools),
                 depth=self._depth + 1,

@@ -24,6 +24,8 @@ from kama_claude.core.bus.commands import (
     SessionGetHistoryResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    SessionSetWorkspaceCommand,
+    SessionSetWorkspaceResult,
 )
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.bus.events import (
@@ -39,6 +41,7 @@ from kama_claude.core.bus.events import (
     SessionMessageReceivedEvent,
     SessionResumedEvent,
     SessionWaitingForInputEvent,
+    SessionWorkspaceSetEvent,
     StepFinishedEvent,
     StepStartedEvent,
     ToolCallFailedEvent,
@@ -132,6 +135,18 @@ def generate() -> str:
         "id": "u-4",
         "result": {"session_id": session_id, "status": "active"},
     }
+    workspace_root = "D:\\path\\to\\repo"
+    session_set_workspace_req_example = {
+        "jsonrpc": "2.0",
+        "id": "u-4-workspace",
+        "method": "session.set_workspace",
+        "params": {"session_id": session_id, "workspace_root": workspace_root},
+    }
+    session_set_workspace_resp_example = {
+        "jsonrpc": "2.0",
+        "id": "u-4-workspace",
+        "result": {"workspace_root": workspace_root},
+    }
     session_send_req_example = {
         "jsonrpc": "2.0",
         "id": "u-5",
@@ -181,6 +196,18 @@ def generate() -> str:
         _model_section("SessionCreateCommand", SessionCreateCommand, session_create_req_example),
         "\n",
         _model_section("SessionCreateResult", SessionCreateResult, session_create_resp_example),
+        "\n",
+        _model_section(
+            "SessionSetWorkspaceCommand",
+            SessionSetWorkspaceCommand,
+            session_set_workspace_req_example,
+        ),
+        "\n",
+        _model_section(
+            "SessionSetWorkspaceResult",
+            SessionSetWorkspaceResult,
+            session_set_workspace_resp_example,
+        ),
         "\n",
         _model_section("SessionSendMessageCommand", SessionSendMessageCommand, session_send_req_example),
         "\n",
@@ -245,6 +272,10 @@ def generate() -> str:
         _model_section("SessionCreatedEvent", SessionCreatedEvent,
             {"type": "session.created", "session_id": session_id, "mode": "chat", "ts": ts}),
         "\n",
+        _model_section("SessionWorkspaceSetEvent", SessionWorkspaceSetEvent,
+            {"type": "session.workspace_set", "session_id": session_id,
+             "workspace_root": workspace_root, "ts": ts}),
+        "\n",
         _model_section("SessionMessageReceivedEvent", SessionMessageReceivedEvent,
             {"type": "session.message_received", "session_id": session_id,
              "content": "总结 README.md", "ts": ts}),
@@ -267,6 +298,7 @@ def generate() -> str:
         "| -32602 | Invalid Params | Parameter validation failed |\n",
         "| -32603 | Internal Error | Handler raised an unhandled exception |\n",
         "| -32000 | Application Error | e.g. another run already in progress |\n",
+        "| -32013 | Session Workspace Already Set | A session cannot switch workspaces |\n",
     ]
     return "".join(sections)
 

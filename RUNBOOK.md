@@ -36,6 +36,30 @@ uv run kama core stop
 命令语法需要与当前平台一致。Windows 权限检查会识别盘符绝对路径、UNC 路径、
 `%USERPROFILE%`、`$env:USERPROFILE` 和 `Set-Location` 等越界形式。
 
+### 可选工作区
+
+Session 默认不绑定项目，适合通用对话；需要处理本地项目时可显式设置工作区：
+
+```bash
+uv run kama-tui --workspace .
+uv run kama chat --workspace D:\path\to\repo
+uv run kama run --workspace . --goal "检查测试失败原因"
+```
+
+如果启动 TUI 时未设置工作区，可以在当前会话空闲时首次绑定：
+
+```text
+/workspace D:\path\to\repo
+/workspace show
+```
+
+首次绑定会保留绑定前的聊天历史。为了避免不同项目的上下文混杂，已绑定的 session
+不能改绑或清除工作区；需要处理另一目录时应启动一个新的未绑定 TUI 会话。
+
+客户端会把工作区规范化为绝对目录，daemon 校验后写入 session `meta.json`。设置后，
+内置文件工具的相对路径、Shell 初始目录、项目 `.kama/context.md` 和子 Agent 都以该目录
+为基准；不传 `--workspace` 时不会自动把 daemon cwd 识别为项目工作区。
+
 ---
 
 ## 配置

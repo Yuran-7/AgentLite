@@ -60,7 +60,7 @@ async def _readline(prompt: str) -> str:
 
 
 # 异步核心：创建 chat session，循环读取用户输入并发送到 daemon；权限请求时优先处理审批
-async def _chat_async(config: KamaConfig) -> int:
+async def _chat_async(config: KamaConfig, workspace_root: str | None = None) -> int:
     client = SocketClient(config.host, config.port)
     try:
         await client.connect()
@@ -80,7 +80,10 @@ async def _chat_async(config: KamaConfig) -> int:
                 "scope": "global",
             },
         )
-        created = await client.send_command("session.create", {"mode": "chat"})
+        create_params: dict[str, Any] = {"mode": "chat"}
+        if workspace_root is not None:
+            create_params["workspace_root"] = workspace_root
+        created = await client.send_command("session.create", create_params)
         session_id = str(created["session_id"])
         print(f"[session: {session_id}]")
 
@@ -128,9 +131,9 @@ async def _chat_async(config: KamaConfig) -> int:
 
 
 # 执行 kama chat 命令
-def cmd_chat(config: KamaConfig) -> None:
+def cmd_chat(config: KamaConfig, workspace_root: str | None = None) -> None:
     try:
-        exit_code = asyncio.run(_chat_async(config))
+        exit_code = asyncio.run(_chat_async(config, workspace_root))
     except KeyboardInterrupt:
         sys.exit(130)
     sys.exit(exit_code)

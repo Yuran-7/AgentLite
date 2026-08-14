@@ -35,6 +35,8 @@ from kama_claude.core.bus.commands import (
     SessionGetHistoryResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    SessionSetWorkspaceCommand,
+    SessionSetWorkspaceResult,
 )
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.config import KamaConfig, get_config
@@ -111,7 +113,11 @@ class CoreApp:
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
         assert self._sessions is not None
         cmd = AgentRunCommand.model_validate(params)
-        session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
+        session = await self._sessions.create(
+            mode="one_shot",
+            title=cmd.goal[:40],
+            workspace_root=cmd.workspace_root,
+        )
         run_id = new_run_id()
         run_task = asyncio.create_task(
             self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
@@ -124,8 +130,27 @@ class CoreApp:
     async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
         assert self._sessions is not None
         cmd = SessionCreateCommand.model_validate(params)
-        session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
-        return SessionCreateResult(session_id=session.id, status=session.status)
+        session = await self._sessions.create(
+            mode=cmd.mode,
+            title=cmd.title,
+            workspace_root=cmd.workspace_root,
+        )
+        return SessionCreateResult(
+            session_id=session.id,
+            status=session.status,
+            workspace_root=session.workspace_root,
+        )
+
+    # 为已有且尚未绑定工作区的 session 设置工作区
+    async def _session_set_workspace_handler(
+        self, params: dict[str, Any]
+    ) -> SessionSetWorkspaceResult:
+        assert self._sessions is not None
+        cmd = SessionSetWorkspaceCommand.model_validate(params)
+        workspace_root = await self._sessions.set_workspace(
+            cmd.session_id, cmd.workspace_root
+        )
+        return SessionSetWorkspaceResult(workspace_root=workspace_root)
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
@@ -288,6 +313,7 @@ class CoreApp:
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
         server.register("session.create", self._session_create_handler)
+        server.register("session.set_workspace", self._session_set_workspace_handler)
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)

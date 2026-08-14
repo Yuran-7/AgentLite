@@ -33,17 +33,35 @@ def _setup_logging(level: str) -> None:
 
 # kama-tui 入口：解析 --replay 参数后启动 TUI 应用
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="kama-tui", description="KamaClaude TUI")
+    parser = argparse.ArgumentParser(prog="kama-tui", description="AgentLite TUI")
     parser.add_argument(
         "--replay",
         metavar="RUN_ID",
         help="Replay events from a past run on connect",
     )
+    parser.add_argument(
+        "--workspace",
+        metavar="PATH",
+        help="Optional workspace directory for this chat session",
+    )
     args = parser.parse_args()
+
+    workspace_root: str | None = None
+    if args.workspace is not None:
+        workspace = Path(args.workspace).expanduser()
+        if not workspace.exists() or not workspace.is_dir():
+            parser.error(f"workspace is not a directory: {args.workspace}")
+        workspace_root = str(workspace.resolve())
 
     config = get_config()
     _setup_logging(config.logging.level)
-    app = KamaTuiApp(config.host, config.port, replay_run_id=args.replay)
+    app = KamaTuiApp(
+        config.host,
+        config.port,
+        replay_run_id=args.replay,
+        llm_protocol=config.llm.protocol,
+        workspace_root=workspace_root,
+    )
     app.run()
 
 

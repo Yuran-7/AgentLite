@@ -17,6 +17,19 @@ async def test_read_existing_file(tmp_path: Path) -> None:
     assert result.content == "hello world"
 
 
+# 功能：验证设置工作目录后 read_file 会从该目录解析相对路径
+# 设计：不修改进程 cwd，仅向工具注入独立 repo，证明 session 工作区而非 daemon cwd 决定文件基准
+async def test_read_relative_path_from_working_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    source = workspace / "src" / "main.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("print('workspace')", encoding="utf-8")
+
+    result = await ReadFileTool(workspace).invoke({"path": "src/main.py"})
+
+    assert result.content == "print('workspace')"
+
+
 # 功能：验证文件不存在时抛出 FileNotFoundError 而非返回错误 ToolResult
 # 设计：传入不存在的路径，确认 ReadFileTool 不吞掉异常，让调用方（invoke_tool）负责错误分类和事件发布
 async def test_file_not_found_raises(tmp_path: Path) -> None:

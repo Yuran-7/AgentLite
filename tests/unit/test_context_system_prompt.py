@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from kama_claude.core.context import ExecutionContext
 
 
@@ -50,3 +52,14 @@ def test_session_notes_hint() -> None:
     ctx = _make_ctx(session_notes="some note")
     prompt = ctx.system_prompt("BASE")
     assert "note_save" in prompt
+
+
+# 功能：验证设置工作区时 system prompt 包含规范根目录和相对路径语义
+# 设计：使用 Path 字段生成提示词，确保 Coding 检索前置上下文能明确告知模型当前项目作用域
+def test_workspace_root_in_system_prompt() -> None:
+    root = Path("/tmp/example-workspace")
+    prompt = _make_ctx(workspace_root=root).system_prompt("BASE")
+
+    assert "## Workspace" in prompt
+    assert f"Root: {root}" in prompt
+    assert "relative file and shell paths" in prompt

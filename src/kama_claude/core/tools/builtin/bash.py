@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -105,6 +106,10 @@ class ShellTool(BaseTool):
         "required": ["command"],
     }
 
+    # 初始化可选工作目录，未设置时继续使用进程 cwd
+    def __init__(self, working_directory: Path | None = None) -> None:
+        self._working_directory = working_directory
+
     # 在子进程中执行 shell 命令，合并 stdout/stderr，超时或非零退出码时返回错误
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = ShellParams.model_validate(params)
@@ -114,6 +119,7 @@ class ShellTool(BaseTool):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *_shell_argv(command),
+                cwd=self._working_directory,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

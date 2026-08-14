@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from kama_claude.core.tools.base import BaseTool, ToolResult
+from kama_claude.core.tools.working_directory import resolve_tool_path
 
 _MAX_DEPTH = 4
 _MAX_ENTRIES = 200
@@ -40,6 +41,10 @@ class ListDirTool(BaseTool):
         "required": [],
     }
 
+    # 初始化可选工作目录，未设置时继续使用进程 cwd
+    def __init__(self, working_directory: Path | None = None) -> None:
+        self._working_directory = working_directory
+
     # 以树状格式列出目录内容，深度和条数有上限
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = ListDirParams.model_validate(params)
@@ -49,7 +54,7 @@ class ListDirTool(BaseTool):
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")
 
-        root = Path(path_str)
+        root = resolve_tool_path(path_str, self._working_directory)
         if not root.exists():
             raise FileNotFoundError(f"no such directory: {path_str}")
         if not root.is_dir():

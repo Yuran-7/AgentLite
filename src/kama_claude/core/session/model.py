@@ -15,6 +15,7 @@ class Session:
     title: str
     created_at: str
     updated_at: str
+    workspace_root: str | None = None
     run_ids: list[str] = field(default_factory=list)
 
     # 将 Session 转为可写入 meta.json 的普通 dict
@@ -26,6 +27,7 @@ class Session:
             "title": self.title,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "workspace_root": self.workspace_root,
             "run_ids": list(self.run_ids),
         }
 
@@ -39,5 +41,10 @@ class Session:
             title=str(data.get("title", "")),
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
+            workspace_root=(
+                str(data["workspace_root"])
+                if data.get("workspace_root") is not None
+                else None
+            ),
             run_ids=[str(x) for x in data.get("run_ids", [])],
         )

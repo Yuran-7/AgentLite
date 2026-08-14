@@ -25,11 +25,30 @@ def test_meta_roundtrip(tmp_path: Path) -> None:
         title="hello",
         created_at="t1",
         updated_at="t2",
+        workspace_root=str(tmp_path),
         run_ids=["run-1"],
     )
     store.write_meta(session)
     loaded = store.read_meta("sess-1")
     assert loaded == session
+
+
+# 功能：验证旧版 meta.json 缺少 workspace_root 时仍能恢复为无工作区 session
+# 设计：直接调用向后兼容反序列化路径，避免老会话在升级后因新增字段无法读取
+def test_meta_without_workspace_is_backward_compatible() -> None:
+    session = Session.from_dict(
+        {
+            "id": "sess-old",
+            "mode": "chat",
+            "status": "closed",
+            "title": "old",
+            "created_at": "t1",
+            "updated_at": "t2",
+            "run_ids": [],
+        }
+    )
+
+    assert session.workspace_root is None
 
 
 # 功能：验证含 tool_use/tool_result block 的 thread 消息能按 Anthropic 格式读回

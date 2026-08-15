@@ -49,24 +49,6 @@ def _format_token_count(count: int) -> str:
     return str(count)
 
 
-# 将 TUI 中输入的工作区参数解析为本机绝对目录
-def _resolve_workspace_argument(argument: str) -> str:
-    value = argument.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        value = value[1:-1].strip()
-    if not value:
-        raise ValueError("workspace path is required")
-    try:
-        resolved = Path(value).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"workspace does not exist or cannot be resolved: {value}") from exc
-    if not resolved.is_dir():
-        raise ValueError(f"workspace must be a directory: {value}")
-    return str(resolved)
-
-
-
-
 def _params_str(params: dict[str, Any]) -> str:
     return json.dumps(params, ensure_ascii=False, indent=2)
 
@@ -649,7 +631,6 @@ class KamaTuiApp(App[None]):
     def _build_slash_items(self) -> list[SlashItem]:
         items: list[SlashItem] = [
             ("new", "start a new session", False),
-            ("workspace", "attach a workspace to this session", False),
             ("compact", "compress context window", False),
         ]
         try:
@@ -663,7 +644,7 @@ class KamaTuiApp(App[None]):
             pass
         return items
 
-    # 构造新会话参数，仅在用户设置工作区时携带 workspace_root
+    # 构造新会话参数；入口默认已将当前目录作为 workspace
     def _session_create_params(self) -> dict[str, Any]:
         params: dict[str, Any] = {"mode": "chat"}
         if self._workspace_root is not None:
@@ -754,44 +735,6 @@ class KamaTuiApp(App[None]):
             self._update_header("connecting")
             self.run_worker(self._do_new_session(), name="new_session", exclusive=False)
             return
-        # 检测 /workspace 指令
-        if content == "/workspace" or content.startswith("/workspace "):
-            event.text_area.text = ""
-            argument = content[len("/workspace"):].strip()
-            if not argument or argument == "show":
-                current = self._workspace_root or "not set"
-                self._append(
-                    Static(
-                        f"[dim]workspace: {current}[/dim]"
-                        "\n[dim]usage: /workspace <directory>[/dim]",
-                        classes="log-line",
-                    )
-                )
-                return
-            if argument == "clear":
-                self._append(
-                    Static(
-                        "[yellow]workspace cannot be cleared from the current session; "
-                        "start the TUI without --workspace for an unbound session[/yellow]",
-                        classes="log-line",
-                    )
-                )
-                return
-            if self._client is None or self._session_id is None or self._busy:
-                self._append(
-                    Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line")
-                )
-                return
-            self._busy = True
-            event.text_area.disabled = True
-            event.text_area.border_title = "attaching workspace..."
-            self._update_header("running")
-            self.run_worker(
-                self._do_set_workspace(argument),
-                name="set_workspace",
-                exclusive=False,
-            )
-            return
         # 检测 /compact 指令
         if content == "/compact":
             event.text_area.text = ""
@@ -834,42 +777,6 @@ class KamaTuiApp(App[None]):
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
 
-    # 在 worker 中校验本地目录并为当前 session 首次绑定工作区
-    async def _do_set_workspace(self, argument: str) -> None:
-        if self._client is None or self._session_id is None:
-            self._busy = False
-            return
-        try:
-            requested_workspace = _resolve_workspace_argument(argument)
-            result = await self._client.send_command(
-                "session.set_workspace",
-                {
-                    "session_id": self._session_id,
-                    "workspace_root": requested_workspace,
-                },
-            )
-            self._workspace_root = str(result["workspace_root"])
-            self._append(
-                Static(
-                    f"[bold green]workspace attached[/bold green]  "
-                    f"[dim]{self._workspace_root}[/dim]",
-                    classes="log-line",
-                )
-            )
-        except (IpcError, RuntimeError, OSError, ValueError, KeyError) as exc:
-            self._append(
-                Static(f"[red]workspace error: {exc}[/red]", classes="log-line")
-            )
-        finally:
-            self._busy = False
-            prompt = self._prompt()
-            if prompt is not None:
-                prompt.disabled = False
-                prompt.read_only = False
-                prompt.border_title = (
-                    "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                )
-                prompt.focus()
             self._update_header("ready")
 
     # 关闭旧会话、创建新会话并将 TUI 恢复到干净的初始状态

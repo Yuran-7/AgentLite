@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from rich.markdown import Markdown
 from textual.app import App, ComposeResult
 from textual.widget import Widget
@@ -16,7 +14,6 @@ from kama_claude.tui.app import (
     ToolCallBlock,
     _param_summary,
     _preview,
-    _resolve_workspace_argument,
 )
 
 
@@ -76,43 +73,13 @@ def test_slash_items_put_new_session_first() -> None:
     )
 
 
-# 功能：验证 TUI 工作区参数支持空格、成对引号和相对目录并规范化为绝对路径
-# 设计：在临时 cwd 下解析带空格的真实目录，覆盖用户从终端输入常见 Windows 路径的方式
-def test_resolve_workspace_argument_normalizes_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace = tmp_path / "my repo"
-    workspace.mkdir()
-    monkeypatch.chdir(tmp_path)
-
-    assert _resolve_workspace_argument('"my repo"') == str(workspace.resolve())
-
-
-# 功能：验证 TUI 仅在用户设置工作区时把绝对路径发送给 session.create
-# 设计：直接检查纯参数构造方法，同时覆盖通用模式不携带字段和工作区模式携带字段
-def test_session_create_params_include_optional_workspace() -> None:
-    generic = KamaTuiApp("127.0.0.1", 9999)
-    scoped = KamaTuiApp(
-        "127.0.0.1",
-        9999,
-        workspace_root="C:\\repo",
-    )
-
-    assert generic._session_create_params() == {"mode": "chat"}  # type: ignore[attr-defined]
-    assert scoped._session_create_params() == {  # type: ignore[attr-defined]
-        "mode": "chat",
-        "workspace_root": "C:\\repo",
-    }
-
-
 # 功能：验证斜杠菜单将通用命令置顶，并在首个 Skill 前显示不可选中的分组标题
 # 设计：使用真实内建候选渲染菜单，比较文本位置并检查类别标记，不把标题混入导航列表
 def test_slash_menu_separates_general_commands_and_skills() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
     items = app._build_slash_items()  # type: ignore[attr-defined]
-    assert [item[2] for item in items[:3]] == [False, False, False]
-    assert all(item[2] for item in items[3:])
+    assert [item[2] for item in items[:2]] == [False, False]
+    assert all(item[2] for item in items[2:])
 
     popup = SlashCompleteWidget(items)
     popup._redraw()  # type: ignore[attr-defined]
@@ -120,44 +87,6 @@ def test_slash_menu_separates_general_commands_and_skills() -> None:
     assert rendered.index("/compact") < rendered.index("Skills")
     assert rendered.index("Skills") < rendered.index("/init")
     assert len(popup._filtered) == len(items)  # type: ignore[attr-defined]
-
-
-# 功能：验证 TUI 可为当前 session 补绑工作区并用 daemon 返回值刷新本地状态
-# 设计：挂载无网络测试应用并注入假 IPC 客户端，检查命令参数、提示、busy 恢复和 header 数据源
-async def test_set_workspace_updates_current_tui_session(tmp_path: Path) -> None:
-    class _FakeClient:
-        # 初始化 IPC 调用记录
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict[str, object]]] = []
-
-        # 记录工作区设置请求并返回规范化路径
-        async def send_command(
-            self, method: str, params: dict[str, object]
-        ) -> dict[str, object]:
-            self.calls.append((method, params))
-            return {"workspace_root": str(tmp_path.resolve())}
-
-    app = _ContextStatusHarness()
-    client = _FakeClient()
-
-    async with app.run_test(size=(100, 24)):
-        app._client = client  # type: ignore[assignment]
-        app._session_id = "session-current"  # type: ignore[attr-defined]
-        app._busy = True  # type: ignore[attr-defined]
-
-        await app._do_set_workspace(str(tmp_path))  # type: ignore[attr-defined]
-
-        assert client.calls == [(
-            "session.set_workspace",
-            {
-                "session_id": "session-current",
-                "workspace_root": str(tmp_path.resolve()),
-            },
-        )]
-        assert app._workspace_root == str(tmp_path.resolve())  # type: ignore[attr-defined]
-        assert not app._busy  # type: ignore[attr-defined]
-        assert not app.query_one("#prompt").disabled
-        assert "ws:" in str(app.query_one("#header", Static).content)
 
 
 # 功能：验证 /new 创建独立 session 并重置聊天日志、上下文水位和输入状态

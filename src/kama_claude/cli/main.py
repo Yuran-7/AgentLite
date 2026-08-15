@@ -21,12 +21,10 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("ping", help="Ping the core daemon")
-    chat_parser = subparsers.add_parser("chat", help="Start a multi-turn chat session")
-    chat_parser.add_argument("--workspace", help="Optional workspace directory")
+    subparsers.add_parser("chat", help="Start a multi-turn chat session")
 
     run_parser = subparsers.add_parser("run", help="Run an agent task")
     run_parser.add_argument("--goal", required=True, help="Goal for the agent to accomplish")
-    run_parser.add_argument("--workspace", help="Optional workspace directory")
 
     core_parser = subparsers.add_parser("core", help="Manage the core daemon")
     core_sub = core_parser.add_subparsers(dest="core_command")
@@ -44,11 +42,8 @@ def main() -> None:
     args = parser.parse_args()
 
     workspace_root: str | None = None
-    if getattr(args, "workspace", None) is not None:
-        workspace = Path(args.workspace).expanduser()
-        if not workspace.exists() or not workspace.is_dir():
-            parser.error(f"workspace is not a directory: {args.workspace}")
-        workspace_root = str(workspace.resolve())
+    if args.command in {"chat", "run"}:
+        workspace_root = str(Path.cwd().resolve())
 
     if args.version:
         cmd_version()

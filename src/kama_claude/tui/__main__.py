@@ -39,19 +39,12 @@ def main() -> None:
         metavar="RUN_ID",
         help="Replay events from a past run on connect",
     )
-    parser.add_argument(
-        "--workspace",
-        metavar="PATH",
-        help="Optional workspace directory for this chat session",
-    )
     args = parser.parse_args()
 
-    workspace_root: str | None = None
-    if args.workspace is not None:
-        workspace = Path(args.workspace).expanduser()
-        if not workspace.exists() or not workspace.is_dir():
-            parser.error(f"workspace is not a directory: {args.workspace}")
-        workspace_root = str(workspace.resolve())
+    workspace = Path.cwd()
+    if not workspace.exists() or not workspace.is_dir():
+        parser.error(f"workspace is not a directory: {workspace}")
+    workspace_root = str(workspace.resolve())
 
     config = get_config()
     _setup_logging(config.logging.level)

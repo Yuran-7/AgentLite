@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kama_claude.cli.commands.core import _shutdown_request
-from kama_claude.core.config import KamaConfig
+from agent_lite.cli.commands.core import _shutdown_request
+from agent_lite.core.config import KamaConfig
 
 
 # 功能：验证 daemon 能通过 core.shutdown IPC 在 Windows 和 POSIX 上优雅退出

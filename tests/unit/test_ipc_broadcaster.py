@@ -5,8 +5,8 @@ import json
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
-from kama_claude.core.bus.events import RunStartedEvent, StepStartedEvent
-from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
+from agent_lite.core.bus.events import RunStartedEvent, StepStartedEvent
+from agent_lite.core.transport.ipc_broadcaster import IpcEventBroadcaster
 
 
 def _make_writer(*, drain_raises: Exception | None = None) -> asyncio.StreamWriter:

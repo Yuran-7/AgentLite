@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import socket
 
-from kama_claude.core.transport.socket_server import SocketServer
+from agent_lite.core.transport.socket_server import SocketServer
 
 
 def _free_port() -> int:
@@ -44,3 +44,22 @@ async def test_no_broadcaster_server_starts_and_stops() -> None:
     server = SocketServer("127.0.0.1", port)
     await server.start()
     await server.stop()
+
+
+# 功能：验证客户端直接关闭连接时 SocketServer 不向事件循环抛出断连异常
+# 设计：让 reader 模拟 Windows Proactor 报出的 ConnectionResetError，断言连接处理函数正常收尾
+async def test_client_reset_is_handled_without_raising() -> None:
+    class ResetReader:
+        async def readline(self) -> bytes:
+            raise ConnectionResetError(64, "connection reset")
+
+    class FakeWriter:
+        def get_extra_info(self, name: str, default: object = None) -> object:
+            return default
+
+        def close(self) -> None:
+            return None
+
+    server = SocketServer("127.0.0.1", 0)
+
+    await server._handle_connection(ResetReader(), FakeWriter())  # type: ignore[arg-type]

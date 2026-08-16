@@ -4,17 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from kama_claude.core.bus.envelope import INVALID_PARAMS, HandlerError
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.runner import RunOutcome
-from kama_claude.core.session.manager import (
+from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
+from agent_lite.core.events.bus import EventBus
+from agent_lite.core.runner import RunOutcome
+from agent_lite.core.session.manager import (
     SESSION_CLOSED,
     SESSION_NOT_FOUND,
     SESSION_WORKSPACE_ALREADY_SET,
     SessionManager,
 )
-from kama_claude.core.session.model import Session
-from kama_claude.core.session.store import SessionStore
+from agent_lite.core.session.model import Session
+from agent_lite.core.session.store import SessionStore
 
 
 class _Runner:

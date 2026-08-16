@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from kama_claude.core.config import get_config
+from agent_lite.core.config import get_config
 
 
 def _write_env(path: Path, content: str) -> None:
@@ -48,9 +48,9 @@ def test_missing_env_file_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert cfg.port == 7437
 
 
-# 功能：验证 session 默认写入 daemon 当前工作目录下的 .kama/sessions
-# 设计：切换到临时目录并清除覆盖变量，确认默认值为相对路径且不会落入用户主目录
-def test_sessions_default_to_current_project(
+# 功能：验证 session 默认写入用户目录下的 ~/.kama/sessions
+# 设计：切换到临时目录并清除覆盖变量，确认默认值指向用户主目录
+def test_sessions_default_to_user_kama_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -59,7 +59,7 @@ def test_sessions_default_to_current_project(
 
     cfg = get_config()
 
-    assert cfg.session.dir == ".kama/sessions"
+    assert cfg.session.dir == "~/.kama/sessions"
 
 
 # 功能：验证 KAMA_SESSIONS_DIR 环境变量可以覆盖 session 存储目录

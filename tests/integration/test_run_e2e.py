@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from kama_claude.core.config import KamaConfig
-from kama_claude.core.runner import AgentRunner
+from agent_lite.core.config import KamaConfig
+from agent_lite.core.runner import AgentRunner
 
 # Load project .env so ANTHROPIC_API_KEY is available without going through get_config()
 load_dotenv(Path(__file__).parent.parent.parent / ".env", override=False)

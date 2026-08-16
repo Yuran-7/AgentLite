@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kama_claude.core.config import LlmConfig
-from kama_claude.core.llm import factory
+from agent_lite.core.config import LlmConfig
+from agent_lite.core.llm import factory
 
 
 # 功能：验证工厂按 openai 协议选择 OpenAI-compatible Provider 并传递配置

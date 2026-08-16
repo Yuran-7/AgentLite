@@ -7,11 +7,11 @@ from typing import Any
 import httpx
 import pytest
 
-from kama_claude.core.config import KamaConfig, WebConfig
-from kama_claude.core.runner import AgentRunner
-from kama_claude.core.task.manager import TaskManager
-from kama_claude.core.tools.builtin.web_fetch import WebFetchTool
-from kama_claude.core.tools.builtin.web_search import WebSearchTool
+from agent_lite.core.config import KamaConfig, WebConfig
+from agent_lite.core.runner import AgentRunner
+from agent_lite.core.task.manager import TaskManager
+from agent_lite.core.tools.builtin.web_fetch import WebFetchTool
+from agent_lite.core.tools.builtin.web_search import WebSearchTool
 
 
 async def _public_resolver(_host: str, _port: int) -> list[str]:

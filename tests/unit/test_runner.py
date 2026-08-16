@@ -5,10 +5,13 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from kama_claude.core.config import KamaConfig
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.types import LlmResponse, ToolCallBlock
-from kama_claude.core.runner import AgentRunner
+from agent_lite.core.config import KamaConfig
+from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.types import LlmResponse, ToolCallBlock
+from agent_lite.core.runner import AgentRunner
+
+SESSION_ID = "sess-20260815-000000-0123456789ab"
+WORKSPACE_SESSION_ID = "sess-20260815-000001-abcdef012345"
 
 # --- mock provider -----------------------------------------------------------
 
@@ -204,7 +207,7 @@ async def test_run_id_embedded_in_started_event(tmp_path: Path) -> None:
 # 设计：显式传入 EventBus 实例并订阅收集器，确认 runner 不再内部新建 bus（否则外部订阅者收不到事件）；
 #       这是 CoreApp 注入全局 bus 的核心行为，单元测试级别验证可避免集成测试的守护进程依赖
 async def test_injected_bus_receives_events(tmp_path: Path) -> None:
-    from kama_claude.core.events.bus import EventBus
+    from agent_lite.core.events.bus import EventBus
 
     external_bus = EventBus()
     collected: list[object] = []
@@ -230,12 +233,12 @@ async def test_injected_bus_receives_events(tmp_path: Path) -> None:
 # 功能：验证 session run 会从 thread.jsonl 预填 messages，并把 notes 注入 system prompt
 # 设计：用 CapturingProvider 截获 LLM 入参，不触发真实 API；同时断言 run 目录写到 session/runs 下
 async def test_session_history_and_notes_injected(tmp_path: Path) -> None:
-    from kama_claude.core.session.model import Session
-    from kama_claude.core.session.store import SessionStore
+    from agent_lite.core.session.model import Session
+    from agent_lite.core.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     session = Session(
-        id="sess-1",
+        id=SESSION_ID,
         mode="chat",
         status="active",
         title="",
@@ -243,8 +246,8 @@ async def test_session_history_and_notes_injected(tmp_path: Path) -> None:
         updated_at="t",
     )
     store.write_meta(session)
-    store.append_message("sess-1", "user", "remember python")
-    store.append_note("sess-1", "Python 3.12", "run-old")
+    store.append_message(SESSION_ID, "user", "remember python")
+    store.append_note(SESSION_ID, "Python 3.12", "run-old")
 
     provider = _CapturingProvider(LlmResponse(stop_reason="end_turn", text="done"))
     runner = AgentRunner(_config(), provider=provider, runs_dir=tmp_path / "runs")
@@ -254,23 +257,24 @@ async def test_session_history_and_notes_injected(tmp_path: Path) -> None:
     assert provider.messages == [{"role": "user", "content": "remember python"}]
     assert provider.system is not None
     assert "Python 3.12" in provider.system
-    assert (store.runs_dir("sess-1") / "run-new" / "events.jsonl").exists()
+    assert (store.runs_dir(SESSION_ID) / "run-new" / "events.jsonl").exists()
     assert not (tmp_path / "runs" / "run-new").exists()
 
 
-# 功能：验证 session 工作区决定项目 context 的加载位置并进入 system prompt
-# 设计：在工作区和 daemon cwd 解耦的目录写 context，用捕获型 provider 检查 runner 的作用域传播
-async def test_session_workspace_loads_project_context(tmp_path: Path) -> None:
-    from kama_claude.core.session.model import Session
-    from kama_claude.core.session.store import SessionStore
+# 功能：验证 session 工作区的 AGENT.md 会加入 system prompt
+# 设计：在工作区同时写入 AGENT.md 和旧 context.md，确认只读取 AGENT.md
+async def test_session_workspace_loads_agent_context(tmp_path: Path) -> None:
+    from agent_lite.core.session.model import Session
+    from agent_lite.core.session.store import SessionStore
 
     workspace = tmp_path / "repo"
     context_dir = workspace / ".kama"
     context_dir.mkdir(parents=True)
-    (context_dir / "context.md").write_text("workspace-specific rule", encoding="utf-8")
+    (context_dir / "context.md").write_text("legacy workspace rule", encoding="utf-8")
+    (workspace / "AGENT.md").write_text("workspace-specific rule", encoding="utf-8")
     store = SessionStore(tmp_path / "sessions")
     session = Session(
-        id="sess-workspace",
+        id=WORKSPACE_SESSION_ID,
         mode="chat",
         status="active",
         title="",
@@ -286,14 +290,15 @@ async def test_session_workspace_loads_project_context(tmp_path: Path) -> None:
 
     assert provider.system is not None
     assert "workspace-specific rule" in provider.system
+    assert "legacy workspace rule" not in provider.system
     assert str(workspace.resolve()) in provider.system
 
 
 # 功能：验证 session run 中注册了 note_save，工具调用会写入 notes.md
 # 设计：mock provider 第一步请求 note_save、第二步 end_turn，覆盖 runner→registry→tool invocation 的完整路径
 async def test_session_registers_note_save_tool(tmp_path: Path) -> None:
-    from kama_claude.core.session.model import Session
-    from kama_claude.core.session.store import SessionStore
+    from agent_lite.core.session.model import Session
+    from agent_lite.core.session.store import SessionStore
 
     class _NoteProvider:
         # 初始化调用计数器，用于返回两步响应
@@ -327,16 +332,16 @@ async def test_session_registers_note_save_tool(tmp_path: Path) -> None:
 
     store = SessionStore(tmp_path / "sessions")
     session = Session(
-        id="sess-1",
+        id=SESSION_ID,
         mode="chat",
         status="active",
         title="",
         created_at="t",
         updated_at="t",
     )
-    store.append_message("sess-1", "user", "remember")
+    store.append_message(SESSION_ID, "user", "remember")
 
     runner = AgentRunner(_config(max_steps=3), provider=_NoteProvider(), runs_dir=tmp_path)
     await runner.run_and_capture("remember", run_id="run-1", session=session, store=store)
 
-    assert "Use Python 3.12" in store.read_notes("sess-1")
+    assert "Use Python 3.12" in store.read_notes(SESSION_ID)

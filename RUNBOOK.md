@@ -51,8 +51,12 @@ TUI 启动时会把当前目录绑定到新 session。为了避免不同项目�
 session 不能改绑或清除工作区；需要处理另一目录时应启动一个新的 TUI 会话。
 
 客户端会把工作区规范化为绝对目录，daemon 校验后写入 session `meta.json`。设置后，
-内置文件工具的相对路径、Shell 初始目录、项目 `.kama/context.md` 和子 Agent 都以该目录
-为基准；daemon 自身的 cwd 不参与 workspace 判定。
+内置文件工具的相对路径、Shell 初始目录和子 Agent 都以该目录为基准；daemon 自身的 cwd
+不参与 workspace 判定。Agent 会按父目录到 workspace 根目录的顺序读取 `AGENT.md`，并将其加入 system prompt；项目目录下的 `.kama/context.md` 不会被自动读取。
+
+Session 持久化默认与项目工作区解耦，统一写入 `~/.kama/sessions/YYYY/MM/DD/`。
+每个目录名形如 `sess-20260815-092151-0123456789ab`，其中包含创建时间和随机后缀；
+因此 Core 无论从哪个目录启动，都不会因为默认 session 存储路径在项目下创建 `.kama/sessions`。
 
 ---
 
@@ -73,7 +77,7 @@ file   = "~/.kama/logs/core.log"
 format = "text"    # "text" | "json"
 
 [session]
-dir = ".kama/sessions"  # 相对路径以 daemon 启动目录为基准
+dir = "~/.kama/sessions"  # 按日期分层：YYYY/MM/DD/<session-id>
 
 [agent]
 max_steps = 20
@@ -122,7 +126,7 @@ cp .env.example .env
 | `KAMA_CONFIG` | `~/.kama/config.toml` | 覆盖配置文件路径 |
 | `KAMA_HOST` | `127.0.0.1` | TCP 监听地址 |
 | `KAMA_PORT` | `7437` | TCP 监听端口 |
-| `KAMA_SESSIONS_DIR` | `.kama/sessions` | Session 存储目录；相对路径基于 daemon 启动目录 |
+| `KAMA_SESSIONS_DIR` | `~/.kama/sessions` | Session 存储根目录，下面按日期分层保存 |
 | `KAMA_LOG_LEVEL` | `INFO` | 日志级别（DEBUG / INFO / WARNING / ERROR） |
 | `KAMA_LOG_FILE` | `~/.kama/logs/core.log` | 日志文件路径（留空则仅输出 stderr） |
 | `KAMA_LOG_FORMAT` | `text` | 日志格式（`text` 或 `json`） |

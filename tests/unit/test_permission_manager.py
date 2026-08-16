@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from kama_claude.core.permissions.manager import PermissionManager
-from kama_claude.core.permissions.policy import PermissionDecision, ToolPolicy
-from kama_claude.core.permissions.storage import load_policy_file
+from agent_lite.core.permissions.manager import PermissionManager
+from agent_lite.core.permissions.policy import PermissionDecision, ToolPolicy
+from agent_lite.core.permissions.storage import load_policy_file
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

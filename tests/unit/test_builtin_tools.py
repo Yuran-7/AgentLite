@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from kama_claude.core.tools.builtin.bash import (
+from agent_lite.core.tools.builtin.bash import (
     ShellTool,
     _shell_argv,
     _shell_description,
 )
-from kama_claude.core.tools.builtin.list_dir import ListDirTool
-from kama_claude.core.tools.builtin.write_file import WriteFileTool
+from agent_lite.core.tools.builtin.list_dir import ListDirTool
+from agent_lite.core.tools.builtin.write_file import WriteFileTool
 
 # ── shell ─────────────────────────────────────────────────────────────────────
 
@@ -25,7 +25,7 @@ def test_shell_argv_uses_sh_on_posix() -> None:
 # 设计：替换 executable 查找结果以隔离宿主机安装情况，只断言稳定的启动参数
 def test_shell_argv_uses_powershell_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "kama_claude.core.tools.builtin.bash.shutil.which",
+        "agent_lite.core.tools.builtin.bash.shutil.which",
         lambda name: "pwsh.exe" if name == "pwsh" else None,
     )
     argv = _shell_argv("Write-Output hello", platform="nt")
@@ -38,7 +38,7 @@ def test_shell_argv_uses_powershell_on_windows(monkeypatch: pytest.MonkeyPatch) 
 # 设计：固定解释器探测为 Windows PowerShell，直接检查发给模型的名称和关键提示语
 def test_shell_schema_describes_windows_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "kama_claude.core.tools.builtin.bash.shutil.which",
+        "agent_lite.core.tools.builtin.bash.shutil.which",
         lambda name: "powershell.exe" if name == "powershell" else None,
     )
     assert ShellTool.name == "shell"

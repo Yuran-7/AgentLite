@@ -31,7 +31,7 @@ async def running_daemon(
     env["KAMA_LOG_LEVEL"] = "WARNING"
     env["KAMA_SESSIONS_DIR"] = str(tmp_path / "sessions")
 
-    proc = subprocess.Popen([sys.executable, "-m", "kama_claude.core"], env=env)
+    proc = subprocess.Popen([sys.executable, "-m", "agent_lite.core"], env=env)
 
     # Windows 首次导入 Textual/Anthropic 依赖较慢，预留足够时间并尽早报告子进程退出
     deadline = time.monotonic() + 10.0

@@ -3,11 +3,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.types import LlmResponse, UsageStats
-from kama_claude.core.trace.provider import TracingProvider
-from kama_claude.core.trace.record import TraceRecord
-from kama_claude.core.trace.writer import TraceWriter
+from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.types import LlmResponse, UsageStats
+from agent_lite.core.trace.provider import TracingProvider
+from agent_lite.core.trace.record import TraceRecord
+from agent_lite.core.trace.writer import TraceWriter
 
 
 def _make_response(stop_reason: str = "end_turn") -> LlmResponse:

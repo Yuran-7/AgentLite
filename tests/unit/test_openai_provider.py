@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import BaseModel
 
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.openai_provider import OpenAICompatibleProvider
-from kama_claude.core.llm.types import LlmResponse
+from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.openai_provider import OpenAICompatibleProvider
+from agent_lite.core.llm.types import LlmResponse
 
 
 class FakeOpenAIStream:

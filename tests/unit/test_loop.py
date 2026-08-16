@@ -5,12 +5,12 @@ import asyncio
 import pytest
 from pydantic import BaseModel
 
-from kama_claude.core.context import ExecutionContext
-from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.types import LlmResponse, ToolCallBlock
-from kama_claude.core.loop import AgentLoop
-from kama_claude.core.tools.base import BaseTool, ToolResult
-from kama_claude.core.tools.registry import ToolRegistry
+from agent_lite.core.context import ExecutionContext
+from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.types import LlmResponse, ToolCallBlock
+from agent_lite.core.loop import AgentLoop
+from agent_lite.core.tools.base import BaseTool, ToolResult
+from agent_lite.core.tools.registry import ToolRegistry
 
 # --- stubs -------------------------------------------------------------------
 

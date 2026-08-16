@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate WIRE_PROTOCOL.md from pydantic models in kama_claude.core.bus."""
+"""Generate WIRE_PROTOCOL.md from pydantic models in agent_lite.core.bus."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from kama_claude.core.bus.commands import (
+from agent_lite.core.bus.commands import (
     AgentRunCommand,
     AgentRunResult,
     CoreShutdownCommand,
@@ -27,8 +27,8 @@ from kama_claude.core.bus.commands import (
     SessionSetWorkspaceCommand,
     SessionSetWorkspaceResult,
 )
-from kama_claude.core.bus.envelope import EventPushEnvelope
-from kama_claude.core.bus.events import (
+from agent_lite.core.bus.envelope import EventPushEnvelope
+from agent_lite.core.bus.events import (
     CoreStartedEvent,
     LlmModelSelectedEvent,
     LlmTokenEvent,
@@ -267,7 +267,7 @@ def generate() -> str:
         "\n",
         _model_section("LogLineEvent", LogLineEvent,
             {"type": "log.line", "run_id": run_id, "level": "INFO",
-             "source": "kama_claude.core.loop", "message": "step 1 started", "ts": ts}),
+             "source": "agent_lite.core.loop", "message": "step 1 started", "ts": ts}),
         "\n## Session Events\n\n",
         _model_section("SessionCreatedEvent", SessionCreatedEvent,
             {"type": "session.created", "session_id": session_id, "mode": "chat", "ts": ts}),

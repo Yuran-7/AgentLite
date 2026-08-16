@@ -7,7 +7,7 @@ from textual.app import App, ComposeResult
 from textual.widget import Widget
 from textual.widgets import Static
 
-from kama_claude.tui.app import (
+from agent_lite.tui.app import (
     KamaTuiApp,
     LLMStreamBlock,
     SlashCompleteWidget,
@@ -52,6 +52,29 @@ async def test_tui_branding_uses_agentlite() -> None:
         banner_rows = app._BANNER.splitlines()[:6]  # type: ignore[attr-defined]
         assert len(banner_rows) == 6
         assert len({len(row) for row in banner_rows}) == 1
+
+
+# 功能：验证顶部状态栏第二行显示绝对 workspace 路径和模型名称
+# 设计：使用带 workspace 和 model 的 TUI 实例，断言不再显示 ws 前缀且信息不占用第一行
+async def test_header_shows_workspace_path_and_model_on_second_line() -> None:
+    workspace = r"C:\Users\HuanZhu\Desktop\AgentLite"
+    app = KamaTuiApp(
+        "127.0.0.1",
+        7437,
+        workspace_root=workspace,
+        model="deepseek-chat",
+    )
+
+    async with app.run_test(size=(120, 24)):
+        app._update_header("ready")  # type: ignore[attr-defined]
+        content = str(app.query_one("#header", Static).content)
+
+        lines = content.splitlines()
+        assert len(lines) == 2
+        assert "ws:" not in content
+        assert f"workspace: {workspace}" in lines[1]
+        assert "model: deepseek-chat" in lines[1]
+        assert workspace not in lines[0]
 
 
 # 功能：验证工具参数摘要优先展示工具最关键字段
@@ -272,7 +295,7 @@ def test_context_status_collects_grouped_run_metrics() -> None:
     app = KamaTuiApp("127.0.0.1", 9999, llm_protocol="openai")
     app._append = lambda _widget: None  # type: ignore[method-assign]
 
-    with patch("kama_claude.tui.app.time.monotonic", side_effect=[0.0, 2.0, 4.0]):
+    with patch("agent_lite.tui.app.time.monotonic", side_effect=[0.0, 2.0, 4.0]):
         app._handle_event({"type": "llm.model_selected", "run_id": "root", "ts": "t"})
         app._handle_event({"type": "llm.token", "run_id": "root", "token": "hi", "ts": "t"})
         app._handle_event({

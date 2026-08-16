@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kama_claude.core.context import ExecutionContext
+from agent_lite.core.context import ExecutionContext
 
 
 def _make_ctx(**kwargs) -> ExecutionContext:
@@ -12,20 +12,20 @@ def _make_ctx(**kwargs) -> ExecutionContext:
 
 
 # 功能：验证三层记忆全部存在时都出现在 system prompt 中且顺序正确
-# 设计：分别设置 global_context、project_context、session_notes，断言各 section 标题及内容依次出现
+# 设计：分别设置 global_context、agent_context、session_notes，断言各 section 标题及内容依次出现
 def test_all_layers_present() -> None:
     ctx = _make_ctx(
         global_context="global line",
-        project_context="project line",
+        agent_context="agent rule",
         session_notes="session note",
     )
     prompt = ctx.system_prompt("BASE")
     assert "BASE" in prompt
     assert "## Global Context\nglobal line" in prompt
-    assert "## Project Context\nproject line" in prompt
+    assert "## AGENT.md\nagent rule" in prompt
     assert "## Session Notes\nsession note" in prompt
-    # 顺序：global 在 project 之前，project 在 session 之前
-    assert prompt.index("Global") < prompt.index("Project") < prompt.index("Session")
+    # 顺序：global 在 AGENT.md 之前，AGENT.md 在 session 之前
+    assert prompt.index("Global") < prompt.index("AGENT.md") < prompt.index("Session")
 
 
 # 功能：验证三层均为空时 system prompt 只含 base
@@ -42,7 +42,7 @@ def test_only_global() -> None:
     ctx = _make_ctx(global_context="global content")
     prompt = ctx.system_prompt("BASE")
     assert "## Global Context" in prompt
-    assert "## Project Context" not in prompt
+    assert "## AGENT.md" not in prompt
     assert "## Session Notes" not in prompt
 
 

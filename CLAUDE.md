@@ -48,7 +48,7 @@ kama (CLI)   kama-tui (TUI, S2+)
 
 **`kama-tui` is the primary frontend.** All user-facing work on task management, observability, and interaction should be designed for and validated in the TUI first. The `kama` CLI exists only for quick scripted testing and debugging — it is not a product surface. When implementing features that touch the user interface, invest in the TUI layout, event rendering, and keyboard interactions. Do not shortcut TUI work by pointing to the CLI as an alternative.
 
-### Protocol layer (`src/kama_claude/core/bus/`)
+### Protocol layer (`src/agent_lite/core/bus/`)
 
 All IPC messages are typed pydantic v2 models with a **discriminated union on the `type` field**. This is the contract boundary — adding a new command or event means adding a new model class to `commands.py` or `events.py` and extending the `Command`/`Event` union.
 
@@ -58,11 +58,11 @@ All IPC messages are typed pydantic v2 models with a **discriminated union on th
 
 `WIRE_PROTOCOL.md` is **generated** from these models by `scripts/gen_protocol_doc.py`. Always regenerate and commit it after changing bus models.
 
-### Transport layer (`src/kama_claude/core/transport/`)
+### Transport layer (`src/agent_lite/core/transport/`)
 
 - `socket_server.py` — TCP server (`asyncio.start_server`); reads NDJSON lines, dispatches to registered `CommandHandler`s, handles JSON-RPC error cases. On `start()`, probes `host:port` first — errors if another daemon is already listening. Handlers registered via `server.register("method.name", handler_fn)`.
 
-### Config (`src/kama_claude/core/config.py`)
+### Config (`src/agent_lite/core/config.py`)
 
 Four-tier priority: **built-in defaults → `~/.kama/config.toml` → `.env` → env vars**.
 
@@ -70,7 +70,7 @@ S0 keys: `host` (default `127.0.0.1`), `port` (default `7437`), `log_level`, `lo
 
 Relevant env vars: `KAMA_CONFIG`, `KAMA_HOST`, `KAMA_PORT`, `KAMA_LOG_LEVEL`, `KAMA_LOG_FILE`, `KAMA_LOG_FORMAT`.
 
-### Daemon entry (`src/kama_claude/core/app.py`)
+### Daemon entry (`src/agent_lite/core/app.py`)
 
 `CoreApp.run()` is the single async entry point: loads config → sets up logging → creates `SocketServer` → registers handlers → waits for `SIGINT`/`SIGTERM` → calls `server.stop()`. Adding new handlers: instantiate a handler method on `CoreApp` and call `server.register()`.
 

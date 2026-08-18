@@ -74,7 +74,10 @@ class SpawnAgentTool(BaseTool):
             },
             "subagent_type": {
                 "type": "string",
-                "description": "Agent role profile (planner/executor/reviewer). Leave empty for default.",  # noqa: E501
+                "description": (
+                    "Agent role profile name, such as debate-judge or metagpt-qa. "
+                    "Leave empty for the default profile."
+                ),
             },
         },
         "required": ["description", "prompt"],

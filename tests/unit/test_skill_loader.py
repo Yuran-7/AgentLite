@@ -18,13 +18,34 @@ def test_builtin_skill_found() -> None:
     assert skill.system_prompt_template != ""
 
 
-# 功能：内建 init / summarize / orchestrate skill 均可找到
-# 设计：列举所有内建 skill 名，断言均能解析
-@pytest.mark.parametrize("name", ["init", "review", "summarize", "orchestrate"])
+# 功能：全部内建 skill 均可被加载器找到
+# 设计：参数化列举通用 skill 与三种多智能体工作流，防止打包时遗漏文件
+@pytest.mark.parametrize(
+    "name",
+    ["init", "review", "summarize", "debate", "chatdev", "metagpt"],
+)
 def test_all_builtin_skills_found(name: str) -> None:
     loader = SkillLoader()
     skill = loader.resolve(name)
     assert skill is not None, f"builtin skill '{name}' not found"
+
+
+# 功能：已被三个经典工作流替代的 orchestrate skill 不再暴露
+# 设计：直接解析旧名称并断言为空，避免斜杠菜单继续出现废弃入口
+def test_orchestrate_skill_removed() -> None:
+    loader = SkillLoader()
+    assert loader.resolve("orchestrate") is None
+
+
+# 功能：三个多智能体 skill 应限制父 Agent 只能使用编排工具
+# 设计：解析真实内建文件并比较工具集合，避免父 Agent 绕过角色直接修改工作区
+@pytest.mark.parametrize("name", ["debate", "chatdev", "metagpt"])
+def test_multi_agent_skills_only_allow_orchestration_tools(name: str) -> None:
+    loader = SkillLoader()
+    skill = loader.resolve(name)
+    assert skill is not None
+    assert set(skill.allowed_tools) <= {"spawn_agent", "agent_result", "update_plan"}
+    assert "spawn_agent" in skill.allowed_tools
 
 
 # 功能：不存在的 skill 名应返回 None

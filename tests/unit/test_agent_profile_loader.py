@@ -7,25 +7,31 @@ import pytest
 from agent_lite.core.agents.loader import AgentProfileLoader
 
 
-# 功能：内建 planner 角色配置应能被 AgentProfileLoader 加载
-# 设计：直接调用 load("planner")，验证关键字段非空
-def test_builtin_planner_found() -> None:
-    loader = AgentProfileLoader()
-    profile = loader.load("planner")
-    assert profile is not None
-    assert profile.name == "planner"
-    assert profile.system_prompt != ""
-    assert "read_file" in profile.allowed_tools or len(profile.allowed_tools) > 0
-
-
-# 功能：内建三种角色均可加载
-# 设计：参数化测试所有内建角色名
-@pytest.mark.parametrize("role", ["planner", "executor", "reviewer"])
-def test_all_builtin_roles_found(role: str) -> None:
+# 功能：三个多智能体 skill 引用的专用角色均可加载
+# 设计：参数化列举 skill 模板中的全部 subagent_type，防止角色改名或打包遗漏
+@pytest.mark.parametrize(
+    "role",
+    [
+        "debater",
+        "debate-judge",
+        "chatdev-ceo",
+        "chatdev-cpo",
+        "chatdev-cto",
+        "chatdev-programmer",
+        "chatdev-reviewer",
+        "chatdev-tester",
+        "metagpt-product-manager",
+        "metagpt-architect",
+        "metagpt-engineer",
+        "metagpt-qa",
+    ],
+)
+def test_multi_agent_skill_roles_found(role: str) -> None:
     loader = AgentProfileLoader()
     profile = loader.load(role)
     assert profile is not None, f"builtin role '{role}' not found"
-    assert profile.allowed_tools  # 每个内建角色都有 allowed_tools
+    assert profile.system_prompt
+    assert profile.allowed_tools
 
 
 # 功能：未知角色名应返回 None
@@ -64,14 +70,14 @@ model = "claude-sonnet-4-6"
 def test_project_overrides_builtin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     local_agents = tmp_path / ".agentlite" / "agents"
     local_agents.mkdir(parents=True)
-    (local_agents / "planner.toml").write_text(
-        '[agent]\ndescription = "local planner"\nsystem_prompt = "local prompt"\n'
+    (local_agents / "debater.toml").write_text(
+        '[agent]\ndescription = "local debater"\nsystem_prompt = "local prompt"\n'
         'allowed_tools = ["list_dir"]\nmodel = ""\n',
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
     loader = AgentProfileLoader()
-    profile = loader.load("planner")
+    profile = loader.load("debater")
     assert profile is not None
-    assert profile.description == "local planner"
+    assert profile.description == "local debater"
     assert "list_dir" in profile.allowed_tools

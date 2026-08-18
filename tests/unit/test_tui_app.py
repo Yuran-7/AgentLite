@@ -8,8 +8,9 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from agent_lite.tui.app import (
-    KamaTuiApp,
+    AgentLiteTuiApp,
     LLMStreamBlock,
+    PlanBlock,
     SlashCompleteWidget,
     ToolCallBlock,
     _param_summary,
@@ -24,7 +25,7 @@ class _ToolBlockHarness(App[None]):
         yield Static("outside", id="outside")
 
 
-class _ContextStatusHarness(KamaTuiApp):
+class _ContextStatusHarness(AgentLiteTuiApp):
     # 初始化不连接 daemon 的完整 TUI，供固定状态栏交互测试使用
     def __init__(self) -> None:
         super().__init__("127.0.0.1", 9999)
@@ -58,7 +59,7 @@ async def test_tui_branding_uses_agentlite() -> None:
 # 设计：使用带 workspace 和 model 的 TUI 实例，断言不再显示 ws 前缀且信息不占用第一行
 async def test_header_shows_workspace_path_and_model_on_second_line() -> None:
     workspace = r"C:\Users\HuanZhu\Desktop\AgentLite"
-    app = KamaTuiApp(
+    app = AgentLiteTuiApp(
         "127.0.0.1",
         7437,
         workspace_root=workspace,
@@ -88,7 +89,7 @@ def test_param_summary_prefers_key_fields() -> None:
 # 功能：验证输入斜杠时 /new 作为首个内建命令出现在自动补全中
 # 设计：直接检查候选顺序和说明，确保新会话入口不会被动态 Skill 列表淹没
 def test_slash_items_put_new_session_first() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     assert app._build_slash_items()[0] == (  # type: ignore[attr-defined]
         "new",
         "start a new session",
@@ -99,7 +100,7 @@ def test_slash_items_put_new_session_first() -> None:
 # 功能：验证斜杠菜单将通用命令置顶，并在首个 Skill 前显示不可选中的分组标题
 # 设计：使用真实内建候选渲染菜单，比较文本位置并检查类别标记，不把标题混入导航列表
 def test_slash_menu_separates_general_commands_and_skills() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     items = app._build_slash_items()  # type: ignore[attr-defined]
     assert [item[2] for item in items[:2]] == [False, False]
     assert all(item[2] for item in items[2:])
@@ -167,7 +168,7 @@ async def test_new_session_resets_tui_state() -> None:
 # 设计：monkey-patch _append 收集追加的 widgets，断言 token 追加到同一块；
 #       发送非 token 事件后新 block 被重置，下一个 token 开启新块
 def test_llm_tokens_accumulate_in_block() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -191,7 +192,7 @@ def test_llm_block_finalize_renders_markdown() -> None:
 # 功能：验证非 token 事件后 _current_llm 被重置，下一个 token 开启新块
 # 设计：插入 step.started 中断流，验证之前的 block 被 finalize，之后的 llm.token 创建新 LLMStreamBlock
 def test_llm_block_resets_after_non_token_event() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -207,7 +208,7 @@ def test_llm_block_resets_after_non_token_event() -> None:
 # 功能：验证 run.started 事件追加 Static widget 且包含 run_id 和 goal
 # 设计：monkey-patch _append，断言追加的 widget 的 renderable 包含关键字段
 def test_run_started_appends_widget_with_content() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -224,7 +225,7 @@ def test_run_started_appends_widget_with_content() -> None:
 # 功能：验证 run.finished success 追加包含 "completed" 的 widget
 # 设计：monkey-patch _append，检查 rendered 内容包含 completed 和 green
 def test_run_finished_success_shows_completed() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -240,7 +241,7 @@ def test_run_finished_success_shows_completed() -> None:
 # 功能：验证 run.finished failed 追加包含 "failed" 和 red 的 widget
 # 设计：与 success 对称，检查颜色标记差异
 def test_run_finished_failed_shows_red() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -292,7 +293,7 @@ async def test_context_status_updates_below_prompt_after_run_finishes() -> None:
 # 功能：验证根 Agent 的轮次、耗时、TTFT、吞吐和 token 累计进入分组状态栏
 # 设计：固定单调时钟驱动两次 LLM 调用，再校验同组用中点、跨组用竖线
 def test_context_status_collects_grouped_run_metrics() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999, llm_protocol="openai")
+    app = AgentLiteTuiApp("127.0.0.1", 9999, llm_protocol="openai")
     app._append = lambda _widget: None  # type: ignore[method-assign]
 
     with patch("agent_lite.tui.app.time.monotonic", side_effect=[0.0, 2.0, 4.0]):
@@ -337,7 +338,7 @@ def test_context_status_collects_grouped_run_metrics() -> None:
 # 功能：验证窄屏下状态栏从右向左按完整分组隐藏
 # 设计：比较宽窄两种渲染，确保 token 组被整体移除而不是字符截断
 def test_context_status_hides_whole_groups_on_narrow_screens() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     app._total_input_tokens = 202_000  # type: ignore[attr-defined]
     app._total_output_tokens = 2_400  # type: ignore[attr-defined]
 
@@ -352,7 +353,7 @@ def test_context_status_hides_whole_groups_on_narrow_screens() -> None:
 # 功能：验证子 Agent usage 不会覆盖根对话的固定 context 水位
 # 设计：预登记子 run 后发送其 usage，断言缓存百分比和 token 统计均保持原值
 def test_subagent_usage_does_not_change_context_status() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     app._last_context_pct = 0.25  # type: ignore[attr-defined]
     app._last_usage = (100, 20, 80)  # type: ignore[attr-defined]
     app._subagent_run_ids["child"] = "worker"  # type: ignore[attr-defined]
@@ -374,7 +375,7 @@ def test_subagent_usage_does_not_change_context_status() -> None:
 # 功能：验证 tool.call_started 追加 ToolCallBlock，call_finished 更新其结果
 # 设计：直接调用 _handle_event 两次，通过 _pending_tool_blocks 验证状态流转
 def test_tool_call_started_and_finished() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -400,6 +401,42 @@ def test_tool_call_started_and_finished() -> None:
     assert isinstance(block, ToolCallBlock)
     assert block._finished  # type: ignore[attr-defined]
     assert block._output == "hi"  # type: ignore[attr-defined]
+
+
+# 功能：验证 plan.updated 创建计划区块并在再次更新时复用原区块
+# 设计：直接驱动 TUI 事件处理，覆盖完成、进行中和待处理三种状态的展示更新
+def test_plan_updated_reuses_plan_block() -> None:
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
+    appended: list[Widget] = []
+    app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
+
+    app._handle_event({
+        "type": "plan.updated",
+        "run_id": "root-run",
+        "plan": [
+            {"step": "inspect", "status": "in_progress"},
+            {"step": "test", "status": "pending"},
+        ],
+        "explanation": "starting",
+        "ts": "t",
+    })
+    app._handle_event({
+        "type": "plan.updated",
+        "run_id": "root-run",
+        "plan": [
+            {"step": "inspect", "status": "completed"},
+            {"step": "test", "status": "in_progress"},
+        ],
+        "explanation": "next",
+        "ts": "t",
+    })
+
+    assert len(appended) == 1
+    assert isinstance(appended[0], PlanBlock)
+    block = appended[0]
+    assert "completed" not in str(block.content)
+    assert "next" in str(block.content)
+    assert "[x]" in str(block.content)
 
 
 # 功能：验证已完成工具块悬停时加粗并显示箭头，点击后箭头随折叠状态切换
@@ -455,7 +492,7 @@ def test_note_save_tool_block_shows_remembered() -> None:
 # 功能：验证 TUI 使用 VS Code 终端可传递的 Ctrl+C 退出且具有应用级优先级
 # 设计：直接检查声明式绑定，防止退回会被 VS Code 截获的 Ctrl+Q 或被输入框覆盖
 def test_quit_binding_uses_priority_ctrl_c() -> None:
-    quit_bindings = [binding for binding in KamaTuiApp.BINDINGS if binding.action == "quit"]
+    quit_bindings = [binding for binding in AgentLiteTuiApp.BINDINGS if binding.action == "quit"]
     assert len(quit_bindings) == 1
     assert quit_bindings[0].key == "ctrl+c"
     assert quit_bindings[0].priority
@@ -480,7 +517,7 @@ async def test_input_submit_appends_user_turn_and_disables_prompt() -> None:
         async def send_command(self, method: str, params: dict) -> dict:
             return {"run_id": "run-1"}
 
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
     app._update_header = lambda state: None  # type: ignore[method-assign]
@@ -501,7 +538,7 @@ async def test_input_submit_appends_user_turn_and_disables_prompt() -> None:
 # 功能：验证未知事件类型不抛异常也不追加任何 widget
 # 设计：发送 type 为 unknown 的事件，断言 appended 为空
 def test_unknown_event_silently_ignored() -> None:
-    app = KamaTuiApp("127.0.0.1", 9999)
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 

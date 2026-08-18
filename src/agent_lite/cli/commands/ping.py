@@ -8,11 +8,11 @@ import time
 import agent_lite
 from agent_lite.core.bus.commands import PongResult
 from agent_lite.core.bus.envelope import JsonRpcError, JsonRpcSuccess
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 
 
 # 同步入口：运行 _ping 协程，连接失败时打印错误并退出
-def cmd_ping(config: KamaConfig) -> None:
+def cmd_ping(config: AgentLiteConfig) -> None:
     try:
         asyncio.run(_ping(config))  # 创建并管理事件循环，直到 _ping 执行完毕
     except (ConnectionRefusedError, OSError):
@@ -22,7 +22,7 @@ def cmd_ping(config: KamaConfig) -> None:
 
 # 向 core 守护进程发送 ping 请求，打印 pong 响应及延迟
 # 当前 _ping 协程有 4 个显式 await，网络 I/O 期间会将控制权交还事件循环
-async def _ping(config: KamaConfig) -> None:
+async def _ping(config: AgentLiteConfig) -> None:
     t0 = time.monotonic()
     reader, writer = await asyncio.open_connection(config.host, config.port)  # 以异步（非阻塞）方式建立一个 TCP 客户端连接
 

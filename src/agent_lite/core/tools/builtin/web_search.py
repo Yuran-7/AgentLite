@@ -176,7 +176,7 @@ class WebSearchTool(BaseTool):
         self, client: httpx.AsyncClient, p: WebSearchParams, limit: int
     ) -> list[dict[str, str]]:
         if not self._config.search_api_key:
-            raise ValueError("Brave search requires KAMA_WEB_SEARCH_API_KEY")
+            raise ValueError("Brave search requires AGENTLITE_WEB_SEARCH_API_KEY")
         query: dict[str, str | int] = {
             "q": p.query,
             "count": limit,

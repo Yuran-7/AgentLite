@@ -83,8 +83,8 @@ class SkillLoader:
     # 返回候选路径列表，同时支持扁平文件（name.md）和目录式（name/SKILL.md）两种格式
     def _search_paths(self, name: str) -> list[Path]:
         dirs = [
-            Path(".kama/skills"),
-            Path("~/.kama/skills").expanduser(),
+            Path(".agentlite/skills"),
+            Path("~/.agentlite/skills").expanduser(),
             self._BUILTIN_DIR,
         ]
         paths: list[Path] = []
@@ -98,8 +98,8 @@ class SkillLoader:
         seen: dict[str, None] = {}
         for d in [
             self._BUILTIN_DIR,
-            Path("~/.kama/skills").expanduser(),
-            Path(".kama/skills"),
+            Path("~/.agentlite/skills").expanduser(),
+            Path(".agentlite/skills"),
         ]:
             if d.exists():
                 for f in sorted(d.glob("*.md")):
@@ -113,8 +113,8 @@ class SkillLoader:
         seen: dict[str, Skill] = {}
         for d in [
             self._BUILTIN_DIR,
-            Path("~/.kama/skills").expanduser(),
-            Path(".kama/skills"),
+            Path("~/.agentlite/skills").expanduser(),
+            Path(".agentlite/skills"),
         ]:
             if d.exists():
                 for f in sorted(d.glob("*.md")):

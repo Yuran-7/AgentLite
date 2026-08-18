@@ -41,6 +41,19 @@ class StepFinishedEvent(BaseModel):
     ts: str
 
 
+class PlanItem(BaseModel):
+    step: str
+    status: Literal["pending", "in_progress", "completed"]
+
+
+class PlanUpdatedEvent(BaseModel):
+    type: Literal["plan.updated"] = "plan.updated"
+    run_id: str
+    explanation: str | None = None
+    plan: list[PlanItem]
+    ts: str
+
+
 class ToolCallStartedEvent(BaseModel):
     type: Literal["tool.call_started"] = "tool.call_started"
     run_id: str
@@ -222,6 +235,7 @@ Event = Annotated[
     | RunFinishedEvent
     | StepStartedEvent
     | StepFinishedEvent
+    | PlanUpdatedEvent
     | ToolCallStartedEvent
     | ToolCallFinishedEvent
     | ToolCallFailedEvent

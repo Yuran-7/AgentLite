@@ -5,23 +5,23 @@
 ### 启动守护进程
 
 ```bash
-uv run kama core start
+uv run lite core start
 ```
 
 默认在后台监听 `127.0.0.1:7437`，支持 Windows、Linux 和 macOS。
-调试时也可以运行 `uv run kama-core` 保持在前台，按 `Ctrl+C` 优雅退出。
+调试时也可以运行 `uv run lite-core` 保持在前台，按 `Ctrl+C` 优雅退出。
 
 ### 验证连通
 
 ```bash
-uv run kama ping
+uv run lite ping
 # → pong server=0.0.1 uptime=12ms latency=2ms
 ```
 
 ### 停止守护进程
 
 ```bash
-uv run kama core stop
+uv run lite core stop
 ```
 
 停止命令通过本机 TCP IPC 请求 daemon 清理任务、MCP、trace 和 socket，不依赖 Unix 信号。
@@ -38,13 +38,13 @@ uv run kama core stop
 
 ### 工作区
 
-`kama-tui`、`kama chat` 和 `kama run` 默认使用启动客户端时的当前目录作为工作区：
+`lite-tui`、`lite chat` 和 `lite run` 默认使用启动客户端时的当前目录作为工作区：
 
 ```bash
 cd D:\path\to\repo
-uv run kama-tui
-uv run kama chat
-uv run kama run --goal "检查测试失败原因"
+uv run lite-tui
+uv run lite chat
+uv run lite run --goal "检查测试失败原因"
 ```
 
 TUI 启动时会把当前目录绑定到新 session。为了避免不同项目的上下文混杂，已绑定的
@@ -52,19 +52,19 @@ session 不能改绑或清除工作区；需要处理另一目录时应启动一
 
 客户端会把工作区规范化为绝对目录，daemon 校验后写入 session `meta.json`。设置后，
 内置文件工具的相对路径、Shell 初始目录和子 Agent 都以该目录为基准；daemon 自身的 cwd
-不参与 workspace 判定。Agent 会按父目录到 workspace 根目录的顺序读取 `AGENT.md`，并将其加入 system prompt；项目目录下的 `.kama/context.md` 不会被自动读取。
+不参与 workspace 判定。Agent 会按父目录到 workspace 根目录的顺序读取 `AGENT.md`，并将其加入 system prompt；项目目录下的 `.agentlite/context.md` 不会被自动读取。
 
-Session 持久化默认与项目工作区解耦，统一写入 `~/.kama/sessions/YYYY/MM/DD/`。
+Session 持久化默认与项目工作区解耦，统一写入 `~/.agentlite/sessions/YYYY/MM/DD/`。
 每个目录名形如 `sess-20260815-092151-0123456789ab`，其中包含创建时间和随机后缀；
-因此 Core 无论从哪个目录启动，都不会因为默认 session 存储路径在项目下创建 `.kama/sessions`。
+因此 Core 无论从哪个目录启动，都不会因为默认 session 存储路径在项目下创建 `.agentlite/sessions`。
 
 ---
 
 ## 配置
 
-优先级（低 → 高）：**内建默认值 → `~/.kama/config.toml` → `.kama/config.toml` → `.env` → 系统环境变量**。
+优先级（低 → 高）：**内建默认值 → `~/.agentlite/config.toml` → `.agentlite/config.toml` → `.env` → 系统环境变量**。
 
-### `~/.kama/config.toml`
+### `~/.agentlite/config.toml`
 
 ```toml
 [core]
@@ -73,11 +73,11 @@ port = 7437
 
 [logging]
 level  = "INFO"
-file   = "~/.kama/logs/core.log"
+file   = "~/.agentlite/logs/core.log"
 format = "text"    # "text" | "json"
 
 [session]
-dir = "~/.kama/sessions"  # 按日期分层：YYYY/MM/DD/<session-id>
+dir = "~/.agentlite/sessions"  # 按日期分层：YYYY/MM/DD/<session-id>
 
 [agent]
 max_steps = 20
@@ -123,25 +123,25 @@ cp .env.example .env
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `KAMA_CONFIG` | `~/.kama/config.toml` | 覆盖配置文件路径 |
-| `KAMA_HOST` | `127.0.0.1` | TCP 监听地址 |
-| `KAMA_PORT` | `7437` | TCP 监听端口 |
-| `KAMA_SESSIONS_DIR` | `~/.kama/sessions` | Session 存储根目录，下面按日期分层保存 |
-| `KAMA_LOG_LEVEL` | `INFO` | 日志级别（DEBUG / INFO / WARNING / ERROR） |
-| `KAMA_LOG_FILE` | `~/.kama/logs/core.log` | 日志文件路径（留空则仅输出 stderr） |
-| `KAMA_LOG_FORMAT` | `text` | 日志格式（`text` 或 `json`） |
+| `AGENTLITE_CONFIG` | `~/.agentlite/config.toml` | 覆盖配置文件路径 |
+| `AGENTLITE_HOST` | `127.0.0.1` | TCP 监听地址 |
+| `AGENTLITE_PORT` | `7437` | TCP 监听端口 |
+| `AGENTLITE_SESSIONS_DIR` | `~/.agentlite/sessions` | Session 存储根目录，下面按日期分层保存 |
+| `AGENTLITE_LOG_LEVEL` | `INFO` | 日志级别（DEBUG / INFO / WARNING / ERROR） |
+| `AGENTLITE_LOG_FILE` | `~/.agentlite/logs/core.log` | 日志文件路径（留空则仅输出 stderr） |
+| `AGENTLITE_LOG_FORMAT` | `text` | 日志格式（`text` 或 `json`） |
 | `LLM_PROTOCOL` | `anthropic` | DeepSeek API 协议（`anthropic` 或 `openai`） |
 | `LLM_DEFAULT_MODEL` | `deepseek-chat` | 服务端实际提供的 DeepSeek model ID |
 | `LLM_BASE_URL` | 空 | 通用 API 地址覆盖；否则读取 `ANTHROPIC_BASE_URL` 或 `OPENAI_BASE_URL` |
 | `LLM_API_KEY` | 空 | 通用密钥覆盖；否则读取 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY` |
-| `KAMA_WEB_ENABLED` | `true` | 是否为根 Agent 注册联网工具 |
-| `KAMA_WEB_SEARCH_PROVIDER` | `duckduckgo` | 搜索后端：`duckduckgo`、`brave` 或 `searxng` |
-| `KAMA_WEB_SEARCH_BASE_URL` | 空 | SearXNG 实例地址 |
-| `KAMA_WEB_SEARCH_API_KEY` | 空 | Brave Search API Key；不会出现在配置日志中 |
-| `KAMA_BROWSER_ENABLED` | `true` | 是否注册受限 Playwright `browser` 工具 |
-| `KAMA_BROWSER_HEADLESS` | `true` | Chromium 是否使用无界面模式 |
-| `KAMA_BROWSER_IDLE_TIMEOUT_S` | `600` | 等待用户登录的浏览器 Session 空闲关闭秒数 |
-| `KAMA_SUBAGENT_ALLOWED_TOOLS` | 见上方 `[agent]` | 逗号分隔的子 Agent 全局工具能力上限 |
+| `AGENTLITE_WEB_ENABLED` | `true` | 是否为根 Agent 注册联网工具 |
+| `AGENTLITE_WEB_SEARCH_PROVIDER` | `duckduckgo` | 搜索后端：`duckduckgo`、`brave` 或 `searxng` |
+| `AGENTLITE_WEB_SEARCH_BASE_URL` | 空 | SearXNG 实例地址 |
+| `AGENTLITE_WEB_SEARCH_API_KEY` | 空 | Brave Search API Key；不会出现在配置日志中 |
+| `AGENTLITE_BROWSER_ENABLED` | `true` | 是否注册受限 Playwright `browser` 工具 |
+| `AGENTLITE_BROWSER_HEADLESS` | `true` | Chromium 是否使用无界面模式 |
+| `AGENTLITE_BROWSER_IDLE_TIMEOUT_S` | `600` | 等待用户登录的浏览器 Session 空闲关闭秒数 |
+| `AGENTLITE_SUBAGENT_ALLOWED_TOOLS` | 见上方 `[agent]` | 逗号分隔的子 Agent 全局工具能力上限 |
 
 OpenAI-compatible 协议使用 Chat Completions；Anthropic-compatible 协议使用 Messages API。
 可以同时在 `.env` 保存两套标准 URL 和密钥，切换时只修改 `LLM_PROTOCOL`。
@@ -159,7 +159,7 @@ OpenAI-compatible 协议使用 Chat Completions；Anthropic-compatible 协议使
 - `click` 和 `type` 默认进入权限审批，可由用户的 always 决策缓存；其他读取动作默认允许。
 - 根 Agent 在 `[web].enabled = true` 时获得搜索、抓取和浏览器工具。
 - 子 Agent 默认不获得联网工具。需要时先把工具加入
-  `agent.subagent_allowed_tools`，再加入对应 `.kama/agents/<role>.toml` 的
+  `agent.subagent_allowed_tools`，再加入对应 `.agentlite/agents/<role>.toml` 的
   `allowed_tools`；两层取交集。匿名子 Agent 只受全局能力上限约束。即使子 Agent 获得
   `browser`，也不能发起用户登录接管。
 
@@ -188,7 +188,7 @@ make verify-s0                        # 完整验证（lint + 类型 + 测试 + 
 ## 日志
 
 ```bash
-tail -f ~/.kama/logs/core.log
+tail -f ~/.agentlite/logs/core.log
 ```
 
 ---
@@ -197,7 +197,7 @@ tail -f ~/.kama/logs/core.log
 
 | 报错 | 原因 | 处理 |
 |------|------|------|
-| `core already running at 127.0.0.1:7437` | 已有守护进程在运行 | `uv run kama core stop` |
-| `core not running` | 未启动守护进程 | `uv run kama-core` |
-| `Address already in use` | 端口被其他进程占用 | `KAMA_PORT=8000 uv run kama-core` |
-| `Config error: KAMA_PORT must be an integer` | `.env` 或环境变量中端口值非整数 | 检查 `KAMA_PORT` 的值 |
+| `core already running at 127.0.0.1:7437` | 已有守护进程在运行 | `uv run lite core stop` |
+| `core not running` | 未启动守护进程 | `uv run lite-core` |
+| `Address already in use` | 端口被其他进程占用 | `AGENTLITE_PORT=8000 uv run lite-core` |
+| `Config error: AGENTLITE_PORT must be an integer` | `.env` 或环境变量中端口值非整数 | 检查 `AGENTLITE_PORT` 的值 |

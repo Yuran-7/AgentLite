@@ -3,7 +3,7 @@
 __pycache__/
 *.pyc
 *.pyo
-runs/
+events.jsonl
 dist/
 build/
 *.egg-info/
@@ -16,5 +16,5 @@ uv.lock
 .DS_Store
 *.log
 workspace/
-# Legacy/project override session storage; the default is ~/.kama/sessions/.
-.kama/sessions/
+# Legacy/project override session storage; the default is ~/.agentlite/sessions/.
+.agentlite/sessions/

@@ -11,23 +11,20 @@ from dotenv import load_dotenv
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7437
 _DEFAULT_LOG_LEVEL = "INFO"
-_DEFAULT_LOG_FILE = "~/.kama/logs/core.log"
+_DEFAULT_LOG_FILE = "~/.agentlite/logs/core.log"
 _DEFAULT_LOG_FORMAT = "text"
-_DEFAULT_CONFIG_PATH = "~/.kama/config.toml"
+_DEFAULT_CONFIG_PATH = "~/.agentlite/config.toml"
 _DEFAULT_MAX_STEPS = 20
 _DEFAULT_LLM_PROTOCOL = "anthropic"
 _DEFAULT_MODEL = "deepseek-chat"
-_DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
-_DEFAULT_SESSIONS_DIR = "~/.kama/sessions"
+_DEFAULT_TRACE_FILE = "~/.agentlite/traces/daemon.jsonl"
+_DEFAULT_SESSIONS_DIR = "~/.agentlite/sessions"
 _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "read_file",
     "shell",
     "write_file",
     "list_dir",
-    "task_create",
-    "task_update",
-    "task_list",
-    "task_get",
+    "update_plan",
     "spawn_agent",
     "agent_result",
 ]
@@ -72,7 +69,7 @@ class WebConfig:
     browser_max_nodes: int = 100
     browser_max_chars: int = 8_000
     browser_extract_limit: int = 10
-    user_agent: str = "KamaClaude/0.0.1 (+https://github.com/)"
+    user_agent: str = "AgentLite/0.0.1 (+https://github.com/)"
 
 
 @dataclass
@@ -119,14 +116,14 @@ class McpConfig:
     servers: list[McpServerConfig] = field(default_factory=list)
 
 
-# Session 存储配置：默认使用全局 ~/.kama/sessions，允许通过配置或环境变量显式覆盖
+# Session 存储配置：默认使用全局 ~/.agentlite/sessions，允许通过配置或环境变量显式覆盖
 @dataclass
 class SessionConfig:
     dir: str = _DEFAULT_SESSIONS_DIR
 
 
 @dataclass
-class KamaConfig:
+class AgentLiteConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -141,20 +138,20 @@ class KamaConfig:
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
-def get_config() -> KamaConfig:
-    config = KamaConfig() # 所谓的内建默认值
+def get_config() -> AgentLiteConfig:
+    config = AgentLiteConfig() # 所谓的内建默认值
 
-    # .env 必须在读取 KAMA_CONFIG 之前加载，以便 .env 中的 KAMA_CONFIG 能影响 TOML 路径
+    # .env 必须在读取 AGENTLITE_CONFIG 之前加载，以便它能影响 TOML 路径
     load_dotenv(".env", override=False)
 
-    # 若显式指定 KAMA_CONFIG，只读该文件；否则按优先级叠加：全局 → 项目本地
-    explicit = os.environ.get("KAMA_CONFIG")
+    # 若显式指定 AGENTLITE_CONFIG，只读该文件；否则按优先级叠加：全局 → 项目本地
+    explicit = os.environ.get("AGENTLITE_CONFIG")
     if explicit:
         config_paths = [Path(explicit).expanduser()]
     else:
         config_paths = [
             Path(_DEFAULT_CONFIG_PATH).expanduser(),
-            Path(".kama/config.toml"),
+            Path(".agentlite/config.toml"),
         ]
 
     for config_path in config_paths:
@@ -171,7 +168,7 @@ def get_config() -> KamaConfig:
 
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
-def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
+def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
     known_sections = {
         "core", "logging", "agent", "web", "llm", "trace", "permission",
         "compaction", "mcp", "session",
@@ -473,98 +470,98 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
             config.mcp.servers.append(s)
 
 
-# 用 KAMA_* 环境变量覆盖 config 中对应字段（若变量已设置）
-def _apply_env(config: KamaConfig) -> None:
-    host = os.environ.get("KAMA_HOST")
+# 用 AGENTLITE_* 环境变量覆盖 config 中对应字段（若变量已设置）
+def _apply_env(config: AgentLiteConfig) -> None:
+    host = os.environ.get("AGENTLITE_HOST")
     if host is not None:
         config.host = host
 
-    port_str = os.environ.get("KAMA_PORT")
+    port_str = os.environ.get("AGENTLITE_PORT")
     if port_str is not None:
         try:
             config.port = int(port_str)
         except ValueError:
-            raise SystemExit(f"Config error: KAMA_PORT must be an integer, got: {port_str!r}")
+            raise SystemExit(f"Config error: AGENTLITE_PORT must be an integer, got: {port_str!r}")
 
-    log_level = os.environ.get("KAMA_LOG_LEVEL")
+    log_level = os.environ.get("AGENTLITE_LOG_LEVEL")
     if log_level is not None:
         config.logging.level = log_level
 
-    log_file = os.environ.get("KAMA_LOG_FILE")
+    log_file = os.environ.get("AGENTLITE_LOG_FILE")
     if log_file is not None:
         config.logging.file = log_file
 
-    log_format = os.environ.get("KAMA_LOG_FORMAT")
+    log_format = os.environ.get("AGENTLITE_LOG_FORMAT")
     if log_format is not None:
         config.logging.format = log_format
 
-    sessions_dir = os.environ.get("KAMA_SESSIONS_DIR")
+    sessions_dir = os.environ.get("AGENTLITE_SESSIONS_DIR")
     if sessions_dir is not None:
         if not sessions_dir.strip():
-            raise SystemExit("Config error: KAMA_SESSIONS_DIR must not be empty")
+            raise SystemExit("Config error: AGENTLITE_SESSIONS_DIR must not be empty")
         config.session.dir = sessions_dir
 
-    max_steps_str = os.environ.get("KAMA_MAX_STEPS")
+    max_steps_str = os.environ.get("AGENTLITE_MAX_STEPS")
     if max_steps_str is not None:
         try:
             val = int(max_steps_str)
             if val <= 0:
                 raise SystemExit(
-                    "Config error: KAMA_MAX_STEPS must be a positive integer,"
+                    "Config error: AGENTLITE_MAX_STEPS must be a positive integer,"
                     f" got: {max_steps_str!r}"
                 )
             config.agent.max_steps = val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_MAX_STEPS must be an integer, got: {max_steps_str!r}"
+                f"Config error: AGENTLITE_MAX_STEPS must be an integer, got: {max_steps_str!r}"
             )
 
-    subagent_tools = os.environ.get("KAMA_SUBAGENT_ALLOWED_TOOLS")
+    subagent_tools = os.environ.get("AGENTLITE_SUBAGENT_ALLOWED_TOOLS")
     if subagent_tools is not None:
         config.agent.subagent_allowed_tools = _normalize_tool_names(
             [item.strip() for item in subagent_tools.split(",") if item.strip()]
         )
 
-    web_enabled = os.environ.get("KAMA_WEB_ENABLED")
+    web_enabled = os.environ.get("AGENTLITE_WEB_ENABLED")
     if web_enabled is not None:
         config.web.enabled = web_enabled.lower() not in ("0", "false", "no")
 
-    web_provider = os.environ.get("KAMA_WEB_SEARCH_PROVIDER")
+    web_provider = os.environ.get("AGENTLITE_WEB_SEARCH_PROVIDER")
     if web_provider is not None:
         web_provider = web_provider.lower()
         if web_provider not in {"duckduckgo", "brave", "searxng"}:
             raise SystemExit(
-                "Config error: KAMA_WEB_SEARCH_PROVIDER must be duckduckgo, brave, or searxng"
+                "Config error: AGENTLITE_WEB_SEARCH_PROVIDER must be duckduckgo, brave, or searxng"
             )
         config.web.search_provider = web_provider
 
-    web_base_url = os.environ.get("KAMA_WEB_SEARCH_BASE_URL")
+    web_base_url = os.environ.get("AGENTLITE_WEB_SEARCH_BASE_URL")
     if web_base_url is not None:
         config.web.search_base_url = web_base_url
 
-    web_api_key = os.environ.get("KAMA_WEB_SEARCH_API_KEY")
+    web_api_key = os.environ.get("AGENTLITE_WEB_SEARCH_API_KEY")
     if web_api_key is not None:
         config.web.search_api_key = web_api_key
 
-    browser_enabled = os.environ.get("KAMA_BROWSER_ENABLED")
+    browser_enabled = os.environ.get("AGENTLITE_BROWSER_ENABLED")
     if browser_enabled is not None:
         config.web.browser_enabled = browser_enabled.lower() not in ("0", "false", "no")
 
-    browser_headless = os.environ.get("KAMA_BROWSER_HEADLESS")
+    browser_headless = os.environ.get("AGENTLITE_BROWSER_HEADLESS")
     if browser_headless is not None:
         config.web.browser_headless = browser_headless.lower() not in ("0", "false", "no")
 
-    browser_idle_timeout = os.environ.get("KAMA_BROWSER_IDLE_TIMEOUT_S")
+    browser_idle_timeout = os.environ.get("AGENTLITE_BROWSER_IDLE_TIMEOUT_S")
     if browser_idle_timeout is not None:
         try:
             value = float(browser_idle_timeout)
         except ValueError as exc:
             raise SystemExit(
-                "Config error: KAMA_BROWSER_IDLE_TIMEOUT_S must be a positive number"
+                "Config error: AGENTLITE_BROWSER_IDLE_TIMEOUT_S must be a positive number"
             ) from exc
         if value <= 0:
             raise SystemExit(
-                "Config error: KAMA_BROWSER_IDLE_TIMEOUT_S must be a positive number"
+                "Config error: AGENTLITE_BROWSER_IDLE_TIMEOUT_S must be a positive number"
             )
         config.web.browser_idle_timeout_s = value
 
@@ -588,75 +585,78 @@ def _apply_env(config: KamaConfig) -> None:
     if base_url is not None:
         config.llm.base_url = base_url
 
-    trace_enabled = os.environ.get("KAMA_TRACE_ENABLED")
+    trace_enabled = os.environ.get("AGENTLITE_TRACE_ENABLED")
     if trace_enabled is not None:
         config.trace.enabled = trace_enabled.lower() not in ("0", "false", "no")
 
-    trace_file = os.environ.get("KAMA_TRACE_FILE")
+    trace_file = os.environ.get("AGENTLITE_TRACE_FILE")
     if trace_file is not None:
         config.trace.file = trace_file
 
-    trace_payload = os.environ.get("KAMA_TRACE_INCLUDE_LLM_PAYLOAD")
+    trace_payload = os.environ.get("AGENTLITE_TRACE_INCLUDE_LLM_PAYLOAD")
     if trace_payload is not None:
         config.trace.include_llm_payload = trace_payload.lower() not in ("0", "false", "no")
 
-    perm_timeout = os.environ.get("KAMA_PERMISSION_TIMEOUT_S")
+    perm_timeout = os.environ.get("AGENTLITE_PERMISSION_TIMEOUT_S")
     if perm_timeout is not None:
         try:
             perm_timeout_val = float(perm_timeout)
             if perm_timeout_val < 0:
                 raise SystemExit(
-                    f"Config error: KAMA_PERMISSION_TIMEOUT_S must be >= 0, got: {perm_timeout!r}"
+                    "Config error: AGENTLITE_PERMISSION_TIMEOUT_S must be >= 0, "
+                    f"got: {perm_timeout!r}"
                 )
             config.permission.timeout_s = perm_timeout_val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_PERMISSION_TIMEOUT_S must be a number, got: {perm_timeout!r}"
+                "Config error: AGENTLITE_PERMISSION_TIMEOUT_S must be a number, "
+                f"got: {perm_timeout!r}"
             )
 
-    compact_threshold = os.environ.get("KAMA_COMPACT_THRESHOLD")
+    compact_threshold = os.environ.get("AGENTLITE_COMPACT_THRESHOLD")
     if compact_threshold is not None:
         try:
             compact_threshold_val = float(compact_threshold)
             if not (0.0 <= compact_threshold_val <= 1.0):
                 raise SystemExit(
-                    "Config error: KAMA_COMPACT_THRESHOLD must be between 0 and 1, "
+                    "Config error: AGENTLITE_COMPACT_THRESHOLD must be between 0 and 1, "
                     f"got: {compact_threshold!r}"
                 )
             config.compaction.auto_threshold = compact_threshold_val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_COMPACT_THRESHOLD must be a number, got: {compact_threshold!r}"
+                "Config error: AGENTLITE_COMPACT_THRESHOLD must be a number, "
+                f"got: {compact_threshold!r}"
             )
 
-    compact_tool_limit = os.environ.get("KAMA_COMPACT_TOOL_LIMIT")
+    compact_tool_limit = os.environ.get("AGENTLITE_COMPACT_TOOL_LIMIT")
     if compact_tool_limit is not None:
         try:
             compact_tool_limit_val = int(compact_tool_limit)
             if compact_tool_limit_val <= 0:
                 raise SystemExit(
-                    "Config error: KAMA_COMPACT_TOOL_LIMIT must be a positive integer, "
+                    "Config error: AGENTLITE_COMPACT_TOOL_LIMIT must be a positive integer, "
                     f"got: {compact_tool_limit!r}"
                 )
             config.compaction.tool_result_limit = compact_tool_limit_val
         except ValueError:
             raise SystemExit(
-                "Config error: KAMA_COMPACT_TOOL_LIMIT must be an integer, "
+                "Config error: AGENTLITE_COMPACT_TOOL_LIMIT must be an integer, "
                 f"got: {compact_tool_limit!r}"
             )
 
-    compact_tool_keep = os.environ.get("KAMA_COMPACT_TOOL_KEEP")
+    compact_tool_keep = os.environ.get("AGENTLITE_COMPACT_TOOL_KEEP")
     if compact_tool_keep is not None:
         try:
             compact_tool_keep_val = int(compact_tool_keep)
             if compact_tool_keep_val <= 0:
                 raise SystemExit(
-                    "Config error: KAMA_COMPACT_TOOL_KEEP must be a positive integer, "
+                    "Config error: AGENTLITE_COMPACT_TOOL_KEEP must be a positive integer, "
                     f"got: {compact_tool_keep!r}"
                 )
             config.compaction.tool_result_keep = compact_tool_keep_val
         except ValueError:
             raise SystemExit(
-                "Config error: KAMA_COMPACT_TOOL_KEEP must be an integer, "
+                "Config error: AGENTLITE_COMPACT_TOOL_KEEP must be an integer, "
                 f"got: {compact_tool_keep!r}"
             )

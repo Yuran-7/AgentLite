@@ -6,21 +6,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.transport.socket_client import SocketClient
 
-_PID_FILE = Path.home() / ".kama" / "kama-core.pid"
+_PID_FILE = Path.home() / ".agentlite" / "agentlite-core.pid"
 
 
 # 尝试连接 daemon，成功则正常返回，失败则抛出 ConnectionRefusedError/OSError
-async def _ping_check(config: KamaConfig) -> None:
+async def _ping_check(config: AgentLiteConfig) -> None:
     _r, w = await asyncio.open_connection(config.host, config.port)
     w.close()
     await w.wait_closed()
 
 
 # 通过 TCP IPC 请求 daemon 优雅退出，并等待 JSON-RPC 响应
-async def _shutdown_request(config: KamaConfig) -> None:
+async def _shutdown_request(config: AgentLiteConfig) -> None:
     client = SocketClient(config.host, config.port)
     await client.connect()
     event_loop = asyncio.create_task(client.run_event_loop())
@@ -35,7 +35,7 @@ async def _shutdown_request(config: KamaConfig) -> None:
 
 
 # 打印 daemon 当前状态（running / not running）
-def cmd_core_status(config: KamaConfig) -> None:
+def cmd_core_status(config: AgentLiteConfig) -> None:
     try:
         asyncio.run(_ping_check(config))
         print(f"running  ({config.host}:{config.port})")
@@ -44,7 +44,7 @@ def cmd_core_status(config: KamaConfig) -> None:
 
 
 # 在后台启动 daemon，若已在运行则提示并退出
-def cmd_core_start(config: KamaConfig) -> None:
+def cmd_core_start(config: AgentLiteConfig) -> None:
     try:
         asyncio.run(_ping_check(config))
         print(f"already running  ({config.host}:{config.port})")
@@ -72,7 +72,7 @@ def cmd_core_start(config: KamaConfig) -> None:
 
 
 # 通过跨平台 IPC 请求 daemon 优雅停止，若未运行则清理过期 PID 文件
-def cmd_core_stop(config: KamaConfig) -> None:
+def cmd_core_stop(config: AgentLiteConfig) -> None:
     pid = _PID_FILE.read_text().strip() if _PID_FILE.exists() else "unknown"
     try:
         asyncio.run(_shutdown_request(config))

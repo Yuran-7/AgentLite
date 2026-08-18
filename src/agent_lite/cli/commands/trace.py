@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.trace.record import TraceRecord
 
 _COLORS = {
@@ -19,10 +19,10 @@ _RESET = "\033[0m"
 _BOLD = "\033[1m"
 
 
-# kama trace 子命令：从 daemon.jsonl 读取并展示 trace 记录
+# lite trace 子命令：从 daemon.jsonl 读取并展示 trace 记录
 def cmd_trace(
     run_id: str | None,
-    config: KamaConfig,
+    config: AgentLiteConfig,
     *,
     layer: str | None = None,
     direction: str | None = None,

@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 
 # New session IDs carry their creation timestamp so the storage layer can place
-# them under ~/.kama/sessions/YYYY/MM/DD without reading meta.json first.
+# them under ~/.agentlite/sessions/YYYY/MM/DD without reading meta.json first.
 _SESSION_ID_RE = re.compile(
     r"^sess-(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})-"
     r"(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})-"

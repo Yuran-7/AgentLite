@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.runner import AgentRunner
 
 # Load project .env so ANTHROPIC_API_KEY is available without going through get_config()
@@ -53,21 +53,18 @@ async def test_run_e2e_reads_file_and_succeeds(
         "Use the read_file tool to read the file 'sample.txt' "
         "and report the magic number it mentions."
     )
-    runs_dir = tmp_path / "runs"
+    events_file = tmp_path / "events.jsonl"
 
-    config = KamaConfig()
+    config = AgentLiteConfig()
     config.agent.max_steps = 5
 
-    runner = AgentRunner(config, runs_dir=runs_dir)
+    runner = AgentRunner(config, events_file=events_file)
     await runner.run(goal)
 
     # ── events.jsonl must exist ──────────────────────────────────────────────
-    jsonl_files = list(runs_dir.rglob("events.jsonl"))
-    assert len(jsonl_files) == 1, "expected exactly one events.jsonl"
-
     events = [
         json.loads(line)
-        for line in jsonl_files[0].read_text(encoding="utf-8").splitlines()
+        for line in events_file.read_text(encoding="utf-8").splitlines()
         if line
     ]
     types = [e["type"] for e in events]

@@ -4,7 +4,7 @@
 
 ## Transport
 
-- TCP loopback `127.0.0.1:7437` (override via `KAMA_HOST` / `KAMA_PORT`)
+- TCP loopback `127.0.0.1:7437` (override via `AGENTLITE_HOST` / `AGENTLITE_PORT`)
 - Each message is one `\n`-terminated JSON line (NDJSON)
 - Commands use JSON-RPC 2.0 (client ¡ú server); Events use `kind=event` envelope (server ¡ú client)
 
@@ -833,7 +833,7 @@ Events sent over the IPC socket (daemon ¡ú client).
 
 ## Run Events
 
-Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscribed clients.
+Session events are appended to `sessions/.../<session_id>/events.jsonl`; standalone runs use a single `events.jsonl` file. Events are also forwarded over IPC to subscribed clients.
 
 ### RunStartedEvent
 
@@ -1060,6 +1060,109 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
   "type": "step.finished",
   "run_id": "20260516-100000-abc123",
   "step": 1,
+  "ts": "2026-05-16T10:00:00.001Z"
+}
+```
+
+### PlanUpdatedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `explanation` | `string | null` | no |
+| `plan` | `array` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "$defs": {
+    "PlanItem": {
+      "properties": {
+        "step": {
+          "title": "Step",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "status"
+      ],
+      "title": "PlanItem",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "type": {
+      "const": "plan.updated",
+      "default": "plan.updated",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "explanation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Explanation"
+    },
+    "plan": {
+      "items": {
+        "$ref": "#/$defs/PlanItem"
+      },
+      "title": "Plan",
+      "type": "array"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "plan",
+    "ts"
+  ],
+  "title": "PlanUpdatedEvent",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "type": "plan.updated",
+  "run_id": "20260516-100000-abc123",
+  "explanation": "starting implementation",
+  "plan": [
+    {
+      "step": "inspect code",
+      "status": "completed"
+    },
+    {
+      "step": "implement change",
+      "status": "in_progress"
+    }
+  ],
   "ts": "2026-05-16T10:00:00.001Z"
 }
 ```

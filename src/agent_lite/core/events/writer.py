@@ -41,3 +41,22 @@ class EventWriter:
     # 将 handle 注册为 bus 的订阅者
     def subscribe(self, bus: EventBus) -> None:
         bus.subscribe(self.handle)
+
+
+# 按事件打开文件并追加一行，使后台 subagent 可在父 run 结束后继续写 session 日志
+class EventAppender:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    # 将事件原子追加到共享 JSONL，单次写入失败时记录日志但不终止 agent
+    async def handle(self, event: BaseModel) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as file:
+                file.write(event.model_dump_json() + "\n")
+        except (OSError, ValueError) as e:
+            logger.error("EventAppender: failed to write event: %s", e)
+
+    # 将 handle 注册到 session run 的局部事件总线
+    def subscribe(self, bus: EventBus) -> None:
+        bus.subscribe(self.handle)

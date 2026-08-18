@@ -7,9 +7,8 @@ from typing import Any
 import httpx
 import pytest
 
-from agent_lite.core.config import KamaConfig, WebConfig
+from agent_lite.core.config import AgentLiteConfig, WebConfig
 from agent_lite.core.runner import AgentRunner
-from agent_lite.core.task.manager import TaskManager
 from agent_lite.core.tools.builtin.web_fetch import WebFetchTool
 from agent_lite.core.tools.builtin.web_search import WebSearchTool
 
@@ -143,11 +142,10 @@ async def test_web_fetch_enforces_server_side_character_cap() -> None:
 
 
 def test_root_registry_registers_web_tools_and_honors_empty_whitelist(tmp_path: Path) -> None:
-    runner = AgentRunner(KamaConfig(), runs_dir=tmp_path)
-    task_manager = TaskManager(tmp_path / ".tasks")
+    runner = AgentRunner(AgentLiteConfig(), events_file=tmp_path / "events.jsonl")
 
-    normal = runner._build_registry(task_manager)
-    denied = runner._build_registry(task_manager, tool_whitelist=[])
+    normal = runner._build_registry()
+    denied = runner._build_registry(tool_whitelist=[])
 
     assert normal.get("shell") is not None
     assert {schema["name"] for schema in normal.tool_schemas()} >= {

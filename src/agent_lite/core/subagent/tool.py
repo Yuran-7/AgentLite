@@ -5,13 +5,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_lite.core.agents.loader import AgentProfile, AgentProfileLoader
 from agent_lite.core.bus.events import SubagentFinishedEvent, SubagentStartedEvent
 from agent_lite.core.context import ExecutionContext
 from agent_lite.core.events.bus import EventBus
-from agent_lite.core.events.writer import EventWriter
 from agent_lite.core.loop import AgentLoop
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.subagent.registry import BackgroundTaskRegistry
@@ -20,10 +19,7 @@ from agent_lite.core.tools.builtin.bash import ShellTool
 from agent_lite.core.tools.builtin.browser import BrowserTool
 from agent_lite.core.tools.builtin.list_dir import ListDirTool
 from agent_lite.core.tools.builtin.read_file import ReadFileTool
-from agent_lite.core.tools.builtin.task_create import TaskCreateTool
-from agent_lite.core.tools.builtin.task_get import TaskGetTool
-from agent_lite.core.tools.builtin.task_list import TaskListTool
-from agent_lite.core.tools.builtin.task_update import TaskUpdateTool
+from agent_lite.core.tools.builtin.update_plan import UpdatePlanTool
 from agent_lite.core.tools.builtin.web_fetch import WebFetchTool
 from agent_lite.core.tools.builtin.web_search import WebSearchTool
 from agent_lite.core.tools.builtin.write_file import WriteFileTool
@@ -94,7 +90,6 @@ class SpawnAgentTool(BaseTool):
         permission_manager: PermissionManager | None,
         max_steps: int,
         task_registry: BackgroundTaskRegistry,
-        runs_dir: Path,
         session_id: str,
         workspace_root: Path | None = None,
         agent_context: str = "",
@@ -108,7 +103,6 @@ class SpawnAgentTool(BaseTool):
         self._permission_manager = permission_manager
         self._max_steps = max_steps
         self._task_registry = task_registry
-        self._runs_dir = runs_dir
         self._session_id = session_id
         self._workspace_root = workspace_root
         self._agent_context = agent_context
@@ -124,10 +118,7 @@ class SpawnAgentTool(BaseTool):
                 "shell",
                 "write_file",
                 "list_dir",
-                "task_create",
-                "task_update",
-                "task_list",
-                "task_get",
+                "update_plan",
                 "spawn_agent",
                 "agent_result",
             }
@@ -191,16 +182,12 @@ class SpawnAgentTool(BaseTool):
             )
         )
 
-        child_run_path = self._runs_dir / child_run_id
-        child_run_path.mkdir(parents=True, exist_ok=True)
-
         if p.run_in_background:
             task: asyncio.Task[None] = asyncio.create_task(
                 self._run_background(
                     child_loop,
                     child_context,
                     child_bus,
-                    child_run_path,
                     child_run_id,
                     child_registry,
                 )
@@ -214,9 +201,7 @@ class SpawnAgentTool(BaseTool):
             )
 
         try:
-            async with EventWriter(child_run_path / "events.jsonl") as writer:
-                writer.subscribe(child_bus)
-                await child_loop.run(child_context)
+            await child_loop.run(child_context)
         finally:
             await child_registry.aclose()
 
@@ -248,14 +233,11 @@ class SpawnAgentTool(BaseTool):
         loop: AgentLoop,
         context: ExecutionContext,
         bus: EventBus,
-        run_path: Path,
         run_id: str,
         registry: ToolRegistry,
     ) -> None:
         try:
-            async with EventWriter(run_path / "events.jsonl") as writer:
-                writer.subscribe(bus)
-                await loop.run(context)
+            await loop.run(context)
         finally:
             await registry.aclose()
         await self._parent_bus.publish(
@@ -274,8 +256,6 @@ class SpawnAgentTool(BaseTool):
         child_run_id: str,
         profile: AgentProfile | None,
     ) -> ToolRegistry:
-        from agent_lite.core.task.manager import TaskManager
-
         profile_allowed: set[str] | None = (
             set(profile.allowed_tools) if profile is not None else None
         )
@@ -303,15 +283,8 @@ class SpawnAgentTool(BaseTool):
             if self._web_config.browser_enabled and _allowed("browser"):
                 registry.register(BrowserTool(self._web_config))
 
-        child_task_manager = TaskManager(self._runs_dir / child_run_id / ".tasks")
-        for t in [
-            TaskCreateTool(child_task_manager),
-            TaskUpdateTool(child_task_manager),
-            TaskListTool(child_task_manager),
-            TaskGetTool(child_task_manager),
-        ]:
-            if _allowed(t.name):
-                registry.register(t)
+        if _allowed("update_plan"):
+            registry.register(UpdatePlanTool(child_bus, child_run_id))
 
         if self._depth < 1:
             nested = SpawnAgentTool(
@@ -321,7 +294,6 @@ class SpawnAgentTool(BaseTool):
                 permission_manager=self._permission_manager,
                 max_steps=self._max_steps,
                 task_registry=self._task_registry,
-                runs_dir=self._runs_dir,
                 session_id=self._session_id,
                 workspace_root=self._workspace_root,
                 agent_context=self._agent_context,
@@ -339,6 +311,7 @@ class SpawnAgentTool(BaseTool):
 
 class AgentResultParams(BaseModel):
     run_id: str
+    timeout_seconds: float = Field(default=0, ge=0, le=60)
 
 
 # 查询后台 subagent 的执行状态和最终结果
@@ -346,7 +319,8 @@ class AgentResultTool(BaseTool):
     name = "agent_result"
     description = (
         "Retrieve the result of a background sub-agent previously started with spawn_agent. "
-        "Returns 'still running' if the sub-agent has not yet completed."
+        "Optionally wait for it to finish, returning immediately when it completes. "
+        "Returns 'still running' if the sub-agent has not completed before the timeout."
     )
     input_schema: dict[str, Any] = {
         "type": "object",
@@ -354,6 +328,16 @@ class AgentResultTool(BaseTool):
             "run_id": {
                 "type": "string",
                 "description": "The run_id returned by spawn_agent(run_in_background=true)",
+            },
+            "timeout_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 60,
+                "default": 0,
+                "description": (
+                    "Maximum seconds to wait for completion. Returns immediately when the "
+                    "sub-agent finishes; 0 checks status without waiting."
+                ),
             },
         },
         "required": ["run_id"],
@@ -376,7 +360,11 @@ class AgentResultTool(BaseTool):
             )
         task, context = entry
         if not task.done():
-            return ToolResult(content="still running")
+            if p.timeout_seconds == 0:
+                return ToolResult(content="still running")
+            done, _ = await asyncio.wait({task}, timeout=p.timeout_seconds)
+            if not done:
+                return ToolResult(content="still running")
         if task.cancelled():
             return ToolResult(
                 content="Subagent was cancelled.", is_error=True, error_type="runtime_error"

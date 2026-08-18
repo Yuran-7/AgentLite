@@ -15,5 +15,5 @@ system_prompt = """
 - 遇到了哪些问题（如有）
 - 未完成的部分（如有）
 """
-allowed_tools = ["shell", "read_file", "write_file", "list_dir", "task_update", "task_list"]
+allowed_tools = ["shell", "read_file", "write_file", "list_dir", "update_plan"]
 model = "claude-sonnet-4-6"

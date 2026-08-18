@@ -295,8 +295,8 @@ class BrowserTool(BaseTool):
         if await scope.count() == 0:
             raise ValueError(f"Snapshot scope did not match any element: {p.scope}")
 
-        await page.locator("[data-kama-ref]").evaluate_all(
-            "elements => elements.forEach(el => el.removeAttribute('data-kama-ref'))"
+        await page.locator("[data-agentlite-ref]").evaluate_all(
+            "elements => elements.forEach(el => el.removeAttribute('data-agentlite-ref'))"
         )
         nodes = scope.locator(_INTERACTIVE_SELECTOR)
         raw = await nodes.evaluate_all(
@@ -310,7 +310,7 @@ class BrowserTool(BaseTool):
               }).slice(0, maxNodes);
               return visible.map((el, index) => {
                 const ref = `e${index + 1}`;
-                el.setAttribute('data-kama-ref', ref);
+                el.setAttribute('data-agentlite-ref', ref);
                 const tag = el.tagName.toLowerCase();
                 const role = el.getAttribute('role') ||
                   (tag === 'a' ? 'link' : tag === 'button' ? 'button' :
@@ -354,7 +354,7 @@ class BrowserTool(BaseTool):
             raise ValueError(
                 f"Unknown or stale element_id {element_id}; take a new snapshot first"
             )
-        return page.locator(f'[data-kama-ref="{element_id}"]').first
+        return page.locator(f'[data-agentlite-ref="{element_id}"]').first
 
     async def _click(self, p: BrowserParams) -> ToolResult:
         page = self._require_page()

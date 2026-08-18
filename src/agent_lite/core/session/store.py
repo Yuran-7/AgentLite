@@ -32,9 +32,9 @@ class SessionStore:
             raise ValueError(f"invalid session ID: {sid!r}")
         return self._root.joinpath(*date_parts, sid)
 
-    # 返回指定 session 下的 runs 目录路径
-    def runs_dir(self, sid: str) -> Path:
-        return self.session_dir(sid) / "runs"
+    # 返回指定 session 汇总所有 run 事件的日志路径
+    def events_file(self, sid: str) -> Path:
+        return self.session_dir(sid) / "events.jsonl"
 
     # 将 session meta 写入 meta.json
     def write_meta(self, session: Session) -> None:

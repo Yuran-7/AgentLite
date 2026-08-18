@@ -26,10 +26,10 @@ async def running_daemon(
     tmp_path: Path,
 ) -> AsyncGenerator[subprocess.Popen[bytes], None]:
     env = os.environ.copy()
-    env["KAMA_PORT"] = str(free_port)
-    env["KAMA_LOG_FILE"] = ""
-    env["KAMA_LOG_LEVEL"] = "WARNING"
-    env["KAMA_SESSIONS_DIR"] = str(tmp_path / "sessions")
+    env["AGENTLITE_PORT"] = str(free_port)
+    env["AGENTLITE_LOG_FILE"] = ""
+    env["AGENTLITE_LOG_LEVEL"] = "WARNING"
+    env["AGENTLITE_SESSIONS_DIR"] = str(tmp_path / "sessions")
 
     proc = subprocess.Popen([sys.executable, "-m", "agent_lite.core"], env=env)
 

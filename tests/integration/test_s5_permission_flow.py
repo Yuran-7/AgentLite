@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock
 from agent_lite.core.permissions.manager import PermissionManager
@@ -80,14 +80,14 @@ def _runner(
     tmp_path: Path,
     max_steps: int = 10,
 ) -> AgentRunner:
-    config = KamaConfig()
+    config = AgentLiteConfig()
     config.agent.max_steps = max_steps
     return AgentRunner(
         config,
         bus=bus,
         provider=provider,  # type: ignore[arg-type]
         permission_manager=manager,
-        runs_dir=tmp_path / "runs",
+        events_file=tmp_path / "events.jsonl",
     )
 
 

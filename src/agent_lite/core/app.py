@@ -39,7 +39,7 @@ from agent_lite.core.bus.commands import (
     SessionSetWorkspaceResult,
 )
 from agent_lite.core.bus.envelope import EventPushEnvelope
-from agent_lite.core.config import KamaConfig, get_config
+from agent_lite.core.config import AgentLiteConfig, get_config
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.factory import create_llm_provider
 from agent_lite.core.logging_setup import setup_logging
@@ -47,7 +47,7 @@ from agent_lite.core.mcp.server import McpServerManager
 from agent_lite.core.permissions.manager import PermissionManager
 from agent_lite.core.permissions.storage import load_policy_file
 from agent_lite.core.runner import AgentRunner
-from agent_lite.core.runs import events_file, new_run_id
+from agent_lite.core.runs import new_run_id
 from agent_lite.core.session import SessionManager, SessionStore
 from agent_lite.core.tools.builtin.browser_session import BrowserSessionManager
 from agent_lite.core.trace.record import TraceRecord
@@ -68,7 +68,7 @@ class CoreApp:
         self._bus = EventBus()
         self._broadcaster: IpcEventBroadcaster | None = None
         self._trace: TraceWriter | None = None
-        self._config: KamaConfig | None = None
+        self._config: AgentLiteConfig | None = None
         self._running_runs: set[asyncio.Task[Any]] = set()
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
@@ -215,26 +215,44 @@ class CoreApp:
         writer: asyncio.StreamWriter,
         topics: list[str],
     ) -> int:
-        path = events_file(run_id)
+        # 新版日志位于 session 根目录；此路径仅用于读取旧版本的全局 runs 数据。
+        path = Path("runs") / run_id / "events.jsonl"
+        unified_session_log = False
         if not path.exists():
             assert self._sessions_root is not None
-            # Session runs use YYYY/MM/DD/<session-id>/runs.
+            # 兼容旧版 session/runs/<run_id>/events.jsonl 布局。
             for candidate in self._sessions_root.glob(
                 f"*/*/*/*/runs/{run_id}/events.jsonl"
             ):
                 path = candidate
                 break
         if not path.exists():
+            assert self._sessions_root is not None
+            # 新版 session 将全部 run 汇总到 session/events.jsonl。
+            for candidate in self._sessions_root.glob("*/*/*/*/events.jsonl"):
+                if self._event_log_contains_run(candidate, run_id):
+                    path = candidate
+                    unified_session_log = True
+                    break
+        if not path.exists():
             return 0
 
         count = 0
-        for line in path.read_text().splitlines():
+        related_run_ids = {run_id}
+        for line in path.read_text(encoding="utf-8").splitlines():
             if not line:
                 continue
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            event_run_id = event.get("run_id")
+            parent_run_id = event.get("parent_run_id")
+            if unified_session_log:
+                if parent_run_id in related_run_ids and isinstance(event_run_id, str):
+                    related_run_ids.add(event_run_id)
+                if event_run_id not in related_run_ids:
+                    continue
             event_type: str = event.get("type", "")
             if not any(fnmatch.fnmatch(event_type, p) for p in topics):
                 continue
@@ -245,6 +263,19 @@ class CoreApp:
         if count:
             await writer.drain()
         return count
+
+    # 判断统一 session 事件日志中是否包含指定 run，忽略损坏的 JSONL 行
+    def _event_log_contains_run(self, path: Path, run_id: str) -> bool:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("run_id") == run_id:
+                return True
+        return False
 
     # 启动常驻 core 进程：加载配置、初始化日志、启动 trace 和 TCP 服务，并等待退出信号
     async def run(self) -> None:
@@ -258,7 +289,7 @@ class CoreApp:
             await self._trace.start()
             self._bus.subscribe(self._trace_event_handler)
 
-        policy_file = Path("~/.kama/policy.toml").expanduser()
+        policy_file = Path("~/.agentlite/policy.toml").expanduser()
         self._permission_manager = PermissionManager(
             policy_file=policy_file,
             timeout_s=self._config.permission.timeout_s,
@@ -323,7 +354,7 @@ class CoreApp:
 
         self._shutdown = asyncio.Event()
         addr = await server.start()  # 启动监听；新连接由 SocketServer 的回调处理
-        logger.info("kama-core %s listening addr=%s", agent_lite.__version__, addr)
+        logger.info("agentlite-core %s listening addr=%s", agent_lite.__version__, addr)
         logger.info("config: %s", self._config)
 
         loop = asyncio.get_running_loop()  # 获取 asyncio.run 已启动的事件循环

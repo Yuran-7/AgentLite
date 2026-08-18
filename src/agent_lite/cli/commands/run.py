@@ -6,7 +6,7 @@ import sys
 import time
 from typing import Any
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
 
 
@@ -65,7 +65,7 @@ class StdoutPrinter:
 # 异步核心：连接 daemon，订阅事件，触发 run，等待 run.finished
 async def _run_async(
     goal: str,
-    config: KamaConfig,
+    config: AgentLiteConfig,
     workspace_root: str | None = None,
 ) -> int:
     client = SocketClient(config.host, config.port)
@@ -120,10 +120,10 @@ async def _run_async(
     return exit_code
 
 
-# 执行 kama run --goal "..." 命令
+# 执行 lite run --goal "..." 命令
 def cmd_run(
     goal: str,
-    config: KamaConfig,
+    config: AgentLiteConfig,
     workspace_root: str | None = None,
 ) -> None:
     try:

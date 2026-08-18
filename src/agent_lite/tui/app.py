@@ -7,9 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
-
 from rich.markdown import Markdown
+from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult  # Textual 是用于构建终端用户界面（TUI）的第三方库
 from textual.binding import Binding
@@ -19,9 +18,11 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Label, Static, TextArea
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.skills.loader import SkillLoader
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
+
+log = logging.getLogger(__name__)
 
 
 def _preview(s: str, n: int) -> str:
@@ -201,6 +202,43 @@ class ToolCallBlock(Widget):
             )
             self.add_class("expanded")
         self.query_one(".chevron", Static).update(self._chevron())
+
+
+class PlanBlock(Static):
+    """展示某个 run 的最新计划，并在后续更新时复用同一个区块。"""
+
+    DEFAULT_CSS = "PlanBlock { padding: 0 2; color: $text-muted; }"
+
+    # 初始化计划展示区块
+    def __init__(
+        self,
+        run_id: str,
+        plan: list[dict[str, Any]],
+        explanation: str | None = None,
+    ) -> None:
+        self._run_id = run_id
+        self._plan = plan
+        self._explanation = explanation or ""
+        super().__init__(self._render_plan())
+
+    # 更新计划内容并刷新展示文本
+    def set_plan(self, plan: list[dict[str, Any]], explanation: str | None = None) -> None:
+        self._plan = plan
+        self._explanation = explanation or ""
+        self.update(self._render_plan())
+
+    # 将计划状态渲染为简洁的 Codex 风格清单
+    def _render_plan(self) -> str:
+        title = f"  [bold cyan]plan[/bold cyan]  [dim]{escape(self._run_id[:12])}[/dim]"
+        if self._explanation:
+            title += f"  [dim]{escape(self._explanation)}[/dim]"
+        lines = [title]
+        icons = {"completed": "[green][x][/green]", "in_progress": "[yellow][>][/yellow]"}
+        for item in self._plan:
+            status = str(item.get("status", "pending"))
+            icon = icons.get(status, "[dim][ ][/dim]")
+            lines.append(f"    {icon} {escape(str(item.get('step', '')))}")
+        return "\n".join(lines)
 
 
 class PermissionSelect(Static):
@@ -529,7 +567,7 @@ class ChatTextArea(TextArea):
         await super()._on_key(event)
 
 
-class KamaTuiApp(App[None]):
+class AgentLiteTuiApp(App[None]):
     """AgentLite TUI：终端滚屏风格，实时展示 agent 执行过程。"""
 
     TITLE = "AgentLite"
@@ -596,6 +634,7 @@ class KamaTuiApp(App[None]):
         self._current_llm: LLMStreamBlock | None = None
         self._pending_tool_blocks: dict[str, ToolCallBlock] = {}
         self._pending_permission_blocks: dict[str, PermissionBlock] = {}
+        self._plan_blocks: dict[str, PlanBlock] = {}
         self._session_id: str | None = None
         self._busy = False
         self._last_context_pct: float = 0.0
@@ -808,6 +847,7 @@ class KamaTuiApp(App[None]):
             self._break_llm()
             self._pending_tool_blocks.clear()
             self._pending_permission_blocks.clear()
+            self._plan_blocks.clear()
             self._subagent_run_ids.clear()
             self._subagent_start_times.clear()
             self._reset_session_stats()
@@ -1177,6 +1217,20 @@ class KamaTuiApp(App[None]):
                 classes="log-line",
             ))
 
+        elif t == "plan.updated":
+            run_id = str(event.get("run_id") or "")
+            plan = [item for item in (event.get("plan") or []) if isinstance(item, dict)]
+            explanation = event.get("explanation")
+            block = self._plan_blocks.get(run_id)
+            if block is None:
+                block = PlanBlock(run_id, plan, str(explanation) if explanation else None)
+                if run_id in self._subagent_run_ids:
+                    block.styles.padding = (0, 2, 0, 6)
+                self._plan_blocks[run_id] = block
+                self._append(block)
+            else:
+                block.set_plan(plan, str(explanation) if explanation else None)
+
         elif t == "subagent.started":
             run_id = event.get("run_id", "")
             description = event.get("description", "")
@@ -1365,9 +1419,9 @@ class KamaTuiApp(App[None]):
             ))
 
 
-# TUI 入口：读取配置并启动 KamaTuiApp
-def run(config: KamaConfig, replay_run_id: str | None = None) -> None:
-    app = KamaTuiApp(
+# TUI 入口：读取配置并启动 AgentLiteTuiApp
+def run(config: AgentLiteConfig, replay_run_id: str | None = None) -> None:
+    app = AgentLiteTuiApp(
         config.host,
         config.port,
         replay_run_id=replay_run_id,

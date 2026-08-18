@@ -21,6 +21,6 @@ AGENT.md 内容要求：
 - 开发常用命令（build、test、run）
 - 需要注意的约定或禁忌
 
-写入路径：`AGENT.md`（当前 workspace 根目录；不要创建 `.kama/` 目录）
+写入路径：`AGENT.md`（当前 workspace 根目录；不要创建 `.agentlite/` 目录）
 
 $ARGUMENTS

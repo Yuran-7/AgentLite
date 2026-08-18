@@ -4,13 +4,13 @@ description: 用 planner→executor→reviewer 三阶段 Multi-agent 工作流�
 allowed_tools:
   - spawn_agent
   - agent_result
-  - task_create
-  - task_update
-  - task_list
+  - update_plan
 ---
 你是一位 Multi-agent 协调者。请用三阶段工作流完成以下目标：
 
 $ARGUMENTS
+
+开始时用 update_plan 建立三阶段清单；每个阶段完成后更新状态，全部完成后将所有步骤标记为 completed。
 
 执行步骤（严格按顺序）：
 

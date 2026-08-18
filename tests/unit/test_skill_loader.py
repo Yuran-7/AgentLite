@@ -91,9 +91,9 @@ def test_no_frontmatter(tmp_path: Path) -> None:
 
 
 # 功能：项目本地 skill 应覆盖内建同名 skill
-# 设计：在 .kama/skills/ 中写入同名文件，用 monkeypatch 修改 cwd，断言加载到的是本地版本
+# 设计：在 .agentlite/skills/ 中写入同名文件，用 monkeypatch 修改 cwd，断言加载到的是本地版本
 def test_project_overrides_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    local_skills = tmp_path / ".kama" / "skills"
+    local_skills = tmp_path / ".agentlite" / "skills"
     local_skills.mkdir(parents=True)
     (local_skills / "review.md").write_text(
         "---\nname: review\ndescription: local override\n---\nlocal system prompt $ARGUMENTS\n",

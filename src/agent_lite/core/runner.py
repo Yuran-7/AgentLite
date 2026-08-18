@@ -2,38 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from agent_lite.core.bus.events import RunFinishedEvent, RunStartedEvent
 from agent_lite.core.compact.compactor import Compactor
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.context import ExecutionContext
 from agent_lite.core.events.bus import EventBus, EventHandler
-from agent_lite.core.events.writer import EventWriter
+from agent_lite.core.events.writer import EventAppender, EventWriter
 from agent_lite.core.llm.base import LLMProvider
 from agent_lite.core.llm.factory import create_llm_provider
 from agent_lite.core.loop import AgentLoop
 from agent_lite.core.mcp.server import McpServerManager
 from agent_lite.core.memory.loader import load_agent_context, load_context_file
 from agent_lite.core.permissions.manager import PermissionManager
-from agent_lite.core.runs import RUNS_DIR, new_run_id
+from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.model import Session
 from agent_lite.core.session.store import SessionStore
 from agent_lite.core.subagent.registry import BackgroundTaskRegistry
 from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
-from agent_lite.core.task.manager import TaskManager
 from agent_lite.core.tools.builtin import (
     BrowserTool,
     ListDirTool,
     NoteSaveTool,
     ReadFileTool,
     ShellTool,
-    TaskCreateTool,
-    TaskGetTool,
-    TaskListTool,
-    TaskUpdateTool,
+    UpdatePlanTool,
     WebFetchTool,
     WebSearchTool,
     WriteFileTool,
@@ -59,12 +58,12 @@ class AgentRunner:
     # 组装所有运行时依赖，准备执行一次完整的 agent run
     def __init__(
         self,
-        config: KamaConfig,
+        config: AgentLiteConfig,
         *,
         bus: EventBus | None = None,
         provider: LLMProvider | None = None,
         extra_handlers: list[EventHandler] | None = None,
-        runs_dir: Path | None = None,
+        events_file: Path | None = None,
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
@@ -74,7 +73,7 @@ class AgentRunner:
         self._bus = bus
         self._provider = provider
         self._extra_handlers: list[EventHandler] = extra_handlers or []
-        self._runs_dir = runs_dir or RUNS_DIR
+        self._events_file = events_file or Path("events.jsonl")
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
@@ -84,17 +83,15 @@ class AgentRunner:
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
 
-    # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）；可选注入 SpawnAgentTool
+    # 构建工具注册表，并按需注入计划和 SpawnAgentTool
     def _build_registry(
         self,
-        task_manager: TaskManager,
         *,
         session: Session | None = None,
         store: SessionStore | None = None,
         run_id: str | None = None,
         provider: LLMProvider | None = None,
         bus: EventBus | None = None,
-        child_runs_dir: Path | None = None,
         session_id: str = "",
         workspace_root: Path | None = None,
         agent_context: str = "",
@@ -126,7 +123,7 @@ class AgentRunner:
                 if _ok(t.name):
                     registry.register(t)
             if self._config.web.browser_enabled and _ok("browser"):
-                browser_scope = session_id or f"run:{run_id or id(task_manager)}"
+                browser_scope = session_id or f"run:{run_id or id(registry)}"
                 registry.register(
                     BrowserTool(
                         self._config.web,
@@ -137,20 +134,13 @@ class AgentRunner:
                         ),
                     )
                 )
-        for t in [
-            TaskCreateTool(task_manager),
-            TaskUpdateTool(task_manager),
-            TaskListTool(task_manager),
-            TaskGetTool(task_manager),
-        ]:
-            if _ok(t.name):
-                registry.register(t)
+        if bus is not None and run_id is not None and _ok("update_plan"):
+            registry.register(UpdatePlanTool(bus, run_id))
         if session is not None and store is not None and run_id is not None:
             note_tool = NoteSaveTool(store, session.id, run_id)
             if _ok(note_tool.name):
                 registry.register(note_tool)
         if provider is not None and bus is not None and run_id is not None:
-            runs_dir = child_runs_dir or self._runs_dir
             if _ok("spawn_agent"):
                 registry.register(
                     SpawnAgentTool(
@@ -160,7 +150,6 @@ class AgentRunner:
                         permission_manager=self._permission_manager,
                         max_steps=self._config.agent.max_steps,
                         task_registry=self._task_registry,
-                        runs_dir=runs_dir,
                         session_id=session_id,
                         workspace_root=workspace_root,
                         agent_context=agent_context,
@@ -195,27 +184,30 @@ class AgentRunner:
         # 1. 确定本次运行的唯一 run_id、目录，以及需要回放的会话上下文
         run_id = run_id or new_run_id()
         if session is not None and store is not None:
-            run_path = store.runs_dir(session.id) / run_id
+            session_dir = store.session_dir(session.id)
             history = store.read_messages(session.id)
             notes = store.read_notes(session.id)
         else:
-            run_path = self._runs_dir / run_id
+            session_dir = self._events_file.parent
             history = [{"role": "user", "content": goal}]
             notes = ""
-        run_path.mkdir(parents=True, exist_ok=True)
 
         workspace_root = (
             Path(session.workspace_root)
             if session is not None and session.workspace_root is not None
             else None
         )
-        global_ctx = load_context_file(Path("~/.kama/context.md").expanduser())
+        global_ctx = load_context_file(Path("~/.agentlite/context.md").expanduser())
         agent_ctx = load_agent_context(workspace_root)
 
-        task_manager = TaskManager(run_path / ".tasks")
+        # 2. 建立本次 run 的局部事件总线，再桥接到全局总线供 TUI 实时订阅
+        bus = EventBus()
+        global_bus = self._bus
+        if global_bus is not None:
+            async def _bridge(event: BaseModel) -> None:
+                await global_bus.publish(event)
 
-        # 2. 建立事件总线，并订阅额外的事件处理器
-        bus = self._bus if self._bus is not None else EventBus()
+            bus.subscribe(_bridge)
         for h in self._extra_handlers:
             bus.subscribe(h)
 
@@ -233,9 +225,13 @@ class AgentRunner:
         )
         prefill_len = len(history)
 
-        # 4. 将事件写入 events.jsonl，并驱动循环直到上下文终止
-        async with EventWriter(run_path / "events.jsonl") as writer:
-            writer.subscribe(bus)  # 内部把 writer.handle 订阅到事件总线
+        # 4. session 汇总写入根 events.jsonl；独立 run 写入单一事件文件
+        async with AsyncExitStack() as stack:
+            if session is not None and store is not None:
+                EventAppender(store.events_file(session.id)).subscribe(bus)
+            else:
+                writer = await stack.enter_async_context(EventWriter(self._events_file))
+                writer.subscribe(bus)
             # publish 会依次等待所有已订阅的 handler 处理该事件
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
@@ -252,27 +248,15 @@ class AgentRunner:
                         include_payload=self._config.trace.include_llm_payload,
                     )
                 session_id_str = session.id if session is not None else ""
-                child_runs_dir = (
-                    store.runs_dir(session.id)
-                    if session is not None and store is not None
-                    else self._runs_dir
-                )
                 registry = self._build_registry(
-                    task_manager,
                     session=session,
                     store=store,
                     run_id=run_id,
                     provider=provider,
                     bus=bus,
-                    child_runs_dir=child_runs_dir,
                     session_id=session_id_str,
                     workspace_root=workspace_root,
                     tool_whitelist=tool_whitelist,
-                )
-                session_dir = (
-                    store.session_dir(session.id)
-                    if session is not None and store is not None
-                    else run_path
                 )
                 compactor = Compactor(bus, session_dir, session_id_str)
                 loop = AgentLoop(

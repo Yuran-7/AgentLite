@@ -4,7 +4,7 @@ import asyncio
 import sys
 from typing import Any
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
 
 _DECISION_MAP: dict[str, str] = {
@@ -60,7 +60,7 @@ async def _readline(prompt: str) -> str:
 
 
 # 异步核心：创建 chat session，循环读取用户输入并发送到 daemon；权限请求时优先处理审批
-async def _chat_async(config: KamaConfig, workspace_root: str | None = None) -> int:
+async def _chat_async(config: AgentLiteConfig, workspace_root: str | None = None) -> int:
     client = SocketClient(config.host, config.port)
     try:
         await client.connect()
@@ -130,8 +130,8 @@ async def _chat_async(config: KamaConfig, workspace_root: str | None = None) -> 
     return 0
 
 
-# 执行 kama chat 命令
-def cmd_chat(config: KamaConfig, workspace_root: str | None = None) -> None:
+# 执行 lite chat 命令
+def cmd_chat(config: AgentLiteConfig, workspace_root: str | None = None) -> None:
     try:
         exit_code = asyncio.run(_chat_async(config, workspace_root))
     except KeyboardInterrupt:

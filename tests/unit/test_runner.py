@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from agent_lite.core.config import KamaConfig
+from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock
 from agent_lite.core.runner import AgentRunner
@@ -79,8 +79,8 @@ class _CapturingProvider:
 # --- helpers -----------------------------------------------------------------
 
 
-def _config(max_steps: int = 5) -> KamaConfig:
-    cfg = KamaConfig()
+def _config(max_steps: int = 5) -> AgentLiteConfig:
+    cfg = AgentLiteConfig()
     cfg.agent.max_steps = max_steps
     return cfg
 
@@ -89,7 +89,7 @@ async def _run(
     goal: str = "test goal",
     *,
     provider: object | None = None,
-    config: KamaConfig | None = None,
+    config: AgentLiteConfig | None = None,
     tmp_path: Path,
 ) -> list[BaseModel]:
     collected: list[BaseModel] = []
@@ -102,7 +102,7 @@ async def _run(
         cfg,
         provider=provider or _EndTurnProvider(),  # type: ignore[arg-type]
         extra_handlers=[_collect],
-        runs_dir=tmp_path,
+        events_file=tmp_path / "events.jsonl",
     )
     await runner.run(goal)
     return collected
@@ -157,13 +157,12 @@ async def test_events_jsonl_created_with_started_and_finished(tmp_path: Path) ->
     assert event_types[-1] == "run.finished"
 
 
-# 功能：验证 runner 在 runs_dir 下创建以 run_id 命名的子目录并写入 events.jsonl
-# 设计：检查 tmp_path 下只有一个子目录且该目录包含 events.jsonl，确认目录结构约定（runs/<run_id>/events.jsonl）
-async def test_run_creates_run_subdirectory(tmp_path: Path) -> None:
+# 功能：验证 runner 直接写入单一 events.jsonl 且不创建 run 目录
+# 设计：检查事件文件存在，并确认 runs 目录不会被重新生成
+async def test_run_writes_single_event_file_without_run_directory(tmp_path: Path) -> None:
     await _run(tmp_path=tmp_path)
-    subdirs = [p for p in tmp_path.iterdir() if p.is_dir()]
-    assert len(subdirs) == 1
-    assert (subdirs[0] / "events.jsonl").exists()
+    assert (tmp_path / "events.jsonl").exists()
+    assert not (tmp_path / "runs").exists()
 
 
 # 功能：验证通过 extra_handlers 注入的回调能收到所有事件
@@ -179,7 +178,7 @@ async def test_extra_handlers_receive_events(tmp_path: Path) -> None:
         cfg,
         provider=_EndTurnProvider(),  # type: ignore[arg-type]
         extra_handlers=[_second],
-        runs_dir=tmp_path,
+        events_file=tmp_path / "events.jsonl",
     )
     await runner.run("goal")
     assert len(secondary) > 0
@@ -221,7 +220,7 @@ async def test_injected_bus_receives_events(tmp_path: Path) -> None:
         _config(),
         bus=external_bus,
         provider=_EndTurnProvider(),  # type: ignore[arg-type]
-        runs_dir=tmp_path,
+        events_file=tmp_path / "events.jsonl",
     )
     await runner.run("goal")
 
@@ -231,7 +230,7 @@ async def test_injected_bus_receives_events(tmp_path: Path) -> None:
 
 
 # 功能：验证 session run 会从 thread.jsonl 预填 messages，并把 notes 注入 system prompt
-# 设计：用 CapturingProvider 截获 LLM 入参，不触发真实 API；同时断言 run 目录写到 session/runs 下
+# 设计：用 CapturingProvider 截获 LLM 入参，并断言事件汇总到 session 根目录
 async def test_session_history_and_notes_injected(tmp_path: Path) -> None:
     from agent_lite.core.session.model import Session
     from agent_lite.core.session.store import SessionStore
@@ -250,15 +249,57 @@ async def test_session_history_and_notes_injected(tmp_path: Path) -> None:
     store.append_note(SESSION_ID, "Python 3.12", "run-old")
 
     provider = _CapturingProvider(LlmResponse(stop_reason="end_turn", text="done"))
-    runner = AgentRunner(_config(), provider=provider, runs_dir=tmp_path / "runs")
+    runner = AgentRunner(_config(), provider=provider, events_file=tmp_path / "events.jsonl")
 
     await runner.run_and_capture("remember python", run_id="run-new", session=session, store=store)
 
     assert provider.messages == [{"role": "user", "content": "remember python"}]
     assert provider.system is not None
     assert "Python 3.12" in provider.system
-    assert (store.runs_dir(SESSION_ID) / "run-new" / "events.jsonl").exists()
+    assert store.events_file(SESSION_ID).exists()
+    assert not (store.session_dir(SESSION_ID) / "runs").exists()
+    assert not (store.session_dir(SESSION_ID) / ".tasks").exists()
     assert not (tmp_path / "runs" / "run-new").exists()
+
+
+# 功能：同一 session 的多个 run 应追加到同一个 events.jsonl
+# 设计：连续执行两个显式 run_id，按事件中的 run_id 验证统一日志同时包含两次完整生命周期
+async def test_session_runs_share_one_events_file(tmp_path: Path) -> None:
+    from agent_lite.core.session.model import Session
+    from agent_lite.core.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    session = Session(
+        id=SESSION_ID,
+        mode="chat",
+        status="active",
+        title="",
+        created_at="t",
+        updated_at="t",
+    )
+    store.write_meta(session)
+    runner = AgentRunner(_config(), provider=_EndTurnProvider())  # type: ignore[arg-type]
+
+    await runner.run_and_capture("first", run_id="run-one", session=session, store=store)
+    await runner.run_and_capture("second", run_id="run-two", session=session, store=store)
+
+    event_files = list(store.session_dir(SESSION_ID).rglob("events.jsonl"))
+    assert event_files == [store.events_file(SESSION_ID)]
+    events = [
+        json.loads(line)
+        for line in store.events_file(SESSION_ID).read_text(encoding="utf-8").splitlines()
+    ]
+    lifecycle = [(event["type"], event["run_id"]) for event in events]
+    assert lifecycle == [
+        ("run.started", "run-one"),
+        ("step.started", "run-one"),
+        ("step.finished", "run-one"),
+        ("run.finished", "run-one"),
+        ("run.started", "run-two"),
+        ("step.started", "run-two"),
+        ("step.finished", "run-two"),
+        ("run.finished", "run-two"),
+    ]
 
 
 # 功能：验证 session 工作区的 AGENT.md 会加入 system prompt
@@ -268,7 +309,7 @@ async def test_session_workspace_loads_agent_context(tmp_path: Path) -> None:
     from agent_lite.core.session.store import SessionStore
 
     workspace = tmp_path / "repo"
-    context_dir = workspace / ".kama"
+    context_dir = workspace / ".agentlite"
     context_dir.mkdir(parents=True)
     (context_dir / "context.md").write_text("legacy workspace rule", encoding="utf-8")
     (workspace / "AGENT.md").write_text("workspace-specific rule", encoding="utf-8")
@@ -284,7 +325,7 @@ async def test_session_workspace_loads_agent_context(tmp_path: Path) -> None:
     )
     store.append_message(session.id, "user", "inspect project")
     provider = _CapturingProvider(LlmResponse(stop_reason="end_turn", text="done"))
-    runner = AgentRunner(_config(), provider=provider, runs_dir=tmp_path / "runs")
+    runner = AgentRunner(_config(), provider=provider, events_file=tmp_path / "events.jsonl")
 
     await runner.run_and_capture("inspect project", session=session, store=store)
 
@@ -341,7 +382,7 @@ async def test_session_registers_note_save_tool(tmp_path: Path) -> None:
     )
     store.append_message(SESSION_ID, "user", "remember")
 
-    runner = AgentRunner(_config(max_steps=3), provider=_NoteProvider(), runs_dir=tmp_path)
+    runner = AgentRunner(_config(max_steps=3), provider=_NoteProvider(), events_file=tmp_path / "events.jsonl")
     await runner.run_and_capture("remember", run_id="run-1", session=session, store=store)
 
     assert "Use Python 3.12" in store.read_notes(SESSION_ID)

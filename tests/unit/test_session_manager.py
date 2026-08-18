@@ -169,7 +169,7 @@ async def test_send_message_chat_enters_waiting_and_writes_thread(tmp_path: Path
 
 
 # 功能：验证 one_shot session 在单次消息完成后自动 closed
-# 设计：复用 mock runner 的成功路径，聚焦 mode 对最终状态的影响，保证 kama run 的统一路径正确
+# 设计：复用 mock runner 的成功路径，聚焦 mode 对最终状态的影响，保证 lite run 的统一路径正确
 async def test_one_shot_auto_closes(tmp_path: Path) -> None:
     store = SessionStore(tmp_path)
     manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]

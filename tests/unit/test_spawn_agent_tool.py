@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,7 @@ import pytest
 from agent_lite.core.agents.loader import AgentProfile
 from agent_lite.core.config import WebConfig
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.events.writer import EventAppender
 from agent_lite.core.llm.types import LlmResponse, UsageStats
 from agent_lite.core.subagent.registry import BackgroundTaskRegistry
 from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
@@ -48,7 +50,6 @@ def _make_tool(
         permission_manager=None,
         max_steps=5,
         task_registry=registry,
-        runs_dir=tmp_path,
         session_id="sess-test",
         depth=depth,
     )
@@ -66,6 +67,8 @@ async def test_foreground_returns_result(tmp_path: Path) -> None:
     })
     assert not result.is_error
     assert "analysis complete" in result.content
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / ".tasks").exists()
 
 
 # 功能：后台模式应立即返回含 run_id 的消息，不阻塞等待子 agent
@@ -120,8 +123,84 @@ async def test_agent_result_pending(tmp_path: Path) -> None:
     await asyncio.sleep(0.05)
 
 
+# 功能：agent_result 等待期间子 agent 完成时应立即返回最终结果
+# 设计：用事件阻塞 provider，再通过短延迟释放事件，验证无需等满超时时间即可取得结果
+@pytest.mark.asyncio
+async def test_agent_result_wait_returns_when_completed(tmp_path: Path) -> None:
+    event = asyncio.Event()
+
+    async def delayed_chat(*args: Any, **kwargs: Any) -> LlmResponse:
+        await event.wait()
+        return LlmResponse(
+            stop_reason="end_turn",
+            tool_calls=[],
+            text="completed while waiting",
+            usage=UsageStats(0, 0, 0, 0, 0.0),
+        )
+
+    provider = MagicMock()
+    provider.chat = delayed_chat
+    tool, registry, _ = _make_tool(tmp_path, provider)
+    spawn_result = await tool.invoke({
+        "description": "delayed task",
+        "prompt": "finish shortly",
+        "run_in_background": True,
+    })
+    run_id = spawn_result.content.split("run_id=")[1].split(".")[0]
+    asyncio.get_running_loop().call_later(0.01, event.set)
+
+    result = await AgentResultTool(registry).invoke({
+        "run_id": run_id,
+        "timeout_seconds": 1,
+    })
+
+    assert not result.is_error
+    assert result.content == "completed while waiting"
+
+
+# 功能：agent_result 等待超时只应停止等待，不应取消仍在运行的子 agent
+# 设计：保持 provider 阻塞超过短超时，断言返回 still running 且后台 task 仍存活
+@pytest.mark.asyncio
+async def test_agent_result_timeout_does_not_cancel_task(tmp_path: Path) -> None:
+    event = asyncio.Event()
+
+    async def slow_chat(*args: Any, **kwargs: Any) -> LlmResponse:
+        await event.wait()
+        return LlmResponse(
+            stop_reason="end_turn",
+            tool_calls=[],
+            text="done later",
+            usage=UsageStats(0, 0, 0, 0, 0.0),
+        )
+
+    provider = MagicMock()
+    provider.chat = slow_chat
+    tool, registry, _ = _make_tool(tmp_path, provider)
+    spawn_result = await tool.invoke({
+        "description": "slow task",
+        "prompt": "keep working",
+        "run_in_background": True,
+    })
+    run_id = spawn_result.content.split("run_id=")[1].split(".")[0]
+
+    result = await AgentResultTool(registry).invoke({
+        "run_id": run_id,
+        "timeout_seconds": 0.01,
+    })
+    entry = registry.get(run_id)
+    assert entry is not None
+    task, _ = entry
+
+    assert result.content == "still running"
+    assert not result.is_error
+    assert not task.done()
+
+    event.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+
 # 功能：后台任务完成后 agent_result 应返回子 agent 的最终文本
-# 设计：等待后台任务 task 完成后调用 agent_result，断言返回内容与 provider 结果一致
+# 设计：等待后台任务完成后查询结果，断言返回内容与 provider 结果一致
 @pytest.mark.asyncio
 async def test_agent_result_done(tmp_path: Path) -> None:
     tool, registry, _ = _make_tool(tmp_path, _make_provider("final answer"))
@@ -193,6 +272,37 @@ async def test_foreground_publishes_started_event(tmp_path: Path) -> None:
     assert started[0].description == "test task"
 
 
+# 功能：session 统一事件日志不应因 subagent 向父总线桥接而重复记录
+# 设计：关闭子级独立日志并让父总线统一追加，断言子 agent 每类生命周期事件仅出现一次
+@pytest.mark.asyncio
+async def test_shared_event_log_records_subagent_events_once(tmp_path: Path) -> None:
+    bus = EventBus()
+    event_file = tmp_path / "events.jsonl"
+    EventAppender(event_file).subscribe(bus)
+    tool = SpawnAgentTool(
+        provider=_make_provider(),
+        parent_bus=bus,
+        parent_run_id="parent",
+        permission_manager=None,
+        max_steps=5,
+        task_registry=BackgroundTaskRegistry(),
+        session_id="session",
+    )
+
+    result = await tool.invoke({"description": "child", "prompt": "do work"})
+
+    assert not result.is_error
+    events = [
+        json.loads(line)
+        for line in event_file.read_text(encoding="utf-8").splitlines()
+    ]
+    event_types = [event["type"] for event in events]
+    assert event_types.count("subagent.started") == 1
+    assert event_types.count("step.started") == 1
+    assert event_types.count("step.finished") == 1
+    assert event_types.count("subagent.finished") == 1
+
+
 # 功能：默认子 agent 能力上限不包含联网工具
 # 设计：即使传入启用的 WebConfig，未显式加入全局上限时 registry 也不注册 web 工具
 def test_default_child_cap_blocks_web_tools(tmp_path: Path) -> None:
@@ -216,7 +326,6 @@ def test_child_cap_can_explicitly_allow_web_tools(tmp_path: Path) -> None:
         permission_manager=None,
         max_steps=5,
         task_registry=BackgroundTaskRegistry(),
-        runs_dir=tmp_path,
         session_id="session",
         web_config=WebConfig(),
         subagent_allowed_tools=["read_file", "web_search", "web_fetch"],
@@ -240,7 +349,6 @@ def test_profile_allowlist_intersects_global_child_cap(tmp_path: Path) -> None:
         permission_manager=None,
         max_steps=5,
         task_registry=BackgroundTaskRegistry(),
-        runs_dir=tmp_path,
         session_id="session",
         web_config=WebConfig(),
         subagent_allowed_tools=["read_file", "web_search"],

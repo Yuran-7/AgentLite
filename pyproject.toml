@@ -1,4 +1,4 @@
-# KamaClaude 项目配置（PEP 621 + Hatch 构建 + 常用工具链）
+# AgentLite 项目配置（PEP 621 + Hatch 构建 + 常用工具链）
 
 # ---- PEP 517：声明如何构建 wheel/sdist ----
 [build-system]
@@ -15,7 +15,7 @@ dependencies = [
     "python-dotenv>=1.0",  # .env 文件解析
     "anthropic>=0.25",     # Anthropic LLM SDK（流式 + prompt caching）
     "openai>=1.0",         # OpenAI-compatible Chat Completions SDK
-    "textual>=0.75",       # 终端 UI 框架（kama-tui）
+    "textual>=0.75",       # 终端 UI 框架（lite-tui）
     "httpx[socks]>=0.28.1",
     "playwright>=1.50,<2",
 ]

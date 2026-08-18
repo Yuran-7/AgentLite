@@ -27,26 +27,26 @@ uv run python scripts/gen_protocol_doc.py
 uv run python scripts/gen_protocol_doc.py --check
 
 # Run daemon manually
-uv run kama-core                        # foreground; Ctrl+C to stop
-KAMA_PORT=8000 uv run kama-core        # override port
+uv run lite-core                        # foreground; Ctrl+C to stop
+AGENTLITE_PORT=8000 uv run lite-core    # override port
 
 # Send a ping
-uv run kama ping
-uv run kama --version
+uv run lite ping
+uv run lite --version
 ```
 
 ## Architecture
 
-This is a **dual-process** local AI agent system. `kama-core` is a persistent daemon; `kama` and `kama-tui` are clients that connect to it over a Unix domain socket.
+This is a **dual-process** local AI agent system. `lite-core` is a persistent daemon; `lite` and `lite-tui` are clients that connect to it over a Unix domain socket.
 
 ```
-kama-core (daemon)
+lite-core (daemon)
   └─ listens on 127.0.0.1:7437 (TCP)
        ↑ JSON-RPC 2.0 NDJSON
-kama (CLI)   kama-tui (TUI, S2+)
+lite (CLI)   lite-tui (TUI, S2+)
 ```
 
-**`kama-tui` is the primary frontend.** All user-facing work on task management, observability, and interaction should be designed for and validated in the TUI first. The `kama` CLI exists only for quick scripted testing and debugging — it is not a product surface. When implementing features that touch the user interface, invest in the TUI layout, event rendering, and keyboard interactions. Do not shortcut TUI work by pointing to the CLI as an alternative.
+**`lite-tui` is the primary frontend.** All user-facing work on task management, observability, and interaction should be designed for and validated in the TUI first. The `lite` CLI exists only for quick scripted testing and debugging — it is not a product surface. When implementing features that touch the user interface, invest in the TUI layout, event rendering, and keyboard interactions. Do not shortcut TUI work by pointing to the CLI as an alternative.
 
 ### Protocol layer (`src/agent_lite/core/bus/`)
 
@@ -64,11 +64,11 @@ All IPC messages are typed pydantic v2 models with a **discriminated union on th
 
 ### Config (`src/agent_lite/core/config.py`)
 
-Four-tier priority: **built-in defaults → `~/.kama/config.toml` → `.env` → env vars**.
+Four-tier priority: **built-in defaults → `~/.agentlite/config.toml` → `.env` → env vars**.
 
 S0 keys: `host` (default `127.0.0.1`), `port` (default `7437`), `log_level`, `log_file`. Config file is silently skipped if absent; unknown keys cause a hard exit.
 
-Relevant env vars: `KAMA_CONFIG`, `KAMA_HOST`, `KAMA_PORT`, `KAMA_LOG_LEVEL`, `KAMA_LOG_FILE`, `KAMA_LOG_FORMAT`.
+Relevant env vars: `AGENTLITE_CONFIG`, `AGENTLITE_HOST`, `AGENTLITE_PORT`, `AGENTLITE_LOG_LEVEL`, `AGENTLITE_LOG_FILE`, `AGENTLITE_LOG_FORMAT`.
 
 ### Daemon entry (`src/agent_lite/core/app.py`)
 
@@ -76,7 +76,7 @@ Relevant env vars: `KAMA_CONFIG`, `KAMA_HOST`, `KAMA_PORT`, `KAMA_LOG_LEVEL`, `K
 
 ### Testing
 
-Integration tests in `tests/conftest.py` spawn a real daemon subprocess using a random free port (via `free_port` fixture). The fixture finds a free port, releases it, passes it to the daemon via `KAMA_PORT`, then polls `asyncio.open_connection` until the daemon is ready.
+Integration tests in `tests/conftest.py` spawn a real daemon subprocess using a random free port (via `free_port` fixture). The fixture finds a free port, releases it, passes it to the daemon via `AGENTLITE_PORT`, then polls `asyncio.open_connection` until the daemon is ready.
 
 ### Code style
 

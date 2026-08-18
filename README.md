@@ -1,8 +1,8 @@
-# KamaClaude
+# AgentLite
 
 我最近在公众号「卡码大模型」上，更新了很多关于 Agent、codex、Claude工作原理的文章。
 
-这些文章目前已经沉淀在卡码笔记上：[https://notes.kamacoder.com](https://notes.kamacoder.com)
+这些文章目前已经沉淀在项目文档中。
 
 ![](docs/images/2026-06-10_09-28-51.jpg)
 
@@ -24,7 +24,7 @@ Agent 这个东西，光看文章还不够。
 
 所以这次我在知识星球里更新一个新的 AI Agent 项目：
 
-**KamaClaude：从零实现一个本地 Claude Code Agent 系统（mini 版）。**
+**AgentLite：从零实现一个本地 Claude Code Agent 系统（mini 版）。**
 
 也可以理解为：我们自己动手实现一个 **minClaude**，不仅实现Agent内核，还是先一套 TUI。
 
@@ -36,9 +36,9 @@ Agent 这个东西，光看文章还不够。
 
 ![](docs/images/2026-06-10_09-38-25.jpg)
 
-可以下达一个稍稍负责的任务，KamaClaude自动完成规划 并执行：
+可以下达一个稍稍负责的任务，AgentLite 自动完成规划并执行：
 
-（KamaClaude会先申请一下本地编辑权限）
+（AgentLite 会先申请一下本地编辑权限）
 
 ![](docs/images/2026-06-10_09-41-25.jpg)
 
@@ -69,7 +69,7 @@ Agent 这个东西，光看文章还不够。
 
 ![](docs/images/2026-06-10_10-58-04.jpg)
 
-本视频只在[知识星球](https://programmercarl.com/other/kstar.html)里，带大家演示如何从零运行 KamaClaude，并完成一次完整的 Agent 使用体验：
+本视频只在[知识星球](https://programmercarl.com/other/kstar.html)里，带大家演示如何从零运行 AgentLite，并完成一次完整的 Agent 使用体验：
 
 * 克隆项目和切换阶段分支
 * 配置 `.env`
@@ -77,13 +77,13 @@ Agent 这个东西，光看文章还不够。
 * 配置 Skill 和 MCP
 * 在 TUI 里看到工具调用、事件流、权限审批和上下文水位
 
-### KamaClaude 长什么样？
+### AgentLite 长什么样？
 
-KamaClaude 的最终形态是这样的：
+AgentLite 的最终形态是这样的：
 
 ![](docs/images/2026-06-10_14-30-58.jpg)
 
-用户不是直接和一个脚本对话，而是通过 `kama` CLI 或 `kama-tui` 连接到常驻的 `kama-core` 守护进程。
+用户不是直接和一个脚本对话，而是通过 `lite` CLI 或 `lite-tui` 连接到常驻的 `lite-core` 守护进程。
 
 真正执行任务的是 Core daemon。
 
@@ -99,7 +99,7 @@ CLI 和 TUI 只是客户端。
 
 这就是它和普通 AI Demo 最大的区别：
 
-**普通 Demo 是“调用模型”。KamaClaude 是“搭一个本地 Agent 运行时”。**
+**普通 Demo 是“调用模型”。AgentLite 是“搭一个本地 Agent 运行时”。**
 
 ### 项目专栏目录
 
@@ -131,7 +131,7 @@ CLI 和 TUI 只是客户端。
 
 这个项目，我采用全新的讲解方式，不是一下子直接给大家全部项目代码。
 
-而且分成了 8个阶段，一步一步，带大家实现完整的kamaClaude。
+而且分成了 8个阶段，一步一步，带大家实现完整的 AgentLite。
 
 每个阶段都不是堆功能，而是解决一个真实的 Agent 工程问题。
 
@@ -140,7 +140,7 @@ CLI 和 TUI 只是客户端。
 | 阶段 | 主题 | 这一阶段真正解决的问题 |
 | --- | --- | --- |
 | S0 | 骨架与协议契约 | CLI 和 daemon 通过真实 IPC 完成一次 ping/pong |
-| S1 | Agent 最小闭环 | 一次 `kama run` 从 goal 到 LLM、工具、事件文件完整跑通 |
+| S1 | Agent 最小闭环 | 一次 `lite run` 从 goal 到 LLM、工具、事件文件完整跑通 |
 | S2 | 事件流外化 | AgentRunner 搬进 daemon，CLI/TUI 通过 IPC 订阅同一份事件流 |
 | S3 | 自主规划与 TUI | Agent 能用任务工具拆解复杂目标，TUI 展示完整执行过程 |
 | Trace | 系统级时间线 | IPC / EventBus / LLM 三层数据流可追踪、可回放 |
@@ -151,7 +151,7 @@ CLI 和 TUI 只是客户端。
 
 从第一章开始，项目就不是“先写一个脚本，后面再慢慢重构”。
 
-KamaClaude 在 S0 就先把 `kama` CLI 和 `kama-core` daemon 拆开，通过 TCP NDJSON + JSON-RPC 2.0 通信。
+AgentLite 在 S0 就先把 `lite` CLI 和 `lite-core` daemon 拆开，通过 TCP NDJSON + JSON-RPC 2.0 通信。
 
 这一步看起来比普通脚手架更重，但它换来的是后面所有能力都不用推倒重来：
 
@@ -167,15 +167,15 @@ KamaClaude 在 S0 就先把 `kama` CLI 和 `kama-core` daemon 拆开，通过 TC
 
 ### 项目架构图
 
-![](docs/images/20260610114820_KamaClaude架构图-分层版.png)
+![](docs/images/20260610114820_AgentLite架构图-分层版.png)
 
-KamaClaude 的核心不是一个 prompt，而是一套完整的本地 Agent 运行链路：
+AgentLite 的核心不是一个 prompt，而是一套完整的本地 Agent 运行链路：
 
 ```latex
 用户目标
   → CLI / TUI
   → JSON-RPC over NDJSON
-  → kama-core daemon
+  → lite-core daemon
   → AgentRunner
   → AgentLoop
   → LLM Provider
@@ -210,7 +210,7 @@ KamaClaude 的核心不是一个 prompt，而是一套完整的本地 Agent 运�
 
 ![](docs/images/2026-06-10_11-48-11.jpg)
 
-KamaClaude 最大的亮点，是把 Claude Code 这类 AI 编程 Agent 背后的核心机制，用一个 mini 版工程完整跑通：它不是单进程脚本，而是 `kama-core` daemon + CLI/TUI 多客户端架构；
+AgentLite 最大的亮点，是把 Claude Code 这类 AI 编程 Agent 背后的核心机制，用一个 mini 版工程完整跑通：它不是单进程脚本，而是 `lite-core` daemon + CLI/TUI 多客户端架构；
 
 不是一次性调大模型，而是 ReAct AgentLoop，支持模型思考、工具调用、结果回填和多步执行；
 
@@ -326,13 +326,13 @@ S7、Skills、Subagents 与 MCP
 
 Python
 
-**3、KamaClaude项目用Python实现，有其他语言版本吗**？
+**3、AgentLite 项目用 Python 实现，有其他语言版本吗**？
 
 实现一个Agent 关键在于Agent的原理，面试官不会问你 你用什么语言实现的Agent。
 
 就像大家目前看到 Claude原理的文章，没有人会重点强调这是用什么语言实现的，而是强调Claude 这个agent的原理。
 
-所以 在开发 KamaClaude，我们考虑使用python，就是因为python最容易上手。
+所以在开发 AgentLite 时，我们考虑使用 Python，就是因为 Python 最容易上手。
 
 **4、我是C++、Java、Go或者其他语言选手，能做这个项目吗**？
 

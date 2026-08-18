@@ -7,14 +7,14 @@ import os
 from pathlib import Path
 
 from agent_lite.core.config import get_config
-from agent_lite.tui.app import KamaTuiApp
+from agent_lite.tui.app import AgentLiteTuiApp
 
-_DEFAULT_TUI_LOG = "~/.kama/logs/tui.log"
+_DEFAULT_TUI_LOG = "~/.agentlite/logs/tui.log"
 
 
 # TUI 文件日志初始化：不写 stderr（避免干扰 Textual 渲染），只写滚动文件
 def _setup_logging(level: str) -> None:
-    log_path = Path(os.environ.get("KAMA_TUI_LOG_FILE", _DEFAULT_TUI_LOG)).expanduser()
+    log_path = Path(os.environ.get("AGENTLITE_TUI_LOG_FILE", _DEFAULT_TUI_LOG)).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
@@ -31,9 +31,9 @@ def _setup_logging(level: str) -> None:
     root.addHandler(handler)
 
 
-# kama-tui 入口：解析 --replay 参数后启动 TUI 应用
+# lite-tui 入口：解析 --replay 参数后启动 TUI 应用
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="kama-tui", description="AgentLite TUI")
+    parser = argparse.ArgumentParser(prog="lite-tui", description="AgentLite TUI")
     parser.add_argument(
         "--replay",
         metavar="RUN_ID",
@@ -48,7 +48,7 @@ def main() -> None:
 
     config = get_config()
     _setup_logging(config.logging.level)
-    app = KamaTuiApp(
+    app = AgentLiteTuiApp(
         config.host,
         config.port,
         replay_run_id=args.replay,

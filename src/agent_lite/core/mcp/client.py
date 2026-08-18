@@ -74,7 +74,7 @@ class McpClient:
         await self._call("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "kama-claude", "version": "0.1"},
+            "clientInfo": {"name": "agentlite", "version": "0.1"},
         })
         await self._notify("notifications/initialized", {})
 

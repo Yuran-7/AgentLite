@@ -62,7 +62,6 @@ def _param_summary(tool_name: str, params: dict[str, Any], max_len: int = 72) ->
         "list_dir": ("path", "max_depth"),
         "bash": ("command",),  # legacy sessions
         "shell": ("command",),
-        "note_save": ("content",),
     }
     keys = keys_by_tool.get(tool_name, ())
     parts = [f"{key}={params[key]!r}" for key in keys if key in params]
@@ -153,9 +152,6 @@ class ToolCallBlock(Widget):
 
     # 生成摘要行文本
     def _summary(self) -> str:
-        if self._tool_name == "note_save" and self._finished and not self._is_error:
-            return f"  [green]remembered[/green]  [dim]{self._elapsed_ms}ms[/dim]"
-
         params_pre = _param_summary(self._tool_name, self._params)
         line = f"  [dim]tool[/dim] [bold]{self._tool_name}[/bold]"
         if params_pre:
@@ -394,6 +390,108 @@ class PermissionBlock(Static):
 
 
 SlashItem = tuple[str, str, bool]  # name, description, is_skill
+
+
+class MemorySelect(Static):
+    """内联记忆开关选择器；仅保存 TUI 选择，具体记忆逻辑另行实现。"""
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    MemorySelect {
+        height: auto;
+        padding: 0 2;
+        margin-bottom: 1;
+    }
+    """
+
+    _CHOICES: tuple[tuple[str, str], ...] = (
+        ("generate", "Generate memories"),
+        ("use", "Use memories"),
+    )
+
+    class Confirmed(Message):
+        def __init__(
+            self,
+            widget: MemorySelect,
+            generate_enabled: bool,
+            use_enabled: bool,
+        ) -> None:
+            self.widget = widget
+            self.generate_enabled = generate_enabled
+            self.use_enabled = use_enabled
+            super().__init__()
+
+    class Cancelled(Message):
+        def __init__(self, widget: MemorySelect) -> None:
+            self.widget = widget
+            super().__init__()
+
+    def __init__(self, generate_enabled: bool = False, use_enabled: bool = False) -> None:
+        super().__init__("")
+        self._cursor = 0
+        self._enabled = {
+            "generate": generate_enabled,
+            "use": use_enabled,
+        }
+
+    def on_mount(self) -> None:
+        self.update(self._render_ui())
+        self.focus()
+
+    def _render_ui(self) -> str:
+        lines = ["  [bold cyan]Memory settings[/bold cyan]"]
+        for i, (key, label) in enumerate(self._CHOICES):
+            marker = "√" if self._enabled[key] else " "
+            prefix = "❯" if i == self._cursor else " "
+            text = f"{prefix} [{marker}] {label}"
+            lines.append(
+                f"  [bold cyan]{text}[/bold cyan]"
+                if i == self._cursor
+                else f"  {text}"
+            )
+        lines.append("  [dim]↑↓ navigate   space toggle   enter confirm   esc cancel[/dim]")
+        return "\n".join(lines)
+
+    def _toggle_current(self) -> None:
+        key = self._CHOICES[self._cursor][0]
+        self._enabled[key] = not self._enabled[key]
+        self.update(self._render_ui())
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key
+        if key in ("up", "k"):
+            event.stop()
+            self._cursor = (self._cursor - 1) % len(self._CHOICES)
+            self.update(self._render_ui())
+        elif key in ("down", "j"):
+            event.stop()
+            self._cursor = (self._cursor + 1) % len(self._CHOICES)
+            self.update(self._render_ui())
+        elif key in ("space", "g", "u"):
+            event.stop()
+            if key == "g":
+                self._enabled["generate"] = not self._enabled["generate"]
+                self._cursor = 0
+                self.update(self._render_ui())
+            elif key == "u":
+                self._enabled["use"] = not self._enabled["use"]
+                self._cursor = 1
+                self.update(self._render_ui())
+            else:
+                self._toggle_current()
+        elif key == "enter":
+            event.stop()
+            self.post_message(
+                self.Confirmed(
+                    self,
+                    self._enabled["generate"],
+                    self._enabled["use"],
+                )
+            )
+        elif key == "escape":
+            event.stop()
+            self.post_message(self.Cancelled(self))
 
 
 class SlashCompleteWidget(Static):
@@ -652,6 +750,8 @@ class AgentLiteTuiApp(App[None]):
         self._total_cache_read_tokens = 0
         self._llm_calls: dict[str, tuple[float, float | None]] = {}
         self._slash_items: list[SlashItem] = []
+        self._memory_generate_enabled = False
+        self._memory_use_enabled = False
         self._subagent_run_ids: dict[str, str] = {}  # child run_id -> description
         self._subagent_start_times: dict[str, float] = {}  # child run_id -> start time
 
@@ -674,6 +774,7 @@ class AgentLiteTuiApp(App[None]):
         items: list[SlashItem] = [
             ("new", "start a new session", False),
             ("compact", "compress context window", False),
+            ("memories", "configure memory settings", False),
         ]
         try:
             loader = SkillLoader()
@@ -710,16 +811,20 @@ class AgentLiteTuiApp(App[None]):
             self.mount(popup, before="#prompt")
             popup.set_query(query)
 
-    # 用户选中自动补全项后将 /{name} 填入输入框并移除弹窗
+    # 用户选中自动补全项后将 /{name} 填入输入框并移除弹窗；/memories 直接打开设置页
     def on_slash_complete_widget_selected(self, event: SlashCompleteWidget.Selected) -> None:
         prompt = self._prompt()
-        if prompt is not None:
-            prompt.text = f"/{event.skill_name} "
-            prompt.move_cursor(prompt.document.end)
         try:
             self.query_one(SlashCompleteWidget).remove()
         except NoMatches:
             pass
+        if event.skill_name == "memories":
+            if prompt is not None:
+                self._open_memory_settings(prompt)
+            return
+        if prompt is not None:
+            prompt.text = f"/{event.skill_name} "
+            prompt.move_cursor(prompt.document.end)
 
     # 记录按键焦点；当 PermissionSelect 失去焦点后作为兜底处理权限快捷键
     def on_key(self, event: events.Key) -> None:
@@ -783,6 +888,10 @@ class AgentLiteTuiApp(App[None]):
             if self._client is not None and self._session_id is not None and not self._busy:
                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
             return
+        # 检测 /memories 指令；先展示 Generate/Use 两个独立开关，暂不执行具体逻辑
+        if content == "/memories":
+            self._open_memory_settings(event.text_area)
+            return
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
@@ -795,6 +904,23 @@ class AgentLiteTuiApp(App[None]):
         self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
         self._update_header("running")
         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+
+    # 打开 /memories 设置页；这里只处理 TUI 交互，不执行具体记忆逻辑
+    def _open_memory_settings(self, prompt: ChatTextArea) -> None:
+        prompt.text = ""
+        if self._client is None or self._session_id is None or self._busy:
+            self._append(
+                Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line")
+            )
+            return
+        prompt.disabled = True
+        prompt.border_title = "configure memory settings..."
+        self._mount_memory_select(
+            MemorySelect(
+                generate_enabled=self._memory_generate_enabled,
+                use_enabled=self._memory_use_enabled,
+            )
+        )
 
     # 在 worker 中执行手动压缩命令，完成后显示结果横幅
     async def _do_compact(self) -> None:
@@ -818,8 +944,36 @@ class AgentLiteTuiApp(App[None]):
             ))
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+        self._update_header("ready")
 
-            self._update_header("ready")
+    # 接收 /memories 选择结果；这里只保存 TUI 状态，不连接具体记忆实现
+    def on_memory_select_confirmed(self, msg: MemorySelect.Confirmed) -> None:
+        self._memory_generate_enabled = msg.generate_enabled
+        self._memory_use_enabled = msg.use_enabled
+        msg.widget.remove()
+        self._restore_prompt_after_memory_select()
+        generate = "on" if self._memory_generate_enabled else "off"
+        use = "on" if self._memory_use_enabled else "off"
+        self._append(Static(
+            f"[bold cyan]memory settings[/bold cyan]  "
+            f"Generate memories: {generate}  ·  Use memories: {use}  "
+            "[dim](logic not implemented)[/dim]",
+            classes="log-line",
+        ))
+
+    # 取消 /memories 选择，不改变之前的开关状态
+    def on_memory_select_cancelled(self, msg: MemorySelect.Cancelled) -> None:
+        msg.widget.remove()
+        self._restore_prompt_after_memory_select()
+
+    # /memories 选择完成或取消后恢复输入框
+    def _restore_prompt_after_memory_select(self) -> None:
+        prompt = self._prompt()
+        if prompt is not None:
+            prompt.disabled = False
+            prompt.read_only = False
+            prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            prompt.focus()
 
     # 关闭旧会话、创建新会话并将 TUI 恢复到干净的初始状态
     async def _do_new_session(self) -> None:
@@ -939,6 +1093,10 @@ class AgentLiteTuiApp(App[None]):
 
     # 将选择控件挂载到 Screen 顶层（#prompt 之前），避免 VerticalScroll 争抢焦点
     def _mount_permission_select(self, select: PermissionSelect) -> None:
+        self.mount(select, before="#prompt")
+
+    # 将 /memories 选择控件挂载到输入框之前
+    def _mount_memory_select(self, select: MemorySelect) -> None:
         self.mount(select, before="#prompt")
 
     # 安全获取输入框，便于组件测试中未挂载时跳过 UI 操作

@@ -21,17 +21,22 @@ def test_load_missing_file(tmp_path: Path) -> None:
     assert result == ""
 
 
-# 功能：验证 AGENT.md 会从父目录到 workspace 根目录按层级加载
-# 设计：在父目录和 workspace 根目录分别写入规则，断言顺序以及不存在的子目录未被读取
-def test_load_agent_context_from_parent_to_workspace(tmp_path: Path) -> None:
+# 功能：验证只加载 workspace 根目录下的 AGENT.md
+# 设计：在父目录、workspace 根目录和子目录分别写入规则，断言只返回 workspace 根目录内容
+def test_load_agent_context_from_workspace_only(tmp_path: Path) -> None:
     workspace = tmp_path / "repo" / "app"
     workspace.mkdir(parents=True)
     (tmp_path / "repo" / "AGENT.md").write_text("parent rule", encoding="utf-8")
     (workspace / "AGENT.md").write_text("workspace rule", encoding="utf-8")
+    nested = workspace / "src"
+    nested.mkdir()
+    (nested / "AGENT.md").write_text("nested rule", encoding="utf-8")
 
     result = load_agent_context(workspace)
 
-    assert result.index("parent rule") < result.index("workspace rule")
+    assert "parent rule" not in result
+    assert "nested rule" not in result
+    assert "workspace rule" in result
     assert "# " + str(workspace / "AGENT.md") in result
 
 

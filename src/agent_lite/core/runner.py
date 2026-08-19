@@ -19,7 +19,7 @@ from agent_lite.core.llm.base import LLMProvider
 from agent_lite.core.llm.factory import create_llm_provider
 from agent_lite.core.loop import AgentLoop
 from agent_lite.core.mcp.server import McpServerManager
-from agent_lite.core.memory.loader import load_agent_context, load_context_file
+from agent_lite.core.memory.loader import load_agent_context
 from agent_lite.core.permissions.manager import PermissionManager
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.model import Session
@@ -29,7 +29,6 @@ from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from agent_lite.core.tools.builtin import (
     BrowserTool,
     ListDirTool,
-    NoteSaveTool,
     ReadFileTool,
     ShellTool,
     UpdatePlanTool,
@@ -136,10 +135,6 @@ class AgentRunner:
                 )
         if bus is not None and run_id is not None and _ok("update_plan"):
             registry.register(UpdatePlanTool(bus, run_id))
-        if session is not None and store is not None and run_id is not None:
-            note_tool = NoteSaveTool(store, session.id, run_id)
-            if _ok(note_tool.name):
-                registry.register(note_tool)
         if provider is not None and bus is not None and run_id is not None:
             if _ok("spawn_agent"):
                 registry.register(
@@ -186,18 +181,15 @@ class AgentRunner:
         if session is not None and store is not None:
             session_dir = store.session_dir(session.id)
             history = store.read_messages(session.id)
-            notes = store.read_notes(session.id)
         else:
             session_dir = self._events_file.parent
             history = [{"role": "user", "content": goal}]
-            notes = ""
 
         workspace_root = (
             Path(session.workspace_root)
             if session is not None and session.workspace_root is not None
             else None
         )
-        global_ctx = load_context_file(Path("~/.agentlite/context.md").expanduser())
         agent_ctx = load_agent_context(workspace_root)
 
         # 2. 建立本次 run 的局部事件总线，再桥接到全局总线供 TUI 实时订阅
@@ -217,8 +209,6 @@ class AgentRunner:
             goal=goal,
             max_steps=self._config.agent.max_steps,
             prefill_messages=history,
-            session_notes=notes,
-            global_context=global_ctx,
             agent_context=agent_ctx,
             workspace_root=workspace_root,
             system_prompt_override=system_prompt_override,

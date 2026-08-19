@@ -22,7 +22,7 @@ def test_builtin_skill_found() -> None:
 # 设计：参数化列举通用 skill 与三种多智能体工作流，防止打包时遗漏文件
 @pytest.mark.parametrize(
     "name",
-    ["init", "review", "summarize", "debate", "chatdev", "metagpt"],
+    ["init", "review", "debate", "chatdev", "metagpt"],
 )
 def test_all_builtin_skills_found(name: str) -> None:
     loader = SkillLoader()

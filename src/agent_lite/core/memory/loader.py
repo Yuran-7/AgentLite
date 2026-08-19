@@ -11,16 +11,12 @@ def load_context_file(path: Path) -> str:
     return p.read_text(encoding="utf-8").strip()
 
 
-# 按父目录到工作区根目录的顺序加载所有 AGENT.md，子目录规则覆盖父目录规则
+# 只加载工作区根目录下的 AGENT.md，不向父目录或子目录递归查找
 def load_agent_context(workspace_root: Path | None) -> str:
     if workspace_root is None:
         return ""
 
     root = workspace_root.expanduser().resolve()
-    files = [parent / "AGENT.md" for parent in reversed((root, *root.parents))]
-    sections = []
-    for path in files:
-        content = load_context_file(path)
-        if content:
-            sections.append(f"# {path}\n\n{content}")
-    return "\n\n".join(sections)
+    path = root / "AGENT.md"
+    content = load_context_file(path)
+    return f"# {path}\n\n{content}" if content else ""

@@ -144,17 +144,3 @@ class SessionStore:
             for msg in messages:
                 row: dict[str, Any] = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    # 读取 notes.md 全文，文件不存在时返回空字符串
-    def read_notes(self, sid: str) -> str:
-        path = self.session_dir(sid) / "notes.md"
-        if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8")
-
-    # 将一条主动笔记追加到 notes.md
-    def append_note(self, sid: str, content: str, run_id: str) -> None:
-        path = self.session_dir(sid)
-        path.mkdir(parents=True, exist_ok=True)
-        with (path / "notes.md").open("a", encoding="utf-8") as f:
-            f.write(f"## Note ({_now()}, {run_id})\n{content}\n\n")

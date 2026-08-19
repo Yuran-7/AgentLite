@@ -136,14 +136,3 @@ def test_read_messages_trims_orphan_tool_use_tail(tmp_path: Path) -> None:
         run_id="run-1",
     )
     assert store.read_messages(SESSION_ID) == [{"role": "user", "content": "hello"}]
-
-
-# 功能：验证 notes.md 不存在时读为空，追加笔记后能读到内容和 run_id
-# 设计：先读空状态再追加，覆盖 chat 第一轮前和 note_save 调用后的两个关键状态
-def test_notes_read_and_append(tmp_path: Path) -> None:
-    store = SessionStore(tmp_path)
-    assert store.read_notes(SESSION_ID) == ""
-    store.append_note(SESSION_ID, "Python 3.12", "run-1")
-    notes = store.read_notes(SESSION_ID)
-    assert "Python 3.12" in notes
-    assert "run-1" in notes

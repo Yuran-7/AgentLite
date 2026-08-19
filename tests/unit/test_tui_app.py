@@ -10,6 +10,7 @@ from textual.widgets import Static
 from agent_lite.tui.app import (
     AgentLiteTuiApp,
     LLMStreamBlock,
+    MemorySelect,
     PlanBlock,
     SlashCompleteWidget,
     ToolCallBlock,
@@ -79,11 +80,10 @@ async def test_header_shows_workspace_path_and_model_on_second_line() -> None:
 
 
 # 功能：验证工具参数摘要优先展示工具最关键字段
-# 设计：覆盖 read_file/bash/note_save 三类常见工具，避免工具块摘要退化成整段 JSON
+# 设计：覆盖 read_file/bash 两类常见工具，避免工具块摘要退化成整段 JSON
 def test_param_summary_prefers_key_fields() -> None:
     assert _param_summary("read_file", {"path": "README.md"}) == "path='README.md'"
     assert _param_summary("bash", {"command": "echo hi", "timeout": 1}) == "command='echo hi'"
-    assert _param_summary("note_save", {"content": "Python 3.12"}) == "content='Python 3.12'"
 
 
 # 功能：验证输入斜杠时 /new 作为首个内建命令出现在自动补全中
@@ -102,15 +102,53 @@ def test_slash_items_put_new_session_first() -> None:
 def test_slash_menu_separates_general_commands_and_skills() -> None:
     app = AgentLiteTuiApp("127.0.0.1", 9999)
     items = app._build_slash_items()  # type: ignore[attr-defined]
-    assert [item[2] for item in items[:2]] == [False, False]
-    assert all(item[2] for item in items[2:])
+    assert [item[2] for item in items[:3]] == [False, False, False]
+    assert all(item[2] for item in items[3:])
 
     popup = SlashCompleteWidget(items)
     popup._redraw()  # type: ignore[attr-defined]
     rendered = str(popup.content)
     assert rendered.index("/compact") < rendered.index("Skills")
+    assert rendered.index("/memories") < rendered.index("Skills")
     assert rendered.index("Skills") < rendered.index("/init")
     assert len(popup._filtered) == len(items)  # type: ignore[attr-defined]
+
+
+# 功能：验证 /memories 的两个开关可以独立切换
+# 设计：直接驱动选择器状态，确认只开一个和同时开启都能表示
+def test_memory_select_toggles_independently() -> None:
+    select = MemorySelect()
+    assert "[ ] Generate memories" in select._render_ui()  # type: ignore[attr-defined]
+    assert "[ ] Use memories" in select._render_ui()  # type: ignore[attr-defined]
+
+    select._toggle_current()  # type: ignore[attr-defined]
+    assert "[√] Generate memories" in select._render_ui()  # type: ignore[attr-defined]
+    assert "[ ] Use memories" in select._render_ui()  # type: ignore[attr-defined]
+
+    select._cursor = 1  # type: ignore[attr-defined]
+    select._toggle_current()  # type: ignore[attr-defined]
+    rendered = select._render_ui()  # type: ignore[attr-defined]
+    assert "[√] Generate memories" in rendered
+    assert "[√] Use memories" in rendered
+
+
+# 功能：验证从斜杠补全中选择 /memories 后一次 Enter 直接打开设置页
+# 设计：模拟补全选择事件，断言输入框被清空并挂载 MemorySelect，不需要第二次提交
+async def test_memories_completion_opens_settings_on_first_enter() -> None:
+    app = _ContextStatusHarness()
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        app._client = object()  # type: ignore[assignment]
+        app._session_id = "session-1"  # type: ignore[attr-defined]
+        popup = SlashCompleteWidget([("memories", "configure memory settings", False)])
+        await app.mount(popup, before="#prompt")
+        app.on_slash_complete_widget_selected(SlashCompleteWidget.Selected("memories"))
+        await pilot.pause()
+
+        prompt = app.query_one("#prompt")
+        assert prompt.text == ""
+        assert prompt.disabled
+        assert app.query(MemorySelect)
 
 
 # 功能：验证 /new 创建独立 session 并重置聊天日志、上下文水位和输入状态
@@ -479,14 +517,6 @@ async def test_tool_block_hover_and_chevron_toggle() -> None:
         assert "expanded" not in block.classes
         assert chevron.styles.opacity == 1
         assert str(chevron.content) == ">"
-
-
-# 功能：验证 note_save 成功完成时工具块摘要显示 remembered
-# 设计：直接操作 ToolCallBlock，覆盖 note_save 的特殊低噪声展示策略
-def test_note_save_tool_block_shows_remembered() -> None:
-    block = ToolCallBlock("note_save", {"content": "Python 3.12"})
-    block.set_result("saved", 3)
-    assert "remembered" in block._summary()  # type: ignore[attr-defined]
 
 
 # 功能：验证 TUI 使用 VS Code 终端可传递的 Ctrl+C 退出且具有应用级优先级

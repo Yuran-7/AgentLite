@@ -153,12 +153,11 @@ def test_shell_default_is_ask() -> None:
     assert result == PermissionDecision.ASK
 
 
-# 功能：验证 read_file / list_dir / note_save 默认策略是 ALLOW
+# 功能：验证 read_file / list_dir 默认策略是 ALLOW
 # 设计：只读或安全工具默认不打扰用户，降低权限疲劳
 def test_safe_tools_default_allow() -> None:
     assert evaluate("read_file", {"path": "README.md"}) == PermissionDecision.ALLOW
     assert evaluate("list_dir", {"path": "."}) == PermissionDecision.ALLOW
-    assert evaluate("note_save", {"content": "x"}) == PermissionDecision.ALLOW
 
 
 # 功能：验证 write_file 默认策略是 ASK
@@ -195,7 +194,6 @@ def test_patterns_only_apply_to_bash() -> None:
 def test_param_preview_known_tools() -> None:
     assert param_preview("shell", {"command": "echo hi"}) == "command='echo hi'"
     assert param_preview("read_file", {"path": "README.md"}) == "path='README.md'"
-    assert param_preview("note_save", {"content": "Python 3.12"}) == "content='Python 3.12'"
 
 
 # 功能：验证 param_preview 超出 60 字符时截断并加省略号

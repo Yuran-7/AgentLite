@@ -5,7 +5,6 @@ from pydantic import ValidationError
 
 from agent_lite.core.tools.builtin.bash import BashParams
 from agent_lite.core.tools.builtin.list_dir import ListDirParams
-from agent_lite.core.tools.builtin.note_save import NoteSaveParams
 from agent_lite.core.tools.builtin.read_file import ReadFileParams
 from agent_lite.core.tools.builtin.write_file import WriteFileParams
 
@@ -90,17 +89,3 @@ def test_list_dir_params_defaults() -> None:
 def test_list_dir_params_max_depth_exceeded() -> None:
     with pytest.raises(ValidationError):
         ListDirParams.model_validate({"max_depth": 5})
-
-
-# 功能：验证 NoteSaveParams 接受合法 content 字符串
-# 设计：最小合法输入，断言 content 原样保留
-def test_note_save_params_valid() -> None:
-    p = NoteSaveParams.model_validate({"content": "Python 3.12"})
-    assert p.content == "Python 3.12"
-
-
-# 功能：验证 NoteSaveParams 缺少 content 时抛 ValidationError
-# 设计：传空字典触发 required 字段缺失，覆盖空调用场景
-def test_note_save_params_missing_content() -> None:
-    with pytest.raises(ValidationError):
-        NoteSaveParams.model_validate({})

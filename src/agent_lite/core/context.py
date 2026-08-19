@@ -13,8 +13,6 @@ class ExecutionContext:
     goal: str
     max_steps: int
     prefill_messages: list[dict[str, Any]] = field(default_factory=list)
-    session_notes: str = ""
-    global_context: str = ""
     agent_context: str = ""
     workspace_root: Path | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -35,8 +33,6 @@ class ExecutionContext:
     # 返回当前 run 的 system prompt；有 override 时跳过 base，直接注入记忆层
     def system_prompt(self, base: str) -> str:
         parts = [self.system_prompt_override if self.system_prompt_override else base]
-        if self.global_context.strip():
-            parts.append("\n\n## Global Context\n" + self.global_context.strip())
         if self.agent_context.strip():
             parts.append("\n\n## AGENT.md\n" + self.agent_context.strip())
         if self.workspace_root is not None:
@@ -44,12 +40,6 @@ class ExecutionContext:
                 "\n\n## Workspace\n"
                 f"Root: {self.workspace_root}\n"
                 "Resolve relative file and shell paths from this workspace root."
-            )
-        if self.session_notes.strip():
-            parts.append(
-                "\n\n## Session Notes\n"
-                + self.session_notes.strip()
-                + "\n\nRemember important durable facts by calling note_save."
             )
         return "".join(parts)
 

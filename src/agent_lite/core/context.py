@@ -22,6 +22,7 @@ class ExecutionContext:
     result: str = ""
     # skill 或 subagent 角色可覆盖默认 system prompt
     system_prompt_override: str | None = None
+    memory_context: str = ""
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:
@@ -41,6 +42,8 @@ class ExecutionContext:
                 f"Root: {self.workspace_root}\n"
                 "Resolve relative file and shell paths from this workspace root."
             )
+        if self.memory_context.strip():
+            parts.append("\n\n" + self.memory_context.strip())
         return "".join(parts)
 
     # 将 LLM 响应的 content blocks 追加为 assistant 消息

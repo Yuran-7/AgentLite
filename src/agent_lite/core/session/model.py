@@ -17,6 +17,8 @@ class Session:
     updated_at: str
     workspace_root: str | None = None
     run_ids: list[str] = field(default_factory=list)
+    memory_generate_enabled: bool = False
+    memory_use_enabled: bool = True
 
     # 将 Session 转为可写入 meta.json 的普通 dict
     def to_dict(self) -> dict[str, Any]:
@@ -29,6 +31,8 @@ class Session:
             "updated_at": self.updated_at,
             "workspace_root": self.workspace_root,
             "run_ids": list(self.run_ids),
+            "memory_generate_enabled": self.memory_generate_enabled,
+            "memory_use_enabled": self.memory_use_enabled,
         }
 
     # 从 meta.json 的 dict 还原 Session 对象
@@ -47,4 +51,6 @@ class Session:
                 else None
             ),
             run_ids=[str(x) for x in data.get("run_ids", [])],
+            memory_generate_enabled=bool(data.get("memory_generate_enabled", False)),
+            memory_use_enabled=bool(data.get("memory_use_enabled", True)),
         )

@@ -19,6 +19,7 @@ _DEFAULT_LLM_PROTOCOL = "anthropic"
 _DEFAULT_MODEL = "deepseek-chat"
 _DEFAULT_TRACE_FILE = "~/.agentlite/traces/daemon.jsonl"
 _DEFAULT_SESSIONS_DIR = "~/.agentlite/sessions"
+_DEFAULT_MEMORY_DIR = "~/.agentlite/memories/memory.db"
 _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "read_file",
     "shell",
@@ -123,6 +124,15 @@ class SessionConfig:
 
 
 @dataclass
+class MemoryConfig:
+    dir: str = _DEFAULT_MEMORY_DIR
+    use_enabled: bool = True
+    generate_enabled: bool = False
+    max_results: int = 5
+    max_chars: int = 2_000
+
+
+@dataclass
 class AgentLiteConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
@@ -135,6 +145,7 @@ class AgentLiteConfig:
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -171,7 +182,7 @@ def get_config() -> AgentLiteConfig:
 def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
     known_sections = {
         "core", "logging", "agent", "web", "llm", "trace", "permission",
-        "compaction", "mcp", "session",
+        "compaction", "mcp", "session", "memory",
     }
     unknown = set(data.keys()) - known_sections
     if unknown:
@@ -391,6 +402,33 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: session.dir must be a non-empty string")
             config.session.dir = val
 
+    if "memory" in data:
+        memory = data["memory"]
+        if not isinstance(memory, dict):
+            raise SystemExit("Config error: [memory] must be a table")
+        unknown_memory = set(memory.keys()) - {
+            "dir", "use_enabled", "generate_enabled", "max_results", "max_chars",
+        }
+        if unknown_memory:
+            raise SystemExit(f"Unknown [memory] keys: {', '.join(sorted(unknown_memory))}")
+        if "dir" in memory:
+            val = memory["dir"]
+            if not isinstance(val, str) or not val.strip():
+                raise SystemExit("Config error: memory.dir must be a non-empty string")
+            config.memory.dir = val
+        for key in ("use_enabled", "generate_enabled"):
+            if key in memory:
+                val = memory[key]
+                if not isinstance(val, bool):
+                    raise SystemExit(f"Config error: memory.{key} must be a boolean")
+                setattr(config.memory, key, val)
+        for key in ("max_results", "max_chars"):
+            if key in memory:
+                val = memory[key]
+                if not isinstance(val, int) or val <= 0:
+                    raise SystemExit(f"Config error: memory.{key} must be a positive integer")
+                setattr(config.memory, key, val)
+
     if "compaction" in data:
         comp = data["compaction"]
         if not isinstance(comp, dict):
@@ -500,6 +538,20 @@ def _apply_env(config: AgentLiteConfig) -> None:
         if not sessions_dir.strip():
             raise SystemExit("Config error: AGENTLITE_SESSIONS_DIR must not be empty")
         config.session.dir = sessions_dir
+
+    memory_dir = os.environ.get("AGENTLITE_MEMORY_DIR")
+    if memory_dir is not None:
+        if not memory_dir.strip():
+            raise SystemExit("Config error: AGENTLITE_MEMORY_DIR must not be empty")
+        config.memory.dir = memory_dir
+
+    memory_use = os.environ.get("AGENTLITE_MEMORY_USE_ENABLED")
+    if memory_use is not None:
+        config.memory.use_enabled = memory_use.lower() not in ("0", "false", "no")
+
+    memory_generate = os.environ.get("AGENTLITE_MEMORY_GENERATE_ENABLED")
+    if memory_generate is not None:
+        config.memory.generate_enabled = memory_generate.lower() not in ("0", "false", "no")
 
     max_steps_str = os.environ.get("AGENTLITE_MAX_STEPS")
     if max_steps_str is not None:

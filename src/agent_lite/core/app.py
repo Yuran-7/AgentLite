@@ -22,6 +22,18 @@ from agent_lite.core.bus.commands import (
     CoreShutdownResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    MemoryCommitCommand,
+    MemoryCommitResult,
+    MemoryDeleteCommand,
+    MemoryDeleteResult,
+    MemoryGenerateCommand,
+    MemoryGenerateResult,
+    MemoryListCommand,
+    MemoryListResult,
+    MemoryRejectCommand,
+    MemoryRejectResult,
+    MemorySearchCommand,
+    MemorySearchResult,
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
@@ -35,6 +47,8 @@ from agent_lite.core.bus.commands import (
     SessionGetHistoryResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    SessionSetMemoryCommand,
+    SessionSetMemoryResult,
     SessionSetWorkspaceCommand,
     SessionSetWorkspaceResult,
 )
@@ -44,6 +58,7 @@ from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.factory import create_llm_provider
 from agent_lite.core.logging_setup import setup_logging
 from agent_lite.core.mcp.server import McpServerManager
+from agent_lite.core.memory import MemoryStore
 from agent_lite.core.permissions.manager import PermissionManager
 from agent_lite.core.permissions.storage import load_policy_file
 from agent_lite.core.runner import AgentRunner
@@ -76,6 +91,7 @@ class CoreApp:
         self._browser_manager: BrowserSessionManager | None = None
         self._shutdown: asyncio.Event | None = None
         self._sessions_root: Path | None = None
+        self._memory_store: MemoryStore | None = None
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -139,6 +155,8 @@ class CoreApp:
             session_id=session.id,
             status=session.status,
             workspace_root=session.workspace_root,
+            memory_generate_enabled=session.memory_generate_enabled,
+            memory_use_enabled=session.memory_use_enabled,
         )
 
     # 为已有且尚未绑定工作区的 session 设置工作区
@@ -165,6 +183,87 @@ class CoreApp:
         cmd = SessionGetHistoryCommand.model_validate(params)
         messages = await self._sessions.get_history(cmd.session_id)
         return SessionGetHistoryResult(messages=messages)
+
+    # 修改当前 session 的 memory 检索和候选生成开关
+    async def _session_set_memory_handler(self, params: dict[str, Any]) -> SessionSetMemoryResult:
+        assert self._sessions is not None
+        cmd = SessionSetMemoryCommand.model_validate(params)
+        session = await self._sessions.set_memory(
+            cmd.session_id,
+            generate_enabled=cmd.generate_enabled,
+            use_enabled=cmd.use_enabled,
+        )
+        return SessionSetMemoryResult(
+            generate_enabled=session.memory_generate_enabled,
+            use_enabled=session.memory_use_enabled,
+        )
+
+    # 搜索当前调用者可见的长期记忆
+    async def _memory_search_handler(self, params: dict[str, Any]) -> MemorySearchResult:
+        assert self._sessions is not None
+        cmd = MemorySearchCommand.model_validate(params)
+        memories = self._sessions.search_memory(
+            cmd.query,
+            session_id=cmd.session_id,
+            workspace_root=cmd.workspace_root,
+            limit=cmd.limit,
+        )
+        return MemorySearchResult(memories=memories)
+
+    # 列出长期记忆和待审核候选
+    async def _memory_list_handler(self, params: dict[str, Any]) -> MemoryListResult:
+        assert self._sessions is not None
+        cmd = MemoryListCommand.model_validate(params)
+        store = self._memory_store
+        memories = (
+            store.list_memories(
+                scope=cmd.scope,
+                session_id=cmd.session_id,
+                workspace_root=cmd.workspace_root,
+                include_deleted=cmd.include_deleted,
+                limit=cmd.limit,
+            )
+            if store is not None
+            else []
+        )
+        candidates = (
+            store.list_candidates(session_id=cmd.session_id, limit=cmd.limit)
+            if store is not None and cmd.include_candidates
+            else []
+        )
+        return MemoryListResult(memories=memories, candidates=candidates)
+
+    # 生成 pending 候选，不会直接写入 active memory
+    async def _memory_generate_handler(self, params: dict[str, Any]) -> MemoryGenerateResult:
+        assert self._sessions is not None
+        cmd = MemoryGenerateCommand.model_validate(params)
+        candidates = self._sessions.generate_memory_candidates(
+            cmd.session_id,
+            run_id=cmd.run_id,
+            content=cmd.content,
+        )
+        return MemoryGenerateResult(candidates=candidates)
+
+    # 提交单条候选并返回新版本的 active memory
+    async def _memory_commit_handler(self, params: dict[str, Any]) -> MemoryCommitResult:
+        assert self._sessions is not None
+        cmd = MemoryCommitCommand.model_validate(params)
+        record = await self._sessions.commit_memory_candidate(cmd.candidate_id)
+        return MemoryCommitResult(committed=record is not None, memory=record)
+
+    # 拒绝 pending 候选，不影响已有 active memory
+    async def _memory_reject_handler(self, params: dict[str, Any]) -> MemoryRejectResult:
+        cmd = MemoryRejectCommand.model_validate(params)
+        store = self._memory_store
+        rejected = store.reject_candidate(cmd.candidate_id) if store is not None else False
+        return MemoryRejectResult(rejected=rejected)
+
+    # 删除长期记忆，实际写入 tombstone
+    async def _memory_delete_handler(self, params: dict[str, Any]) -> MemoryDeleteResult:
+        assert self._sessions is not None
+        cmd = MemoryDeleteCommand.model_validate(params)
+        deleted = await self._sessions.delete_memory(cmd.memory_id, cmd.reason)
+        return MemoryDeleteResult(deleted=deleted)
 
     # 接收客户端权限审批响应，resolve 对应挂起的 Future
     async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
@@ -305,6 +404,8 @@ class CoreApp:
         self._sessions_root = Path(self._config.session.dir).expanduser().resolve()
         store = SessionStore(self._sessions_root)
         logger.info("sessions: root=%s", self._sessions_root)
+        self._memory_store = MemoryStore(Path(self._config.memory.dir).expanduser())
+        logger.info("memory: db=%s", self._memory_store.path)
         assert self._config is not None
         compact_provider = create_llm_provider(self._config.llm)
 
@@ -331,6 +432,9 @@ class CoreApp:
             bus=self._bus,
             provider=compact_provider,
             browser_manager=self._browser_manager,
+            memory_store=self._memory_store,
+            memory_use_enabled=self._config.memory.use_enabled,
+            memory_generate_enabled=self._config.memory.generate_enabled,
         )
 
         server = SocketServer(
@@ -348,9 +452,16 @@ class CoreApp:
         server.register("session.set_workspace", self._session_set_workspace_handler)
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
+        server.register("session.set_memory", self._session_set_memory_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("memory.search", self._memory_search_handler)
+        server.register("memory.list", self._memory_list_handler)
+        server.register("memory.generate", self._memory_generate_handler)
+        server.register("memory.commit", self._memory_commit_handler)
+        server.register("memory.reject", self._memory_reject_handler)
+        server.register("memory.delete", self._memory_delete_handler)
 
         self._shutdown = asyncio.Event()
         addr = await server.start()  # 启动监听；新连接由 SocketServer 的回调处理

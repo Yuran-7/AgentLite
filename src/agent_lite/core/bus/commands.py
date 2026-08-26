@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator
+from pydantic import BaseModel, Discriminator, Field
 
+from agent_lite.core.memory.model import MemoryCandidate, MemoryRecord, MemoryScope
 from agent_lite.core.session.model import SessionMode, SessionStatus
 
 
@@ -59,6 +60,8 @@ class SessionCreateResult(BaseModel):
     session_id: str
     status: SessionStatus
     workspace_root: str | None = None
+    memory_generate_enabled: bool = False
+    memory_use_enabled: bool = True
 
 
 class SessionSetWorkspaceCommand(BaseModel):
@@ -121,6 +124,85 @@ class SessionCompactResult(BaseModel):
     saved_tokens: int
 
 
+class SessionSetMemoryCommand(BaseModel):
+    type: Literal["session.set_memory"] = "session.set_memory"
+    session_id: str
+    generate_enabled: bool | None = None
+    use_enabled: bool | None = None
+
+
+class SessionSetMemoryResult(BaseModel):
+    generate_enabled: bool
+    use_enabled: bool
+
+
+class MemorySearchCommand(BaseModel):
+    type: Literal["memory.search"] = "memory.search"
+    query: str = ""
+    session_id: str | None = None
+    workspace_root: str | None = None
+    limit: int = 5
+
+
+class MemorySearchResult(BaseModel):
+    memories: list[MemoryRecord]
+
+
+class MemoryListCommand(BaseModel):
+    type: Literal["memory.list"] = "memory.list"
+    session_id: str | None = None
+    workspace_root: str | None = None
+    scope: MemoryScope | None = None
+    include_deleted: bool = False
+    include_candidates: bool = True
+    limit: int = 100
+
+
+class MemoryListResult(BaseModel):
+    memories: list[MemoryRecord]
+    candidates: list[MemoryCandidate] = Field(default_factory=list)
+
+
+class MemoryGenerateCommand(BaseModel):
+    type: Literal["memory.generate"] = "memory.generate"
+    session_id: str
+    run_id: str | None = None
+    content: str | None = None
+
+
+class MemoryGenerateResult(BaseModel):
+    candidates: list[MemoryCandidate]
+
+
+class MemoryCommitCommand(BaseModel):
+    type: Literal["memory.commit"] = "memory.commit"
+    candidate_id: str
+
+
+class MemoryCommitResult(BaseModel):
+    committed: bool
+    memory: MemoryRecord | None = None
+
+
+class MemoryRejectCommand(BaseModel):
+    type: Literal["memory.reject"] = "memory.reject"
+    candidate_id: str
+
+
+class MemoryRejectResult(BaseModel):
+    rejected: bool
+
+
+class MemoryDeleteCommand(BaseModel):
+    type: Literal["memory.delete"] = "memory.delete"
+    memory_id: str
+    reason: str = "user_requested"
+
+
+class MemoryDeleteResult(BaseModel):
+    deleted: bool
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -133,6 +215,13 @@ Command = Annotated[
     | SessionGetHistoryCommand
     | SessionCloseCommand
     | PermissionRespondCommand
-    | SessionCompactCommand,
+    | SessionCompactCommand
+    | SessionSetMemoryCommand
+    | MemorySearchCommand
+    | MemoryListCommand
+    | MemoryGenerateCommand
+    | MemoryCommitCommand
+    | MemoryRejectCommand
+    | MemoryDeleteCommand,
     Discriminator("type"),
 ]

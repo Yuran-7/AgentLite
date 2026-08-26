@@ -162,6 +162,28 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+class MemoryCandidatesCreatedEvent(BaseModel):
+    type: Literal["memory.candidates_created"] = "memory.candidates_created"
+    session_id: str
+    run_id: str | None = None
+    count: int
+    ts: str
+
+
+class MemorySavedEvent(BaseModel):
+    type: Literal["memory.saved"] = "memory.saved"
+    memory_id: str
+    scope: str
+    key: str
+    ts: str
+
+
+class MemoryDeletedEvent(BaseModel):
+    type: Literal["memory.deleted"] = "memory.deleted"
+    memory_id: str
+    ts: str
+
+
 class ContextCompactedEvent(BaseModel):
     type: Literal["context.compacted"] = "context.compacted"
     session_id: str
@@ -249,6 +271,9 @@ Event = Annotated[
     | SessionWaitingForInputEvent
     | SessionResumedEvent
     | SessionClosedEvent
+    | MemoryCandidatesCreatedEvent
+    | MemorySavedEvent
+    | MemoryDeletedEvent
     | ContextCompactedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent

@@ -774,7 +774,7 @@ class AgentLiteTuiApp(App[None]):
         items: list[SlashItem] = [
             ("new", "start a new session", False),
             ("compact", "compress context window", False),
-            ("memories", "configure memory settings", False),
+            ("memories", "configure and review memories", False),
         ]
         try:
             loader = SkillLoader()
@@ -892,6 +892,19 @@ class AgentLiteTuiApp(App[None]):
         if content == "/memories":
             self._open_memory_settings(event.text_area)
             return
+        if content.startswith("/memories "):
+            event.text_area.text = ""
+            if self._client is None or self._session_id is None or self._busy:
+                self._append(
+                    Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line")
+                )
+                return
+            self.run_worker(
+                self._do_memory_command(content[len("/memories "):].strip()),
+                name="memory_command",
+                exclusive=False,
+            )
+            return
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
@@ -957,9 +970,15 @@ class AgentLiteTuiApp(App[None]):
         self._append(Static(
             f"[bold cyan]memory settings[/bold cyan]  "
             f"Generate memories: {generate}  ·  Use memories: {use}  "
-            "[dim](logic not implemented)[/dim]",
+            "[dim](saved for this session)[/dim]",
             classes="log-line",
         ))
+        if self._client is not None and self._session_id is not None:
+            self.run_worker(
+                self._do_set_memory(msg.generate_enabled, msg.use_enabled),
+                name="set_memory",
+                exclusive=False,
+            )
 
     # 取消 /memories 选择，不改变之前的开关状态
     def on_memory_select_cancelled(self, msg: MemorySelect.Cancelled) -> None:
@@ -974,6 +993,115 @@ class AgentLiteTuiApp(App[None]):
             prompt.read_only = False
             prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
             prompt.focus()
+
+    # 将 TUI 的记忆开关同步到 core session
+    async def _do_set_memory(self, generate_enabled: bool, use_enabled: bool) -> None:
+        if self._client is None or self._session_id is None:
+            return
+        try:
+            await self._client.send_command(
+                "session.set_memory",
+                {
+                    "session_id": self._session_id,
+                    "generate_enabled": generate_enabled,
+                    "use_enabled": use_enabled,
+                },
+            )
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._append(Static(f"[red]memory settings error: {exc}[/red]", classes="log-line"))
+
+    # 通过 slash command 管理候选和长期记忆，不把管理指令发送给 Agent
+    async def _do_memory_command(self, arguments: str) -> None:
+        if self._client is None or self._session_id is None:
+            return
+        parts = arguments.split(None, 1)
+        action = parts[0].lower() if parts else "list"
+        value = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            if action == "generate":
+                result = await self._client.send_command(
+                    "memory.generate", {"session_id": self._session_id}
+                )
+                candidates = result.get("candidates", [])
+                if not candidates:
+                    self._append(
+                        Static("[dim]no memory candidates found[/dim]", classes="log-line")
+                    )
+                for candidate in candidates:
+                    self._append(
+                        Static(self._render_memory_candidate(candidate), classes="log-line")
+                    )
+                return
+            if action in {"list", "search"}:
+                method = "memory.search" if action == "search" else "memory.list"
+                params: dict[str, Any] = {"session_id": self._session_id}
+                if action == "search":
+                    params["query"] = value
+                result = await self._client.send_command(method, params)
+                candidates = result.get("candidates", [])
+                memories = result.get("memories", [])
+                for candidate in candidates:
+                    self._append(
+                        Static(self._render_memory_candidate(candidate), classes="log-line")
+                    )
+                for memory in memories:
+                    self._append(Static(self._render_memory_record(memory), classes="log-line"))
+                if not candidates and not memories:
+                    self._append(Static("[dim]no memories found[/dim]", classes="log-line"))
+                return
+            if action in {"accept", "commit"} and value:
+                result = await self._client.send_command(
+                    "memory.commit", {"candidate_id": value}
+                )
+                self._append(Static(
+                    "[green]memory committed[/green]" if result.get("committed")
+                    else "[yellow]candidate was not committed[/yellow]",
+                    classes="log-line",
+                ))
+                return
+            if action == "reject" and value:
+                result = await self._client.send_command(
+                    "memory.reject", {"candidate_id": value}
+                )
+                self._append(Static(
+                    "[yellow]memory candidate rejected[/yellow]"
+                    if result.get("rejected") else "[dim]candidate not pending[/dim]",
+                    classes="log-line",
+                ))
+                return
+            if action == "delete" and value:
+                result = await self._client.send_command(
+                    "memory.delete", {"memory_id": value}
+                )
+                self._append(Static(
+                    "[yellow]memory deleted[/yellow]" if result.get("deleted")
+                    else "[dim]memory not found[/dim]",
+                    classes="log-line",
+                ))
+                return
+            self._append(Static(
+                "[dim]usage: /memories list | generate | search <text> | "
+                "accept <candidate_id> | reject <candidate_id> | delete <memory_id>[/dim]",
+                classes="log-line",
+            ))
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._append(Static(f"[red]memory command error: {exc}[/red]", classes="log-line"))
+
+    @staticmethod
+    def _render_memory_candidate(candidate: dict[str, Any]) -> str:
+        return (
+            f"[cyan]candidate[/cyan] [{candidate.get('scope', '')}] "
+            f"[{candidate.get('type', '')}] {candidate.get('key', '')}: "
+            f"{candidate.get('content', '')}  [dim]id={candidate.get('id', '')}[/dim]"
+        )
+
+    @staticmethod
+    def _render_memory_record(memory: dict[str, Any]) -> str:
+        return (
+            f"[green]memory[/green] [{memory.get('scope', '')}] "
+            f"[{memory.get('type', '')}] {memory.get('key', '')}: "
+            f"{memory.get('content', '')}  [dim]id={memory.get('id', '')}[/dim]"
+        )
 
     # 关闭旧会话、创建新会话并将 TUI 恢复到干净的初始状态
     async def _do_new_session(self) -> None:
@@ -991,6 +1119,12 @@ class AgentLiteTuiApp(App[None]):
                 str(created["workspace_root"])
                 if created.get("workspace_root") is not None
                 else None
+            )
+            self._memory_generate_enabled = bool(
+                created.get("memory_generate_enabled", self._memory_generate_enabled)
+            )
+            self._memory_use_enabled = bool(
+                created.get("memory_use_enabled", self._memory_use_enabled)
             )
             try:
                 await self._client.send_command(
@@ -1254,6 +1388,7 @@ class AgentLiteTuiApp(App[None]):
                         "context.*",
                         "subagent.*",
                         "skill.*",
+                        "memory.*",
                     ],
                     "scope": "global",
                 }
@@ -1264,6 +1399,12 @@ class AgentLiteTuiApp(App[None]):
                     "session.create", self._session_create_params()
                 )
                 self._session_id = str(created["session_id"])
+                self._memory_generate_enabled = bool(
+                    created.get("memory_generate_enabled", self._memory_generate_enabled)
+                )
+                self._memory_use_enabled = bool(
+                    created.get("memory_use_enabled", self._memory_use_enabled)
+                )
                 self._workspace_root = (
                     str(created["workspace_root"])
                     if created.get("workspace_root") is not None
@@ -1480,6 +1621,31 @@ class AgentLiteTuiApp(App[None]):
                     f"[bold red]✗ failed[/bold red]{detail}  [dim]{steps} steps[/dim]",
                     classes="run-err",
                 ))
+
+        elif t == "memory.candidates_created":
+            session_id = str(event.get("session_id") or "")
+            if session_id and session_id != self._session_id:
+                return
+            count = int(event.get("count") or 0)
+            self._append(Static(
+                f"[bold cyan]memory[/bold cyan]  {count} pending candidate(s)  "
+                "[dim]review with memory.list / memory.commit[/dim]",
+                classes="log-line",
+            ))
+
+        elif t == "memory.saved":
+            self._append(Static(
+                f"[bold green]memory saved[/bold green]  "
+                f"[dim]{event.get('key', '')}[/dim]",
+                classes="log-line",
+            ))
+
+        elif t == "memory.deleted":
+            self._append(Static(
+                f"[bold yellow]memory deleted[/bold yellow]  "
+                f"[dim]{event.get('memory_id', '')}[/dim]",
+                classes="log-line",
+            ))
         elif t == "llm.usage":
             run_id = str(event.get("run_id") or "")
             if run_id in self._subagent_run_ids:

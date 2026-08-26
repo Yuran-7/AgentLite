@@ -6,6 +6,7 @@ import pytest
 
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.memory.store import MemoryStore
 from agent_lite.core.runner import RunOutcome
 from agent_lite.core.session.manager import (
     SESSION_CLOSED,
@@ -166,6 +167,29 @@ async def test_send_message_chat_enters_waiting_and_writes_thread(tmp_path: Path
     messages = store.read_messages(session.id)
     assert messages[0] == {"role": "user", "content": "hello"}
     assert messages[1]["role"] == "assistant"
+
+
+# 功能：验证成功 run 结束后仅生成 pending 候选，不直接写入 active memory
+# 设计：覆盖 SessionManager 的自动提取时机和长期记忆与 thread.jsonl 的分离
+async def test_successful_run_generates_pending_memory_candidate(tmp_path: Path) -> None:
+    session_store = SessionStore(tmp_path / "sessions")
+    memory_store = MemoryStore(tmp_path / "memory.db")
+    manager = SessionManager(
+        session_store,
+        lambda: _Runner(),
+        EventBus(),
+        memory_store=memory_store,
+        memory_generate_enabled=True,
+    )  # type: ignore[arg-type]
+    session = await manager.create("chat")
+
+    await manager.send_message(session.id, "remember that I prefer concise answers.")
+
+    assert memory_store.search("concise") == []
+    candidates = memory_store.list_candidates(session_id=session.id)
+    assert len(candidates) == 1
+    assert candidates[0].status == "pending"
+    assert len(session_store.read_messages(session.id)) == 2
 
 
 # 功能：验证 one_shot session 在单次消息完成后自动 closed

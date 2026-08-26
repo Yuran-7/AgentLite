@@ -175,6 +175,7 @@ class AgentRunner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
+        memory_context: str = "",
     ) -> RunOutcome:
         # 1. 确定本次运行的唯一 run_id、目录，以及需要回放的会话上下文
         run_id = run_id or new_run_id()
@@ -212,6 +213,7 @@ class AgentRunner:
             agent_context=agent_ctx,
             workspace_root=workspace_root,
             system_prompt_override=system_prompt_override,
+            memory_context=memory_context,
         )
         prefill_len = len(history)
 

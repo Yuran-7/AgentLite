@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
 from agent_lite.core.bus.events import (
+    MemoryCandidatesCreatedEvent,
+    MemoryDeletedEvent,
+    MemorySavedEvent,
     SessionClosedEvent,
     SessionCreatedEvent,
     SessionMessageReceivedEvent,
@@ -17,6 +20,7 @@ from agent_lite.core.bus.events import (
     SkillInvokedEvent,
 )
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.memory.store import MemoryStore
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.ids import new_session_id
 from agent_lite.core.session.model import Session, SessionMode
@@ -70,12 +74,18 @@ class SessionManager:
         bus: EventBus,
         provider: LLMProvider | None = None,
         browser_manager: BrowserSessionManager | None = None,
+        memory_store: MemoryStore | None = None,
+        memory_use_enabled: bool = True,
+        memory_generate_enabled: bool = False,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
         self._provider = provider
         self._browser_manager = browser_manager
+        self._memory_store = memory_store
+        self._memory_use_enabled = memory_use_enabled
+        self._memory_generate_enabled = memory_generate_enabled
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
@@ -99,6 +109,8 @@ class SessionManager:
             updated_at=ts,
             workspace_root=normalized_workspace,
             run_ids=[],
+            memory_generate_enabled=self._memory_generate_enabled,
+            memory_use_enabled=self._memory_use_enabled,
         )
         self._sessions[sid] = session
         self._locks[sid] = asyncio.Lock()
@@ -201,14 +213,43 @@ class SessionManager:
                     )
 
             runner = self._runner_factory()
-            await runner.run_and_capture(
-                goal,
-                run_id=run_id,
-                session=session,
-                store=self._store,
-                system_prompt_override=system_prompt_override,
-                tool_whitelist=tool_whitelist,
-            )
+            runner_kwargs: dict[str, Any] = {
+                "run_id": run_id,
+                "session": session,
+                "store": self._store,
+                "system_prompt_override": system_prompt_override,
+                "tool_whitelist": tool_whitelist,
+            }
+            if self._memory_store is not None and session.memory_use_enabled:
+                memory_context = self._memory_store.format_relevant(
+                    content,
+                    workspace_root=session.workspace_root,
+                    session_id=session.id,
+                )
+                if memory_context:
+                    runner_kwargs["memory_context"] = memory_context
+            outcome = await runner.run_and_capture(goal, **runner_kwargs)
+
+            if (
+                self._memory_store is not None
+                and session.memory_generate_enabled
+                and outcome.status == "success"
+            ):
+                candidates = self._memory_store.generate_from_messages(
+                    self._store.read_messages(session.id),
+                    session_id=session.id,
+                    run_id=run_id,
+                    workspace_root=session.workspace_root,
+                )
+                if candidates:
+                    await self._bus.publish(
+                        MemoryCandidatesCreatedEvent(
+                            session_id=session.id,
+                            run_id=run_id,
+                            count=len(candidates),
+                            ts=_now(),
+                        )
+                    )
 
             session.updated_at = _now()
             if session.mode == "one_shot":
@@ -227,6 +268,93 @@ class SessionManager:
                 )
             self._store.write_meta(session)
             return run_id
+
+    # 修改当前 session 的记忆生成和检索开关，并持久化到 meta.json
+    async def set_memory(
+        self,
+        sid: str,
+        *,
+        generate_enabled: bool | None = None,
+        use_enabled: bool | None = None,
+    ) -> Session:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        async with lock:
+            if session.status == "closed":
+                raise HandlerError(SESSION_CLOSED, "session already closed")
+            if generate_enabled is not None:
+                session.memory_generate_enabled = generate_enabled
+            if use_enabled is not None:
+                session.memory_use_enabled = use_enabled
+            session.updated_at = _now()
+            self._store.write_meta(session)
+            return session
+
+    # 查询当前 session 可见的长期记忆
+    def search_memory(
+        self,
+        query: str,
+        *,
+        session_id: str | None = None,
+        workspace_root: str | None = None,
+        limit: int = 5,
+    ) -> list[Any]:
+        if self._memory_store is None:
+            return []
+        return self._memory_store.search(
+            query,
+            session_id=session_id,
+            workspace_root=workspace_root,
+            limit=limit,
+        )
+
+    # 从 session 历史生成 pending 候选，不会直接写入 active memories
+    def generate_memory_candidates(
+        self,
+        sid: str,
+        *,
+        run_id: str | None = None,
+        content: str | None = None,
+    ) -> list[Any]:
+        if self._memory_store is None:
+            return []
+        session = self._get_session(sid)
+        messages = self._store.read_messages(sid)
+        if content:
+            messages = [{"role": "user", "content": content}]
+        return self._memory_store.generate_from_messages(
+            messages,
+            session_id=sid,
+            run_id=run_id,
+            workspace_root=session.workspace_root,
+        )
+
+    # 提交候选记忆，并通过事件通知 TUI
+    async def commit_memory_candidate(self, candidate_id: str) -> Any:
+        if self._memory_store is None:
+            return None
+        record = self._memory_store.commit_candidate(candidate_id)
+        if record is not None:
+            await self._bus.publish(
+                MemorySavedEvent(
+                    memory_id=record.id,
+                    scope=record.scope,
+                    key=record.key,
+                    ts=_now(),
+                )
+            )
+        return record
+
+    # 以 tombstone 方式删除长期记忆
+    async def delete_memory(self, memory_id: str, reason: str = "user_requested") -> bool:
+        if self._memory_store is None:
+            return False
+        deleted = self._memory_store.delete(memory_id, reason)
+        if deleted:
+            await self._bus.publish(MemoryDeletedEvent(memory_id=memory_id, ts=_now()))
+        return deleted
 
     # 关闭指定 session 并更新 meta.json
     async def close(self, sid: str) -> None:

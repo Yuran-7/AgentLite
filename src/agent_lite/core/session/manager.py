@@ -90,7 +90,7 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
 
-    # 创建新 session 并写入 meta.json
+    # 创建新 session；首次发送消息时才创建目录并写入 meta.json
     async def create(
         self,
         mode: SessionMode,
@@ -114,7 +114,6 @@ class SessionManager:
         )
         self._sessions[sid] = session
         self._locks[sid] = asyncio.Lock()
-        self._store.write_meta(session)
         await self._bus.publish(
             SessionCreatedEvent(
                 session_id=sid,
@@ -129,10 +128,6 @@ class SessionManager:
     def list_sessions(self, workspace_root: str | None = None) -> list[Session]:
         sessions: list[Session] = []
         for session in self._store.list_sessions(workspace_root):
-            if self._store.is_empty(session.id):
-                if session.id not in self._sessions:
-                    self._store.delete_session(session.id)
-                continue
             if session.last_chat_at is None:
                 session.last_chat_at = self._store.last_message_at(session.id)
                 if session.last_chat_at is not None:
@@ -168,7 +163,7 @@ class SessionManager:
             await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
             return session
 
-    # 为未绑定工作区的空闲 session 首次设置工作区并持久化
+    # 为未绑定工作区的 session 设置工作区；未开始对话时只更新内存
     async def set_workspace(self, sid: str, workspace_root: str) -> str:
         session = self._get_session(sid)
         lock = self._locks[sid]
@@ -195,7 +190,7 @@ class SessionManager:
                 )
 
             session.workspace_root = normalized_workspace
-            self._store.write_meta(session)
+            self._persist_started_session(session)
             await self._bus.publish(
                 SessionWorkspaceSetEvent(
                     session_id=sid,
@@ -229,7 +224,7 @@ class SessionManager:
 
             run_id = run_id or new_run_id()
             session.run_ids.append(run_id)
-            self._store.write_meta(session)
+            self._persist_started_session(session)
 
             # Skill 解析：检测 "/" 前缀，展开为系统提示覆盖和工具白名单
             goal = content
@@ -330,7 +325,7 @@ class SessionManager:
                 session.memory_generate_enabled = generate_enabled
             if use_enabled is not None:
                 session.memory_use_enabled = use_enabled
-            self._store.write_meta(session)
+            self._persist_started_session(session)
             return session
 
     # 保存 TUI 为当前 session 汇总的上下文、耗时和 token 统计，不改变最后聊天时间
@@ -341,7 +336,7 @@ class SessionManager:
             raise HandlerError(SESSION_BUSY, "session busy")
         async with lock:
             session.ui_stats = dict(stats)
-            self._store.write_meta(session)
+            self._persist_started_session(session)
             return dict(session.ui_stats)
 
     # 查询当前 session 可见的长期记忆
@@ -408,26 +403,18 @@ class SessionManager:
             await self._bus.publish(MemoryDeletedEvent(memory_id=memory_id, ts=_now()))
         return deleted
 
-    # 关闭指定 session 并更新 meta.json
+    # 关闭指定 session；未开始对话时不创建 session 目录
     async def close(self, sid: str) -> None:
         session = self._get_session(sid)
         lock = self._locks[sid]
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
-        delete_empty = False
         async with lock:
             session.status = "closed"
             if self._browser_manager is not None:
                 await self._browser_manager.close_session(sid)
-            delete_empty = self._store.is_empty(sid)
-            if not delete_empty:
-                self._store.write_meta(session)
+            self._persist_started_session(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=_now()))
-            if delete_empty:
-                self._store.delete_session(sid)
-        if delete_empty:
-            self._sessions.pop(sid, None)
-            self._locks.pop(sid, None)
 
     # 手动压缩指定 session 的 thread，将摘要持久化写入 thread.jsonl
     async def compact(self, sid: str, focus: str = "") -> Any:
@@ -466,3 +453,8 @@ class SessionManager:
         if session is None:
             raise HandlerError(SESSION_NOT_FOUND, "session not found")
         return session
+
+    # 只有已产生对话的 session 才需要落盘，避免为新建但未使用的 TUI 建目录
+    def _persist_started_session(self, session: Session) -> None:
+        if session.run_ids:
+            self._store.write_meta(session)

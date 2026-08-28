@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -73,16 +72,6 @@ class SessionStore:
             sessions.append(session)
         return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
 
-    # 判断 session 是否从未写入任何对话消息
-    def is_empty(self, sid: str) -> bool:
-        thread_path = self.session_dir(sid) / "thread.jsonl"
-        if not thread_path.exists():
-            return True
-        try:
-            return not any(line.strip() for line in thread_path.read_text(encoding="utf-8").splitlines())
-        except OSError:
-            return False
-
     # 返回 thread 中最后一条有效消息的时间，用于迁移旧版 session 的最后聊天时间
     def last_message_at(self, sid: str) -> str | None:
         thread_path = self.session_dir(sid) / "thread.jsonl"
@@ -103,21 +92,6 @@ class SessionStore:
             if isinstance(timestamp, str) and timestamp:
                 return timestamp
         return None
-
-    # 删除指定 session 的独立存储目录，并校验目标始终位于 sessions 根目录内
-    def delete_session(self, sid: str) -> bool:
-        path = self.session_dir(sid)
-        if not path.exists() and not path.is_symlink():
-            return False
-        root = self._root.resolve()
-        parent = path.parent.resolve()
-        if root != parent and root not in parent.parents:
-            raise ValueError(f"session path escapes storage root: {sid!r}")
-        if path.is_symlink():
-            path.unlink()
-        else:
-            shutil.rmtree(path)
-        return True
 
     # 将工作区转换为适合当前平台比较的绝对路径键
     @staticmethod

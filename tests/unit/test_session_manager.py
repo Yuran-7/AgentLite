@@ -41,9 +41,9 @@ class _Runner:
         return RunOutcome(status="success", result="done", reason=None)
 
 
-# 功能：验证 create 会创建 active session、写入 meta 并发布 session.created 事件
-# 设计：用真实 SessionStore + EventBus 收集事件，覆盖 manager 与 store/bus 的协作边界
-async def test_create_session_writes_meta_and_event(tmp_path: Path) -> None:
+# 功能：验证 create 只创建内存 session，首次消息后才写入 meta
+# 设计：覆盖 session 目录的延迟持久化边界
+async def test_create_session_persists_only_after_first_message(tmp_path: Path) -> None:
     events: list[object] = []
     bus = EventBus()
 
@@ -57,12 +57,18 @@ async def test_create_session_writes_meta_and_event(tmp_path: Path) -> None:
     session = await manager.create("chat", "title")
 
     assert session.status == "active"
+    assert not store.session_dir(session.id).exists()
+    await manager.send_message(session.id, "hello")
     assert store.read_meta(session.id).title == "title"
-    assert [e.type for e in events] == ["session.created"]  # type: ignore[attr-defined]
+    assert [e.type for e in events] == [  # type: ignore[attr-defined]
+        "session.created",
+        "session.message_received",
+        "session.waiting_for_input",
+    ]
 
 
-# 功能：验证 create 会规范化并持久化可选工作区，同时写入 session.created 事件
-# 设计：传入相对目录并读取 meta 与事件，覆盖工作区从输入到持久化和事件传播的完整链路
+# 功能：验证 create 会规范化工作区，首次消息后才持久化
+# 设计：覆盖延迟持久化链路
 async def test_create_session_persists_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -84,6 +90,8 @@ async def test_create_session_persists_workspace_root(
 
     expected = str(workspace.resolve())
     assert session.workspace_root == expected
+    assert not store.session_dir(session.id).exists()
+    await manager.send_message(session.id, "hello")
     assert store.read_meta(session.id).workspace_root == expected
     assert events[0].workspace_root == expected  # type: ignore[attr-defined]
 
@@ -149,6 +157,8 @@ async def test_set_workspace_is_idempotent_but_rejects_switching(tmp_path: Path)
 
     assert same_result == first_result
     assert exc.value.code == SESSION_WORKSPACE_ALREADY_SET
+    assert not store.session_dir(session.id).exists()
+    await manager.send_message(session.id, "hello")
     assert store.read_meta(session.id).workspace_root == str(first.resolve())
 
 
@@ -269,9 +279,9 @@ async def test_resume_loads_closed_session_from_disk_and_switches_workspace(
     assert events[-1].type == "session.resumed"  # type: ignore[attr-defined]
 
 
-# 功能：验证从未收到消息的 session 在关闭时删除磁盘目录和内存索引
-# 设计：创建后不发送问题便直接关闭，断言 meta 目录消失且后续访问返回 session_not_found
-async def test_close_deletes_session_without_messages(tmp_path: Path) -> None:
+# 功能：验证从未收到消息的 session 关闭时不会创建磁盘目录
+# 设计：覆盖 TUI 退出和 /new 关闭空 session 的路径
+async def test_close_unused_session_does_not_persist_directory(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
     session = await manager.create("chat")
@@ -280,30 +290,6 @@ async def test_close_deletes_session_without_messages(tmp_path: Path) -> None:
     await manager.close(session.id)
 
     assert not session_dir.exists()
-    with pytest.raises(HandlerError) as exc:
-        await manager.get_history(session.id)
-    assert exc.value.code == SESSION_NOT_FOUND
-
-
-# 功能：验证历史列表会清理异常退出遗留的空 session，但不会删除当前进程中的活动空会话
-# 设计：磁盘写入一个未加载空会话并在 manager 中创建活动空会话，列表应隐藏两者且仅删除遗留目录
-async def test_list_sessions_prunes_only_unloaded_empty_sessions(tmp_path: Path) -> None:
-    store = SessionStore(tmp_path / "sessions")
-    stale = Session(
-        id="sess-20260815-000000-000000000099",
-        mode="chat",
-        status="active",
-        title="",
-        created_at="2026-08-15T00:00:00+00:00",
-        updated_at="2026-08-15T00:00:00+00:00",
-    )
-    store.write_meta(stale)
-    manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
-    current = await manager.create("chat")
-
-    assert manager.list_sessions() == []
-    assert not store.session_dir(stale.id).exists()
-    assert store.session_dir(current.id).exists()
 
 
 # 功能：验证旧版被 resume 改晚的 updated_at 会按 thread 最后一条消息时间自动修复

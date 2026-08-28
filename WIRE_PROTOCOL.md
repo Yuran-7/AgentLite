@@ -479,6 +479,229 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### SessionListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `workspace_root` | `string | null` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.list",
+      "default": "session.list",
+      "title": "Type",
+      "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
+    }
+  },
+  "title": "SessionListCommand",
+  "type": "object"
+}
+```
+
+### SessionListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `sessions` | `array` | yes |
+
+```json
+{
+  "$defs": {
+    "SessionSummary": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "waiting_for_input",
+            "closed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "workspace_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Root"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "title",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "SessionSummary",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "sessions": {
+      "items": {
+        "$ref": "#/$defs/SessionSummary"
+      },
+      "title": "Sessions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "sessions"
+  ],
+  "title": "SessionListResult",
+  "type": "object"
+}
+```
+
+### SessionResumeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `workspace_root` | `string | null` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.resume",
+      "default": "session.resume",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionResumeCommand",
+  "type": "object"
+}
+```
+
+### SessionResumeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string` | yes |
+| `title` | `string` | yes |
+| `status` | `string` | yes |
+| `workspace_root` | `string | null` | no |
+| `memory_generate_enabled` | `boolean` | no |
+| `memory_use_enabled` | `boolean` | no |
+| `stats` | `object` | no |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "active",
+        "waiting_for_input",
+        "closed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
+    },
+    "memory_generate_enabled": {
+      "default": false,
+      "title": "Memory Generate Enabled",
+      "type": "boolean"
+    },
+    "memory_use_enabled": {
+      "default": true,
+      "title": "Memory Use Enabled",
+      "type": "boolean"
+    },
+    "stats": {
+      "additionalProperties": true,
+      "title": "Stats",
+      "type": "object"
+    }
+  },
+  "required": [
+    "session_id",
+    "title",
+    "status"
+  ],
+  "title": "SessionResumeResult",
+  "type": "object"
+}
+```
+
 ### SessionSetMemoryCommand
 
 | Field | Type | Required |
@@ -558,6 +781,65 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "use_enabled"
   ],
   "title": "SessionSetMemoryResult",
+  "type": "object"
+}
+```
+
+### SessionSetStatsCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `stats` | `object` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.set_stats",
+      "default": "session.set_stats",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "stats": {
+      "additionalProperties": true,
+      "title": "Stats",
+      "type": "object"
+    }
+  },
+  "required": [
+    "session_id",
+    "stats"
+  ],
+  "title": "SessionSetStatsCommand",
+  "type": "object"
+}
+```
+
+### SessionSetStatsResult
+
+| Field | Type | Required |
+|---|---|---|
+| `stats` | `object` | yes |
+
+```json
+{
+  "properties": {
+    "stats": {
+      "additionalProperties": true,
+      "title": "Stats",
+      "type": "object"
+    }
+  },
+  "required": [
+    "stats"
+  ],
+  "title": "SessionSetStatsResult",
   "type": "object"
 }
 ```
@@ -2166,6 +2448,7 @@ Session events are appended to `sessions/.../<session_id>/events.jsonl`; standal
 |---|---|---|
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
+| `session_id` | `string | null` | no |
 | `goal` | `string` | yes |
 | `ts` | `string` | yes |
 
@@ -2181,6 +2464,18 @@ Session events are appended to `sessions/.../<session_id>/events.jsonl`; standal
     "run_id": {
       "title": "Run Id",
       "type": "string"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
     },
     "goal": {
       "title": "Goal",

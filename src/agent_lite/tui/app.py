@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,18 @@ from agent_lite.core.skills.loader import SkillLoader
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
 
 log = logging.getLogger(__name__)
+_BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+# 将 session 的 ISO 8601 UTC 时间转换为北京时间分钟文本
+def _format_session_time(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(_BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return value[:16].replace("T", " ")
 
 
 def _preview(s: str, n: int) -> str:
@@ -392,6 +405,144 @@ class PermissionBlock(Static):
 SlashItem = tuple[str, str, bool]  # name, description, is_skill
 
 
+class ResumeSelect(Static):
+    """历史 session 选择器；跨工作区时在原目录和当前目录之间二次确认。"""
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    ResumeSelect {
+        height: auto;
+        max-height: 14;
+        padding: 0 2;
+        margin-bottom: 1;
+    }
+    """
+
+    class Confirmed(Message):
+        # 初始化恢复确认消息，标记是否用当前工作区覆盖历史工作区
+        def __init__(
+            self,
+            widget: ResumeSelect,
+            session_id: str,
+            use_current_workspace: bool,
+        ) -> None:
+            self.widget = widget
+            self.session_id = session_id
+            self.use_current_workspace = use_current_workspace
+            super().__init__()
+
+    class Cancelled(Message):
+        # 初始化恢复取消消息
+        def __init__(self, widget: ResumeSelect) -> None:
+            self.widget = widget
+            super().__init__()
+
+    # 初始化历史列表和当前 TUI 工作区
+    def __init__(self, sessions: list[dict[str, Any]], current_workspace: str | None) -> None:
+        super().__init__("")
+        self._sessions = sessions
+        self._current_workspace = current_workspace
+        self._cursor = 0
+        self._workspace_cursor = 0
+        self._choosing_workspace = False
+
+    # 首次挂载时渲染列表并接管键盘焦点
+    def on_mount(self) -> None:
+        self.update(self._render_ui())
+        self.focus()
+
+    # 渲染 session 列表或跨工作区二次确认页
+    def _render_ui(self) -> str:
+        if self._choosing_workspace:
+            selected = self._sessions[self._cursor]
+            original = selected.get("workspace_root") or "(no workspace)"
+            choices = (
+                ("Session workspace", str(original)),
+                ("Current workspace", self._current_workspace or "(no workspace)"),
+            )
+            lines = ["  [bold cyan]Choose workspace[/bold cyan]"]
+            for index, (label, path) in enumerate(choices):
+                prefix = "❯" if index == self._workspace_cursor else " "
+                value = f"{prefix} {label}  [dim]{escape(path)}[/dim]"
+                lines.append(
+                    f"  [bold cyan]{value}[/bold cyan]"
+                    if index == self._workspace_cursor
+                    else f"  {value}"
+                )
+            lines.append("  [dim]↑↓ navigate   enter confirm   esc back[/dim]")
+            return "\n".join(lines)
+
+        lines = ["  [bold cyan]Resume session[/bold cyan]"]
+        start = max(0, min(self._cursor - 3, max(0, len(self._sessions) - 8)))
+        for index in range(start, min(start + 8, len(self._sessions))):
+            session = self._sessions[index]
+            title = escape(str(session.get("title") or "Untitled session"))
+            workspace = escape(str(session.get("workspace_root") or "(no workspace)"))
+            updated = escape(_format_session_time(str(session.get("updated_at", ""))))
+            prefix = "❯" if index == self._cursor else " "
+            value = f"{prefix} {title}  [dim]{updated}  {workspace}[/dim]"
+            lines.append(
+                f"  [bold cyan]{value}[/bold cyan]"
+                if index == self._cursor
+                else f"  {value}"
+            )
+        lines.append("  [dim]↑↓ navigate   enter resume   esc cancel[/dim]")
+        return "\n".join(lines)
+
+    # 判断两个可选工作区是否指向同一个规范化路径
+    @staticmethod
+    def _same_workspace(left: str | None, right: str | None) -> bool:
+        if left is None or right is None:
+            return left == right
+        return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
+
+    # 处理列表导航、工作区选择、确认和取消
+    def on_key(self, event: events.Key) -> None:
+        key = event.key
+        if key in ("up", "k"):
+            event.stop()
+            if self._choosing_workspace:
+                self._workspace_cursor = (self._workspace_cursor - 1) % 2
+            else:
+                self._cursor = (self._cursor - 1) % len(self._sessions)
+            self.update(self._render_ui())
+        elif key in ("down", "j"):
+            event.stop()
+            if self._choosing_workspace:
+                self._workspace_cursor = (self._workspace_cursor + 1) % 2
+            else:
+                self._cursor = (self._cursor + 1) % len(self._sessions)
+            self.update(self._render_ui())
+        elif key == "enter":
+            event.stop()
+            selected = self._sessions[self._cursor]
+            if self._choosing_workspace:
+                self.post_message(
+                    self.Confirmed(
+                        self,
+                        str(selected["session_id"]),
+                        self._workspace_cursor == 1,
+                    )
+                )
+            elif self._same_workspace(
+                selected.get("workspace_root"), self._current_workspace
+            ):
+                self.post_message(
+                    self.Confirmed(self, str(selected["session_id"]), False)
+                )
+            else:
+                self._choosing_workspace = True
+                self.update(self._render_ui())
+        elif key == "escape":
+            event.stop()
+            if self._choosing_workspace:
+                self._choosing_workspace = False
+                self.update(self._render_ui())
+            else:
+                self.post_message(self.Cancelled(self))
+
+
 class MemorySelect(Static):
     """内联记忆开关选择器；仅保存 TUI 选择，具体记忆逻辑另行实现。"""
 
@@ -749,6 +900,7 @@ class AgentLiteTuiApp(App[None]):
         self._total_output_tokens = 0
         self._total_cache_read_tokens = 0
         self._llm_calls: dict[str, tuple[float, float | None]] = {}
+        self._session_stats: dict[str, dict[str, Any]] = {}
         self._slash_items: list[SlashItem] = []
         self._memory_generate_enabled = False
         self._memory_use_enabled = False
@@ -773,6 +925,7 @@ class AgentLiteTuiApp(App[None]):
     def _build_slash_items(self) -> list[SlashItem]:
         items: list[SlashItem] = [
             ("new", "start a new session", False),
+            ("resume", "resume a previous session", False),
             ("compact", "compress context window", False),
             ("memories", "configure and review memories", False),
         ]
@@ -811,7 +964,7 @@ class AgentLiteTuiApp(App[None]):
             self.mount(popup, before="#prompt")
             popup.set_query(query)
 
-    # 用户选中自动补全项后将 /{name} 填入输入框并移除弹窗；/memories 直接打开设置页
+    # 用户选中补全项后填入命令；/resume 和 /memories 直接打开对应选择页
     def on_slash_complete_widget_selected(self, event: SlashCompleteWidget.Selected) -> None:
         prompt = self._prompt()
         try:
@@ -821,6 +974,10 @@ class AgentLiteTuiApp(App[None]):
         if event.skill_name == "memories":
             if prompt is not None:
                 self._open_memory_settings(prompt)
+            return
+        if event.skill_name == "resume":
+            if prompt is not None:
+                self._open_resume_selector(prompt)
             return
         if prompt is not None:
             prompt.text = f"/{event.skill_name} "
@@ -858,6 +1015,7 @@ class AgentLiteTuiApp(App[None]):
     async def action_quit(self) -> None:
         if self._client is not None and self._session_id is not None:
             try:
+                await self._persist_session_stats(self._session_id)
                 await self._client.send_command("session.close", {"session_id": self._session_id})
             except (IpcError, RuntimeError, OSError):
                 self._append(Static("[yellow]warning: failed to close session[/yellow]"))
@@ -881,6 +1039,10 @@ class AgentLiteTuiApp(App[None]):
             event.text_area.border_title = "starting a new session..."
             self._update_header("connecting")
             self.run_worker(self._do_new_session(), name="new_session", exclusive=False)
+            return
+        # 检测 /resume 指令并加载全部历史 session 供用户选择
+        if content == "/resume":
+            self._open_resume_selector(event.text_area)
             return
         # 检测 /compact 指令
         if content == "/compact":
@@ -935,6 +1097,18 @@ class AgentLiteTuiApp(App[None]):
             )
         )
 
+    # 禁用输入框并异步加载历史 session 选择器
+    def _open_resume_selector(self, prompt: ChatTextArea) -> None:
+        prompt.text = ""
+        if self._client is None or self._session_id is None or self._busy:
+            self._append(
+                Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line")
+            )
+            return
+        prompt.disabled = True
+        prompt.border_title = "loading sessions..."
+        self.run_worker(self._do_open_resume(), name="resume_list", exclusive=False)
+
     # 在 worker 中执行手动压缩命令，完成后显示结果横幅
     async def _do_compact(self) -> None:
         if self._client is None or self._session_id is None:
@@ -984,6 +1158,157 @@ class AgentLiteTuiApp(App[None]):
     def on_memory_select_cancelled(self, msg: MemorySelect.Cancelled) -> None:
         msg.widget.remove()
         self._restore_prompt_after_memory_select()
+
+    # 接收历史 session 选择结果并启动恢复流程
+    def on_resume_select_confirmed(self, msg: ResumeSelect.Confirmed) -> None:
+        msg.widget.remove()
+        self._busy = True
+        self._update_header("connecting")
+        self.run_worker(
+            self._do_resume_session(msg.session_id, msg.use_current_workspace),
+            name="resume_session",
+            exclusive=False,
+        )
+
+    # 取消历史 session 选择并恢复输入框
+    def on_resume_select_cancelled(self, msg: ResumeSelect.Cancelled) -> None:
+        msg.widget.remove()
+        self._restore_prompt_after_resume()
+
+    # 从 core 加载全部历史 session 并挂载选择器
+    async def _do_open_resume(self) -> None:
+        if self._client is None:
+            self._restore_prompt_after_resume()
+            return
+        try:
+            result = await self._client.send_command("session.list", {})
+            sessions = [
+                session
+                for session in result.get("sessions", [])
+                if session.get("session_id") != self._session_id
+            ]
+            if not sessions:
+                self._append(
+                    Static("[dim]no previous sessions found[/dim]", classes="log-line")
+                )
+                self._restore_prompt_after_resume()
+                return
+            self.mount(
+                ResumeSelect(sessions, self._workspace_root),
+                before="#prompt",
+            )
+        except (IpcError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            self._append(Static(f"[red]resume list error: {exc}[/red]", classes="log-line"))
+            self._restore_prompt_after_resume()
+
+    # 恢复选中的 session、历史消息、事件订阅和 session 级设置
+    async def _do_resume_session(
+        self, session_id: str, use_current_workspace: bool
+    ) -> None:
+        if self._client is None:
+            self._busy = False
+            self._restore_prompt_after_resume()
+            return
+        old_session_id = self._session_id
+        if old_session_id is not None:
+            self._remember_session_stats(old_session_id)
+            await self._persist_session_stats(old_session_id)
+        try:
+            params: dict[str, Any] = {"session_id": session_id}
+            if use_current_workspace and self._workspace_root is not None:
+                params["workspace_root"] = self._workspace_root
+            resumed = await self._client.send_command("session.resume", params)
+            history = await self._client.send_command(
+                "session.get_history", {"session_id": session_id}
+            )
+            await self._subscribe_to_session(session_id)
+            self._session_id = session_id
+            self._workspace_root = (
+                str(resumed["workspace_root"])
+                if resumed.get("workspace_root") is not None
+                else None
+            )
+            self._memory_generate_enabled = bool(
+                resumed.get("memory_generate_enabled", False)
+            )
+            self._memory_use_enabled = bool(resumed.get("memory_use_enabled", True))
+            self._restore_session_stats(session_id, resumed.get("stats"))
+            if old_session_id is not None and old_session_id != session_id:
+                try:
+                    await self._client.send_command(
+                        "session.close", {"session_id": old_session_id}
+                    )
+                except (IpcError, RuntimeError, OSError):
+                    log.warning("failed to close replaced session session_id=%s", old_session_id)
+            await self._show_resumed_history(
+                str(resumed.get("title") or "Untitled session"),
+                history.get("messages", []),
+            )
+            self._busy = False
+            self._restore_prompt_after_resume()
+            self._update_header("ready")
+        except (IpcError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            self._busy = False
+            self._restore_prompt_after_resume()
+            self._update_header("ready")
+            self._append(Static(f"[red]resume error: {exc}[/red]", classes="log-line"))
+
+    # 用持久化 thread 重建恢复后的 TUI 对话历史
+    async def _show_resumed_history(
+        self, title: str, messages: list[dict[str, Any]]
+    ) -> None:
+        self._break_llm()
+        self._pending_tool_blocks.clear()
+        self._pending_permission_blocks.clear()
+        self._plan_blocks.clear()
+        self._subagent_run_ids.clear()
+        self._subagent_start_times.clear()
+        log_view = self.query_one("#log-view", VerticalScroll)
+        await log_view.remove_children()
+        await log_view.mount(
+            Static(f"[bold cyan]Resumed[/bold cyan]  {escape(title)}", id="banner")
+        )
+        for message in messages:
+            text = self._history_text(message.get("content"))
+            if not text:
+                continue
+            if message.get("role") == "user":
+                await log_view.mount(
+                    Static(f"[bold]>[/bold] {escape(text)}", classes="user-turn")
+                )
+            else:
+                block = LLMStreamBlock()
+                block.append_token(text)
+                block.finalize_markdown()
+                await log_view.mount(block)
+        self._update_context_status()
+        log_view.scroll_end(animate=False)
+
+    # 从字符串或内容块列表提取适合恢复页展示的可读文本
+    @staticmethod
+    def _history_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text"):
+                parts.append(str(block["text"]))
+            elif block.get("type") == "tool_use":
+                parts.append(f"[tool: {block.get('name', 'unknown')}]")
+        return "\n\n".join(parts)
+
+    # 恢复或取消后重新启用消息输入框
+    def _restore_prompt_after_resume(self) -> None:
+        prompt = self._prompt()
+        if prompt is not None:
+            prompt.disabled = False
+            prompt.read_only = False
+            prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            prompt.focus()
 
     # /memories 选择完成或取消后恢复输入框
     def _restore_prompt_after_memory_select(self) -> None:
@@ -1109,12 +1434,15 @@ class AgentLiteTuiApp(App[None]):
             self._busy = False
             return
         old_session_id = self._session_id
+        self._remember_session_stats(old_session_id)
+        await self._persist_session_stats(old_session_id)
         self._session_id = None
         try:
             created = await self._client.send_command(
                 "session.create", self._session_create_params()
             )
             self._session_id = str(created["session_id"])
+            await self._subscribe_to_session(self._session_id)
             self._workspace_root = (
                 str(created["workspace_root"])
                 if created.get("workspace_root") is not None
@@ -1138,7 +1466,7 @@ class AgentLiteTuiApp(App[None]):
             self._plan_blocks.clear()
             self._subagent_run_ids.clear()
             self._subagent_start_times.clear()
-            self._reset_session_stats()
+            self._restore_session_stats(self._session_id)
 
             log_view = self.query_one("#log-view", VerticalScroll)
             await log_view.remove_children()
@@ -1256,6 +1584,80 @@ class AgentLiteTuiApp(App[None]):
         self._total_output_tokens = 0
         self._total_cache_read_tokens = 0
         self._llm_calls.clear()
+
+    # 保存指定 session 当前显示的上下文、耗时与 token 统计快照
+    def _remember_session_stats(self, session_id: str) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
+            "last_context_pct": self._last_context_pct,
+            "last_usage": self._last_usage,
+            "rounds": self._rounds,
+            "steps": self._steps,
+            "llm_elapsed_s": self._llm_elapsed_s,
+            "tool_elapsed_s": self._tool_elapsed_s,
+            "ttft_total_s": self._ttft_total_s,
+            "ttft_samples": self._ttft_samples,
+            "generation_elapsed_s": self._generation_elapsed_s,
+            "throughput_output_tokens": self._throughput_output_tokens,
+            "total_input_tokens": self._total_input_tokens,
+            "total_output_tokens": self._total_output_tokens,
+            "total_cache_read_tokens": self._total_cache_read_tokens,
+        }
+        self._session_stats[session_id] = snapshot
+        return snapshot
+
+    # 恢复本地或 core 返回的 session 统计快照，首次进入的 session 保持全新零值
+    def _restore_session_stats(
+        self, session_id: str, persisted: Any = None
+    ) -> None:
+        if isinstance(persisted, dict) and persisted:
+            self._session_stats[session_id] = dict(persisted)
+        snapshot = self._session_stats.get(session_id)
+        self._reset_session_stats()
+        if snapshot is None:
+            return
+        self._last_context_pct = float(snapshot["last_context_pct"])
+        last_usage = snapshot["last_usage"]
+        if isinstance(last_usage, (list, tuple)) and len(last_usage) == 3:
+            self._last_usage = tuple(int(value) for value in last_usage)  # type: ignore[assignment]
+        self._rounds = int(snapshot["rounds"])
+        self._steps = int(snapshot["steps"])
+        self._llm_elapsed_s = float(snapshot["llm_elapsed_s"])
+        self._tool_elapsed_s = float(snapshot["tool_elapsed_s"])
+        self._ttft_total_s = float(snapshot["ttft_total_s"])
+        self._ttft_samples = int(snapshot["ttft_samples"])
+        self._generation_elapsed_s = float(snapshot["generation_elapsed_s"])
+        self._throughput_output_tokens = int(snapshot["throughput_output_tokens"])
+        self._total_input_tokens = int(snapshot["total_input_tokens"])
+        self._total_output_tokens = int(snapshot["total_output_tokens"])
+        self._total_cache_read_tokens = int(snapshot["total_cache_read_tokens"])
+
+    # 将非零统计快照写入 core，使下次启动后恢复 session 时仍能显示
+    async def _persist_session_stats(self, session_id: str) -> None:
+        if self._client is None:
+            return
+        snapshot = self._remember_session_stats(session_id)
+        has_data = any(
+            float(snapshot[key]) != 0
+            for key in (
+                "last_context_pct",
+                "rounds",
+                "steps",
+                "llm_elapsed_s",
+                "tool_elapsed_s",
+                "ttft_samples",
+                "total_input_tokens",
+                "total_output_tokens",
+            )
+        )
+        if not has_data:
+            return
+        try:
+            await self._client.send_command(
+                "session.set_stats",
+                {"session_id": session_id, "stats": snapshot},
+            )
+        except (IpcError, RuntimeError, OSError):
+            log.warning("failed to persist session stats session_id=%s", session_id)
 
     # 生成输入框下方的分组统计，窄屏时从右向左整组隐藏
     def _render_context_status(self, width: int | None = None) -> str:
@@ -1376,29 +1778,14 @@ class AgentLiteTuiApp(App[None]):
                     if not t.cancelled() and t.exception() is not None
                     else None
                 )
-                params: dict[str, Any] = {
-                    "topics": [
-                        "session.*",
-                        "run.*",
-                        "step.*",
-                        "tool.*",
-                        "llm.*",
-                        "log.*",
-                        "permission.*",
-                        "context.*",
-                        "subagent.*",
-                        "skill.*",
-                        "memory.*",
-                    ],
-                    "scope": "global",
-                }
-                if self._replay_run_id is not None:
-                    params["replay_from_run"] = self._replay_run_id
-                await client.send_command("event.subscribe", params)
                 created = await client.send_command(
                     "session.create", self._session_create_params()
                 )
                 self._session_id = str(created["session_id"])
+                await self._subscribe_to_session(
+                    self._session_id,
+                    replay_from_run=self._replay_run_id,
+                )
                 self._memory_generate_enabled = bool(
                     created.get("memory_generate_enabled", self._memory_generate_enabled)
                 )
@@ -1436,6 +1823,35 @@ class AgentLiteTuiApp(App[None]):
 
             self._update_header("disconnected")
             await asyncio.sleep(2)
+
+    # 将当前连接的事件订阅切换到指定 session，避免不同 TUI 之间串流
+    async def _subscribe_to_session(
+        self,
+        session_id: str,
+        *,
+        replay_from_run: str | None = None,
+    ) -> None:
+        if self._client is None:
+            raise RuntimeError("TUI client is not connected")
+        params: dict[str, Any] = {
+            "topics": [
+                "session.*",
+                "run.*",
+                "step.*",
+                "tool.*",
+                "llm.*",
+                "log.*",
+                "permission.*",
+                "context.*",
+                "subagent.*",
+                "skill.*",
+                "memory.*",
+            ],
+            "scope": f"session:{session_id}",
+        }
+        if replay_from_run is not None:
+            params["replay_from_run"] = replay_from_run
+        await self._client.send_command("event.subscribe", params)
 
     # 根据事件 type 路由到对应渲染逻辑；捕获异常防止 socket loop 因单个事件崩溃
     def _handle_event(self, event: dict[str, Any]) -> None:

@@ -45,12 +45,19 @@ from agent_lite.core.bus.commands import (
     SessionCreateResult,
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
+    SessionListCommand,
+    SessionListResult,
+    SessionResumeCommand,
+    SessionResumeResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
     SessionSetMemoryCommand,
     SessionSetMemoryResult,
+    SessionSetStatsCommand,
+    SessionSetStatsResult,
     SessionSetWorkspaceCommand,
     SessionSetWorkspaceResult,
+    SessionSummary,
 )
 from agent_lite.core.bus.envelope import EventPushEnvelope
 from agent_lite.core.config import AgentLiteConfig, get_config
@@ -159,6 +166,40 @@ class CoreApp:
             memory_use_enabled=session.memory_use_enabled,
         )
 
+    # 列出磁盘中可恢复的 chat session，可选按工作区过滤
+    async def _session_list_handler(self, params: dict[str, Any]) -> SessionListResult:
+        assert self._sessions is not None
+        cmd = SessionListCommand.model_validate(params)
+        sessions = self._sessions.list_sessions(cmd.workspace_root)
+        return SessionListResult(
+            sessions=[
+                SessionSummary(
+                    session_id=session.id,
+                    title=session.title,
+                    status=session.status,
+                    workspace_root=session.workspace_root,
+                    created_at=session.created_at,
+                    updated_at=session.updated_at,
+                )
+                for session in sessions
+            ]
+        )
+
+    # 恢复指定 chat session，并返回 TUI 切换所需的完整状态
+    async def _session_resume_handler(self, params: dict[str, Any]) -> SessionResumeResult:
+        assert self._sessions is not None
+        cmd = SessionResumeCommand.model_validate(params)
+        session = await self._sessions.resume(cmd.session_id, cmd.workspace_root)
+        return SessionResumeResult(
+            session_id=session.id,
+            title=session.title,
+            status=session.status,
+            workspace_root=session.workspace_root,
+            memory_generate_enabled=session.memory_generate_enabled,
+            memory_use_enabled=session.memory_use_enabled,
+            stats=session.ui_stats,
+        )
+
     # 为已有且尚未绑定工作区的 session 设置工作区
     async def _session_set_workspace_handler(
         self, params: dict[str, Any]
@@ -197,6 +238,13 @@ class CoreApp:
             generate_enabled=session.memory_generate_enabled,
             use_enabled=session.memory_use_enabled,
         )
+
+    # 持久化 TUI 的 session 统计快照，不改变会话的最后聊天时间
+    async def _session_set_stats_handler(self, params: dict[str, Any]) -> SessionSetStatsResult:
+        assert self._sessions is not None
+        cmd = SessionSetStatsCommand.model_validate(params)
+        stats = await self._sessions.set_ui_stats(cmd.session_id, cmd.stats)
+        return SessionSetStatsResult(stats=stats)
 
     # 搜索当前调用者可见的长期记忆
     async def _memory_search_handler(self, params: dict[str, Any]) -> MemorySearchResult:
@@ -449,10 +497,13 @@ class CoreApp:
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
         server.register("session.create", self._session_create_handler)
+        server.register("session.list", self._session_list_handler)
+        server.register("session.resume", self._session_resume_handler)
         server.register("session.set_workspace", self._session_set_workspace_handler)
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.set_memory", self._session_set_memory_handler)
+        server.register("session.set_stats", self._session_set_stats_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)

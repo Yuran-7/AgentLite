@@ -125,6 +125,49 @@ class SessionManager:
         )
         return session
 
+    # 列出可恢复的 chat session，可选限制为指定工作区
+    def list_sessions(self, workspace_root: str | None = None) -> list[Session]:
+        sessions: list[Session] = []
+        for session in self._store.list_sessions(workspace_root):
+            if self._store.is_empty(session.id):
+                if session.id not in self._sessions:
+                    self._store.delete_session(session.id)
+                continue
+            if session.last_chat_at is None:
+                session.last_chat_at = self._store.last_message_at(session.id)
+                if session.last_chat_at is not None:
+                    self._store.write_meta(session)
+            if session.last_chat_at is not None:
+                session.updated_at = session.last_chat_at
+            sessions.append(session)
+        return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
+
+    # 从磁盘恢复 chat session，并可在用户确认后切换到新的工作区
+    async def resume(self, sid: str, workspace_root: str | None = None) -> Session:
+        session = self._sessions.get(sid)
+        if session is None:
+            try:
+                session = self._store.read_meta(sid)
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                raise HandlerError(SESSION_NOT_FOUND, "session not found") from exc
+            self._sessions[sid] = session
+            self._locks[sid] = asyncio.Lock()
+        if session.mode != "chat":
+            raise HandlerError(INVALID_PARAMS, "only chat sessions can be resumed")
+
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        async with lock:
+            if workspace_root is not None:
+                session.workspace_root = _normalize_workspace_root(workspace_root)
+            session.status = (
+                "waiting_for_input" if self._store.read_messages(sid) else "active"
+            )
+            self._store.write_meta(session)
+            await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
+            return session
+
     # 为未绑定工作区的空闲 session 首次设置工作区并持久化
     async def set_workspace(self, sid: str, workspace_root: str) -> str:
         session = self._get_session(sid)
@@ -152,13 +195,12 @@ class SessionManager:
                 )
 
             session.workspace_root = normalized_workspace
-            session.updated_at = _now()
             self._store.write_meta(session)
             await self._bus.publish(
                 SessionWorkspaceSetEvent(
                     session_id=sid,
                     workspace_root=normalized_workspace,
-                    ts=session.updated_at,
+                    ts=_now(),
                 )
             )
             return normalized_workspace
@@ -187,7 +229,6 @@ class SessionManager:
 
             run_id = run_id or new_run_id()
             session.run_ids.append(run_id)
-            session.updated_at = _now()
             self._store.write_meta(session)
 
             # Skill 解析：检测 "/" 前缀，展开为系统提示覆盖和工具白名单
@@ -252,6 +293,7 @@ class SessionManager:
                     )
 
             session.updated_at = _now()
+            session.last_chat_at = session.updated_at
             if session.mode == "one_shot":
                 session.status = "closed"
                 if self._browser_manager is not None:
@@ -288,9 +330,19 @@ class SessionManager:
                 session.memory_generate_enabled = generate_enabled
             if use_enabled is not None:
                 session.memory_use_enabled = use_enabled
-            session.updated_at = _now()
             self._store.write_meta(session)
             return session
+
+    # 保存 TUI 为当前 session 汇总的上下文、耗时和 token 统计，不改变最后聊天时间
+    async def set_ui_stats(self, sid: str, stats: dict[str, Any]) -> dict[str, Any]:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        async with lock:
+            session.ui_stats = dict(stats)
+            self._store.write_meta(session)
+            return dict(session.ui_stats)
 
     # 查询当前 session 可见的长期记忆
     def search_memory(
@@ -362,13 +414,20 @@ class SessionManager:
         lock = self._locks[sid]
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
+        delete_empty = False
         async with lock:
             session.status = "closed"
             if self._browser_manager is not None:
                 await self._browser_manager.close_session(sid)
-            session.updated_at = _now()
-            self._store.write_meta(session)
-            await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
+            delete_empty = self._store.is_empty(sid)
+            if not delete_empty:
+                self._store.write_meta(session)
+            await self._bus.publish(SessionClosedEvent(session_id=sid, ts=_now()))
+            if delete_empty:
+                self._store.delete_session(sid)
+        if delete_empty:
+            self._sessions.pop(sid, None)
+            self._locks.pop(sid, None)
 
     # 手动压缩指定 session 的 thread，将摘要持久化写入 thread.jsonl
     async def compact(self, sid: str, focus: str = "") -> Any:

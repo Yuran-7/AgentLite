@@ -18,8 +18,13 @@ def _make_writer(*, drain_raises: Exception | None = None) -> asyncio.StreamWrit
     return cast(asyncio.StreamWriter, writer)
 
 
-def _run_started(run_id: str = "r1") -> RunStartedEvent:
-    return RunStartedEvent(run_id=run_id, goal="test", ts="2026-01-01T00:00:00Z")
+def _run_started(run_id: str = "r1", session_id: str | None = None) -> RunStartedEvent:
+    return RunStartedEvent(
+        run_id=run_id,
+        session_id=session_id,
+        goal="test",
+        ts="2026-01-01T00:00:00Z",
+    )
 
 
 # 功能：验证 subscribe 后 handle 将匹配 topic 的事件写入 writer，且内容是合法的 EventPushEnvelope
@@ -90,6 +95,54 @@ async def test_scope_run_specific_filters_other_run_ids() -> None:
     await broadcaster.handle(_run_started("xyz"))
 
     assert writer.write.call_count == 1  # type: ignore[attr-defined]
+
+
+# 功能：验证不同 session scope 的订阅者只收到各自 session 及其后续 run 事件
+# 设计：先用 run.started 建立 run 到 session 的映射，再发布仅含 run_id 的 step 事件验证持续隔离
+async def test_scope_session_specific_filters_other_sessions() -> None:
+    broadcaster = IpcEventBroadcaster()
+    writer_a = _make_writer()
+    writer_b = _make_writer()
+    broadcaster.subscribe(writer_a, topics=["run.*", "step.*"], scope="session:a")
+    broadcaster.subscribe(writer_b, topics=["run.*", "step.*"], scope="session:b")
+
+    await broadcaster.handle(_run_started("run-a", "a"))
+    await broadcaster.handle(_run_started("run-b", "b"))
+    await broadcaster.handle(
+        StepStartedEvent(run_id="run-a", step=1, ts="2026-01-01T00:00:00Z")
+    )
+
+    assert writer_a.write.call_count == 2  # type: ignore[attr-defined]
+    assert writer_b.write.call_count == 1  # type: ignore[attr-defined]
+
+
+# 功能：验证两个客户端订阅同一 session 时都能收到该 session 的广播
+# 设计：使用两个独立 writer 订阅相同 scope，断言一次事件分别写入两个连接
+async def test_scope_session_allows_multiple_subscribers() -> None:
+    broadcaster = IpcEventBroadcaster()
+    writer_a = _make_writer()
+    writer_b = _make_writer()
+    broadcaster.subscribe(writer_a, topics=["run.*"], scope="session:shared")
+    broadcaster.subscribe(writer_b, topics=["run.*"], scope="session:shared")
+
+    await broadcaster.handle(_run_started("run-shared", "shared"))
+
+    writer_a.write.assert_called_once()  # type: ignore[attr-defined]
+    writer_b.write.assert_called_once()  # type: ignore[attr-defined]
+
+
+# 功能：验证同一连接切换 session 订阅后不再接收旧 session 的事件
+# 设计：对同一 writer 连续 subscribe 两次，断言 broadcaster 只保留最后一次 scope
+async def test_subscribe_replaces_previous_scope_for_same_writer() -> None:
+    broadcaster = IpcEventBroadcaster()
+    writer = _make_writer()
+    broadcaster.subscribe(writer, topics=["run.*"], scope="session:old")
+    broadcaster.subscribe(writer, topics=["run.*"], scope="session:new")
+
+    await broadcaster.handle(_run_started("run-old", "old"))
+    await broadcaster.handle(_run_started("run-new", "new"))
+
+    writer.write.assert_called_once()  # type: ignore[attr-defined]
 
 
 # 功能：验证 unsubscribe 后 handle 不再向该 writer 发送事件

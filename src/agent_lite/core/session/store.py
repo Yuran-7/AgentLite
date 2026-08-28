@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,80 @@ class SessionStore:
     def read_meta(self, sid: str) -> Session:
         data = json.loads((self.session_dir(sid) / "meta.json").read_text(encoding="utf-8"))
         return Session.from_dict(data)
+
+    # 扫描磁盘中的 chat session，可按规范化工作区筛选并按最近更新时间倒序返回
+    def list_sessions(self, workspace_root: str | None = None) -> list[Session]:
+        expected_workspace = self._workspace_key(workspace_root)
+        sessions: list[Session] = []
+        for meta_path in self._root.glob("*/*/*/*/meta.json"):
+            try:
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                session = Session.from_dict(data)
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                logger.warning("skip broken session meta path=%s", meta_path)
+                continue
+            if session.mode != "chat":
+                continue
+            if (
+                expected_workspace is not None
+                and self._workspace_key(session.workspace_root) != expected_workspace
+            ):
+                continue
+            sessions.append(session)
+        return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
+
+    # 判断 session 是否从未写入任何对话消息
+    def is_empty(self, sid: str) -> bool:
+        thread_path = self.session_dir(sid) / "thread.jsonl"
+        if not thread_path.exists():
+            return True
+        try:
+            return not any(line.strip() for line in thread_path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            return False
+
+    # 返回 thread 中最后一条有效消息的时间，用于迁移旧版 session 的最后聊天时间
+    def last_message_at(self, sid: str) -> str | None:
+        thread_path = self.session_dir(sid) / "thread.jsonl"
+        if not thread_path.exists():
+            return None
+        try:
+            lines = thread_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            timestamp = row.get("ts")
+            if isinstance(timestamp, str) and timestamp:
+                return timestamp
+        return None
+
+    # 删除指定 session 的独立存储目录，并校验目标始终位于 sessions 根目录内
+    def delete_session(self, sid: str) -> bool:
+        path = self.session_dir(sid)
+        if not path.exists() and not path.is_symlink():
+            return False
+        root = self._root.resolve()
+        parent = path.parent.resolve()
+        if root != parent and root not in parent.parents:
+            raise ValueError(f"session path escapes storage root: {sid!r}")
+        if path.is_symlink():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+        return True
+
+    # 将工作区转换为适合当前平台比较的绝对路径键
+    @staticmethod
+    def _workspace_key(workspace_root: str | None) -> str | None:
+        if workspace_root is None or not workspace_root.strip():
+            return None
+        return os.path.normcase(str(Path(workspace_root).expanduser().resolve(strict=False)))
 
     # 追加一条 Anthropic API 消息到 thread.jsonl
     def append_message(

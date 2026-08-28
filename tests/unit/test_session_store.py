@@ -88,6 +88,52 @@ def test_meta_without_workspace_is_backward_compatible() -> None:
     )
 
     assert session.workspace_root is None
+    assert session.last_chat_at is None
+
+
+# 功能：验证历史列表只返回 chat session，并支持按工作区筛选和最近更新时间排序
+# 设计：写入跨工作区的两个 chat 与一个 one-shot，断言全量和目录过滤共享同一扫描结果
+def test_list_sessions_filters_workspace_and_sorts_recent_first(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    sessions = [
+        Session(
+            id="sess-20260815-000000-000000000001",
+            mode="chat",
+            status="closed",
+            title="older",
+            created_at="2026-08-15T00:00:00+00:00",
+            updated_at="2026-08-15T00:00:01+00:00",
+            workspace_root=str(first_workspace),
+        ),
+        Session(
+            id="sess-20260815-000000-000000000002",
+            mode="chat",
+            status="waiting_for_input",
+            title="newer",
+            created_at="2026-08-15T00:00:00+00:00",
+            updated_at="2026-08-15T00:00:02+00:00",
+            workspace_root=str(second_workspace),
+        ),
+        Session(
+            id="sess-20260815-000000-000000000003",
+            mode="one_shot",
+            status="closed",
+            title="hidden",
+            created_at="2026-08-15T00:00:00+00:00",
+            updated_at="2026-08-15T00:00:03+00:00",
+        ),
+    ]
+    for session in sessions:
+        store.write_meta(session)
+
+    assert [session.title for session in store.list_sessions()] == ["newer", "older"]
+    assert [
+        session.title for session in store.list_sessions(str(first_workspace.resolve()))
+    ] == ["older"]
 
 
 # 功能：验证含 tool_use/tool_result block 的 thread 消息能按 Anthropic 格式读回
@@ -136,3 +182,18 @@ def test_read_messages_trims_orphan_tool_use_tail(tmp_path: Path) -> None:
         run_id="run-1",
     )
     assert store.read_messages(SESSION_ID) == [{"role": "user", "content": "hello"}]
+
+
+# 功能：验证存储层能从 thread 最后一条有效记录恢复旧 session 的最后聊天时间
+# 设计：在有效消息后追加损坏行，反向扫描应跳过损坏内容并返回最后一个有效 ts
+def test_last_message_at_skips_broken_tail(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    store.append_message(SESSION_ID, "user", "hello")
+    thread_path = store.session_dir(SESSION_ID) / "thread.jsonl"
+    with thread_path.open("a", encoding="utf-8") as file:
+        file.write("broken json\n")
+
+    timestamp = store.last_message_at(SESSION_ID)
+
+    assert timestamp is not None
+    assert timestamp.endswith("+00:00")

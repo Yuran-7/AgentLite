@@ -15,8 +15,10 @@ class Session:
     title: str
     created_at: str
     updated_at: str
+    last_chat_at: str | None = None
     workspace_root: str | None = None
     run_ids: list[str] = field(default_factory=list)
+    ui_stats: dict[str, Any] = field(default_factory=dict)
     memory_generate_enabled: bool = False
     memory_use_enabled: bool = True
 
@@ -29,8 +31,10 @@ class Session:
             "title": self.title,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "last_chat_at": self.last_chat_at,
             "workspace_root": self.workspace_root,
             "run_ids": list(self.run_ids),
+            "ui_stats": dict(self.ui_stats),
             "memory_generate_enabled": self.memory_generate_enabled,
             "memory_use_enabled": self.memory_use_enabled,
         }
@@ -45,12 +49,18 @@ class Session:
             title=str(data.get("title", "")),
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
+            last_chat_at=(
+                str(data["last_chat_at"])
+                if data.get("last_chat_at") is not None
+                else None
+            ),
             workspace_root=(
                 str(data["workspace_root"])
                 if data.get("workspace_root") is not None
                 else None
             ),
             run_ids=[str(x) for x in data.get("run_ids", [])],
+            ui_stats=(dict(data["ui_stats"]) if isinstance(data.get("ui_stats"), dict) else {}),
             memory_generate_enabled=bool(data.get("memory_generate_enabled", False)),
             memory_use_enabled=bool(data.get("memory_use_enabled", True)),
         )

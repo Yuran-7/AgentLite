@@ -225,7 +225,14 @@ class AgentRunner:
                 writer = await stack.enter_async_context(EventWriter(self._events_file))
                 writer.subscribe(bus)
             # publish 会依次等待所有已订阅的 handler 处理该事件
-            await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
+            await bus.publish(
+                RunStartedEvent(
+                    run_id=run_id,
+                    session_id=session.id if session is not None else None,
+                    goal=goal,
+                    ts=_now(),
+                )
+            )
 
             cancelled = False
             registry: ToolRegistry | None = None

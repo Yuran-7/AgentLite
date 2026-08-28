@@ -40,7 +40,7 @@ class AgentRunResult(BaseModel):
 class EventSubscribeCommand(BaseModel):
     type: Literal["event.subscribe"] = "event.subscribe"
     topics: list[str]          # fnmatch 模式，如 ["step.*", "tool.*"]
-    scope: str = "global"      # "global" | "run:<run_id>"
+    scope: str = "global"      # "global" | "run:<run_id>" | "session:<session_id>"
     replay_from_run: str | None = None  # 设置则先从 events.jsonl 回放历史再接实时流
 
 
@@ -62,6 +62,40 @@ class SessionCreateResult(BaseModel):
     workspace_root: str | None = None
     memory_generate_enabled: bool = False
     memory_use_enabled: bool = True
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    title: str
+    status: SessionStatus
+    workspace_root: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class SessionListCommand(BaseModel):
+    type: Literal["session.list"] = "session.list"
+    workspace_root: str | None = None
+
+
+class SessionListResult(BaseModel):
+    sessions: list[SessionSummary]
+
+
+class SessionResumeCommand(BaseModel):
+    type: Literal["session.resume"] = "session.resume"
+    session_id: str
+    workspace_root: str | None = None
+
+
+class SessionResumeResult(BaseModel):
+    session_id: str
+    title: str
+    status: SessionStatus
+    workspace_root: str | None = None
+    memory_generate_enabled: bool = False
+    memory_use_enabled: bool = True
+    stats: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionSetWorkspaceCommand(BaseModel):
@@ -134,6 +168,16 @@ class SessionSetMemoryCommand(BaseModel):
 class SessionSetMemoryResult(BaseModel):
     generate_enabled: bool
     use_enabled: bool
+
+
+class SessionSetStatsCommand(BaseModel):
+    type: Literal["session.set_stats"] = "session.set_stats"
+    session_id: str
+    stats: dict[str, Any]
+
+
+class SessionSetStatsResult(BaseModel):
+    stats: dict[str, Any]
 
 
 class MemorySearchCommand(BaseModel):
@@ -210,6 +254,8 @@ Command = Annotated[
     | AgentRunCommand
     | EventSubscribeCommand
     | SessionCreateCommand
+    | SessionListCommand
+    | SessionResumeCommand
     | SessionSetWorkspaceCommand
     | SessionSendMessageCommand
     | SessionGetHistoryCommand
@@ -217,6 +263,7 @@ Command = Annotated[
     | PermissionRespondCommand
     | SessionCompactCommand
     | SessionSetMemoryCommand
+    | SessionSetStatsCommand
     | MemorySearchCommand
     | MemoryListCommand
     | MemoryGenerateCommand

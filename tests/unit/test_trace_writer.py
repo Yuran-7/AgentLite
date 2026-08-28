@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -28,7 +29,7 @@ async def test_emit_writes_record_to_file(tmp_path: Path) -> None:
     writer.emit(_record())
     await writer.stop()
 
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     parsed = json.loads(lines[0])
     assert parsed["direction"] == "CORE"
@@ -48,7 +49,7 @@ async def test_emit_multiple_records_in_order(tmp_path: Path) -> None:
     writer.emit(_record("LLM→CORE", "api_response"))
     await writer.stop()
 
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
     assert json.loads(lines[0])["direction"] == "CLIENT→CORE"
     assert json.loads(lines[1])["direction"] == "CORE"
@@ -68,7 +69,7 @@ async def test_emit_is_nonblocking(tmp_path: Path) -> None:
         writer.emit(_record())
     await writer.stop()
 
-    assert len(path.read_text().splitlines()) == 10
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 10
 
 
 # 功能：验证 TraceWriter 自动创建不存在的父目录
@@ -82,7 +83,7 @@ async def test_start_creates_parent_dirs(tmp_path: Path) -> None:
     await writer.stop()
 
     assert path.exists()
-    assert len(path.read_text().splitlines()) == 1
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
 
 
 # 功能：验证 stop 后再次 start 可以追加写入（文件已存在时）
@@ -101,4 +102,51 @@ async def test_append_mode_on_restart(tmp_path: Path) -> None:
     writer2.emit(_record())
     await writer2.stop()
 
-    assert len(path.read_text().splitlines()) == 2
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+# 功能：验证 Windows 默认代码页无法表示的 emoji 仍会以 UTF-8 正常写入 trace
+# 设计：记录包含导致线上 GBK 崩溃的 U+1F4B0，按 UTF-8 读回并断言后台任务未失败
+@pytest.mark.asyncio
+async def test_trace_writer_uses_utf8_for_emoji(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    writer = TraceWriter(path)
+    await writer.start()
+    record = _record()
+    record.data = {"message": "薪资 💰"}
+
+    writer.emit(record)
+    await writer.stop()
+
+    assert json.loads(path.read_text(encoding="utf-8"))["data"]["message"] == "薪资 💰"
+
+
+# 功能：验证 trace 后台任务在打开文件时异常退出也不会让 stop 永久等待 queue.join
+# 设计：把目录本身作为写入路径触发后台 open 失败，并用短超时证明残留队列会被安全释放
+@pytest.mark.asyncio
+async def test_stop_does_not_hang_when_drain_task_crashes(tmp_path: Path) -> None:
+    writer = TraceWriter(tmp_path)
+    await writer.start()
+    writer.emit(_record())
+
+    await asyncio.wait_for(writer.stop(), timeout=1.0)
+
+
+# 功能：验证旧版 GBK trace 会先无损备份，再建立纯 UTF-8 的新文件
+# 设计：预写无法按 UTF-8 解码的 GBK 中文，启动并写入 emoji 后检查备份原字节与新文件编码
+@pytest.mark.asyncio
+async def test_start_rotates_legacy_encoded_trace(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    legacy_bytes = "旧记录".encode("gbk")
+    path.write_bytes(legacy_bytes)
+    writer = TraceWriter(path)
+
+    await writer.start()
+    record = _record()
+    record.data = {"message": "新记录 💰"}
+    writer.emit(record)
+    await writer.stop()
+
+    backup = tmp_path / "trace.jsonl.legacy-encoding.bak"
+    assert backup.read_bytes() == legacy_bytes
+    assert json.loads(path.read_text(encoding="utf-8"))["data"]["message"] == "新记录 💰"

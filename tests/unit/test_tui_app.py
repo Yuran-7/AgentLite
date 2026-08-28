@@ -12,8 +12,10 @@ from agent_lite.tui.app import (
     LLMStreamBlock,
     MemorySelect,
     PlanBlock,
+    ResumeSelect,
     SlashCompleteWidget,
     ToolCallBlock,
+    _format_session_time,
     _param_summary,
     _preview,
 )
@@ -41,6 +43,69 @@ class _ContextStatusHarness(AgentLiteTuiApp):
 def test_preview_truncates() -> None:
     assert _preview("abcde", 3) == "abc…"
     assert _preview("ab", 5) == "ab"
+
+
+# 功能：验证恢复选择器展示自然语言名称、工作区和更新时间
+# 设计：直接渲染一条历史摘要，覆盖 roadmap 要求的三个识别字段且无需启动真实 daemon
+def test_resume_select_renders_session_identity() -> None:
+    select = ResumeSelect(
+        [
+            {
+                "session_id": "session-1",
+                "title": "Implement resume",
+                "workspace_root": "D:/repo",
+                "updated_at": "2026-08-27T10:20:00+00:00",
+            }
+        ],
+        "D:/repo",
+    )
+
+    rendered = select._render_ui()  # type: ignore[attr-defined]
+    assert "Implement resume" in rendered
+    assert "D:/repo" in rendered
+    assert "2026-08-27 18:20" in rendered
+
+
+# 功能：验证在 session 间切换后能恢复各自最后一次上下文、轮次、耗时和 token 统计
+# 设计：保存一组非零统计，模拟进入新会话清零后再切回，逐项断言快照完整恢复
+def test_session_stats_are_restored_after_switching_back() -> None:
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
+    app._last_context_pct = 0.42  # type: ignore[attr-defined]
+    app._last_usage = (42_000, 1_200, 20_000)  # type: ignore[attr-defined]
+    app._rounds = 3  # type: ignore[attr-defined]
+    app._steps = 9  # type: ignore[attr-defined]
+    app._llm_elapsed_s = 12.5  # type: ignore[attr-defined]
+    app._tool_elapsed_s = 4.25  # type: ignore[attr-defined]
+    app._ttft_total_s = 1.8  # type: ignore[attr-defined]
+    app._ttft_samples = 3  # type: ignore[attr-defined]
+    app._generation_elapsed_s = 9.0  # type: ignore[attr-defined]
+    app._throughput_output_tokens = 900  # type: ignore[attr-defined]
+    app._total_input_tokens = 42_000  # type: ignore[attr-defined]
+    app._total_output_tokens = 1_200  # type: ignore[attr-defined]
+    app._total_cache_read_tokens = 20_000  # type: ignore[attr-defined]
+
+    app._remember_session_stats("session-a")  # type: ignore[attr-defined]
+    app._restore_session_stats("session-new")  # type: ignore[attr-defined]
+    assert app._rounds == 0  # type: ignore[attr-defined]
+
+    app._restore_session_stats("session-a")  # type: ignore[attr-defined]
+
+    assert app._last_context_pct == 0.42  # type: ignore[attr-defined]
+    assert app._last_usage == (42_000, 1_200, 20_000)  # type: ignore[attr-defined]
+    assert app._rounds == 3  # type: ignore[attr-defined]
+    assert app._steps == 9  # type: ignore[attr-defined]
+    assert app._llm_elapsed_s == 12.5  # type: ignore[attr-defined]
+    assert app._tool_elapsed_s == 4.25  # type: ignore[attr-defined]
+    assert app._ttft_samples == 3  # type: ignore[attr-defined]
+    assert app._total_input_tokens == 42_000  # type: ignore[attr-defined]
+    assert app._total_output_tokens == 1_200  # type: ignore[attr-defined]
+    assert app._total_cache_read_tokens == 20_000  # type: ignore[attr-defined]
+
+
+# 功能：验证恢复列表把 UTC 时间稳定转换为北京时间而非直接截取原字符串
+# 设计：使用截图同类的 UTC 上午时间，精确断言 UTC+8 后为北京时间下午
+def test_format_session_time_uses_beijing_timezone() -> None:
+    assert _format_session_time("2026-08-27T09:36:00+00:00") == "2026-08-27 17:36"
 
 
 # 功能：验证 TUI 产品标题与启动 Banner 已统一更新为 AgentLite
@@ -102,12 +167,13 @@ def test_slash_items_put_new_session_first() -> None:
 def test_slash_menu_separates_general_commands_and_skills() -> None:
     app = AgentLiteTuiApp("127.0.0.1", 9999)
     items = app._build_slash_items()  # type: ignore[attr-defined]
-    assert [item[2] for item in items[:3]] == [False, False, False]
-    assert all(item[2] for item in items[3:])
+    assert [item[2] for item in items[:4]] == [False, False, False, False]
+    assert all(item[2] for item in items[4:])
 
     popup = SlashCompleteWidget(items)
     popup._redraw()  # type: ignore[attr-defined]
     rendered = str(popup.content)
+    assert rendered.index("/resume") < rendered.index("Skills")
     assert rendered.index("/compact") < rendered.index("Skills")
     assert rendered.index("/memories") < rendered.index("Skills")
     assert rendered.index("Skills") < rendered.index("/init")
@@ -185,10 +251,14 @@ async def test_new_session_resets_tui_state() -> None:
         await app._do_new_session()  # type: ignore[attr-defined]
 
         assert [method for method, _ in client.calls] == [
+            "session.set_stats",
             "session.create",
+            "event.subscribe",
             "session.close",
         ]
-        assert client.calls[1][1] == {"session_id": "session-old"}
+        assert client.calls[0][1]["session_id"] == "session-old"
+        assert client.calls[2][1]["scope"] == "session:session-new"
+        assert client.calls[3][1] == {"session_id": "session-old"}
         assert app._session_id == "session-new"  # type: ignore[attr-defined]
         assert not app._busy  # type: ignore[attr-defined]
         assert app._last_context_pct == 0.0  # type: ignore[attr-defined]
@@ -200,6 +270,83 @@ async def test_new_session_resets_tui_state() -> None:
         assert log_view.query_one("#banner")
         prompt = app.query_one("#prompt")
         assert not prompt.disabled
+
+
+# 功能：验证恢复历史 session 会切换订阅、加载消息并关闭被替换的临时会话
+# 设计：用假 IPC 返回恢复摘要和 thread，执行完整 TUI 切换后同时断言调用顺序与历史渲染结果
+async def test_resume_session_switches_subscription_and_renders_history() -> None:
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        # 记录恢复链路的 IPC 请求并返回固定会话状态和历史
+        async def send_command(
+            self, method: str, params: dict[str, object]
+        ) -> dict[str, object]:
+            self.calls.append((method, params))
+            if method == "session.resume":
+                return {
+                    "session_id": "session-history",
+                    "title": "Previous work",
+                    "status": "waiting_for_input",
+                    "workspace_root": "D:/current",
+                    "memory_generate_enabled": True,
+                    "memory_use_enabled": False,
+                    "stats": {
+                        "last_context_pct": 0.37,
+                        "last_usage": [37_000, 900, 18_000],
+                        "rounds": 2,
+                        "steps": 6,
+                        "llm_elapsed_s": 8.5,
+                        "tool_elapsed_s": 2.0,
+                        "ttft_total_s": 1.0,
+                        "ttft_samples": 2,
+                        "generation_elapsed_s": 6.0,
+                        "throughput_output_tokens": 900,
+                        "total_input_tokens": 37_000,
+                        "total_output_tokens": 900,
+                        "total_cache_read_tokens": 18_000,
+                    },
+                }
+            if method == "session.get_history":
+                return {
+                    "messages": [
+                        {"role": "user", "content": "old question"},
+                        {"role": "assistant", "content": "old answer"},
+                    ]
+                }
+            return {}
+
+    app = _ContextStatusHarness()
+    client = _FakeClient()
+
+    async with app.run_test(size=(100, 24)):
+        app._client = client  # type: ignore[assignment]
+        app._session_id = "session-temporary"  # type: ignore[attr-defined]
+        app._workspace_root = "D:/current"  # type: ignore[attr-defined]
+        app._busy = True  # type: ignore[attr-defined]
+
+        await app._do_resume_session("session-history", True)  # type: ignore[attr-defined]
+
+        assert [method for method, _ in client.calls] == [
+            "session.resume",
+            "session.get_history",
+            "event.subscribe",
+            "session.close",
+        ]
+        assert client.calls[0][1]["workspace_root"] == "D:/current"
+        assert client.calls[2][1]["scope"] == "session:session-history"
+        assert app._session_id == "session-history"  # type: ignore[attr-defined]
+        assert app._memory_generate_enabled  # type: ignore[attr-defined]
+        assert not app._memory_use_enabled  # type: ignore[attr-defined]
+        assert app._last_context_pct == 0.37  # type: ignore[attr-defined]
+        assert app._rounds == 2  # type: ignore[attr-defined]
+        assert app._steps == 6  # type: ignore[attr-defined]
+        assert app._total_input_tokens == 37_000  # type: ignore[attr-defined]
+        assert not app._busy  # type: ignore[attr-defined]
+        rendered = " ".join(str(widget.content) for widget in app.query("#log-view Static"))
+        assert "Previous work" in rendered
+        assert "old question" in rendered
 
 
 # 功能：验证 llm.token 事件累积到 LLMStreamBlock，不连续 token 各自新开一块

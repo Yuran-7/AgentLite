@@ -31,6 +31,7 @@ class _Subscription:
 class IpcEventBroadcaster:
     def __init__(self, trace: TraceWriter | None = None) -> None:
         self._subscriptions: list[_Subscription] = []
+        self._run_sessions: dict[str, str] = {}
         self._trace = trace
 
     # 注册一个客户端订阅，返回 subscription_id
@@ -42,6 +43,7 @@ class IpcEventBroadcaster:
     ) -> str:
         sub_id = f"sub-{uuid.uuid4().hex[:8]}"
         sub = _Subscription(sub_id=sub_id, writer=writer, topics=topics, scope=scope)
+        self.unsubscribe(writer)
         self._subscriptions.append(sub)
         return sub_id
 
@@ -54,13 +56,25 @@ class IpcEventBroadcaster:
         event_dict = event.model_dump()
         event_type: str = event_dict.get("type", "")
         run_id: str | None = event_dict.get("run_id")
+        session_id: str | None = event_dict.get("session_id")
+
+        if run_id and session_id:
+            self._run_sessions[run_id] = session_id
+        elif event_type == "subagent.started" and run_id:
+            parent_run_id: str | None = event_dict.get("parent_run_id")
+            if parent_run_id:
+                session_id = self._run_sessions.get(parent_run_id)
+                if session_id:
+                    self._run_sessions[run_id] = session_id
+        elif run_id:
+            session_id = self._run_sessions.get(run_id)
 
         dead: list[asyncio.StreamWriter] = []
 
         for sub in list(self._subscriptions):
             if not self._matches_topic(event_type, sub.topics):
                 continue
-            if not self._matches_scope(run_id, sub.scope):
+            if not self._matches_scope(run_id, session_id, sub.scope):
                 continue
             try:
                 envelope = EventPushEnvelope(event=event_dict)
@@ -86,16 +100,25 @@ class IpcEventBroadcaster:
         for writer in dead:
             self.unsubscribe(writer)
 
+        if event_type in {"run.finished", "subagent.finished"} and run_id:
+            self._run_sessions.pop(run_id, None)
+
     # 检查事件类型是否匹配订阅的 topic 列表（支持 fnmatch glob 模式）
     @staticmethod
     def _matches_topic(event_type: str, topics: list[str]) -> bool:
         return any(fnmatch.fnmatch(event_type, pattern) for pattern in topics)
 
-    # 检查事件 run_id 是否匹配订阅的 scope（global 全通，run:<id> 精确匹配）
+    # 检查事件是否匹配订阅的 global、run 或 session scope
     @staticmethod
-    def _matches_scope(run_id: str | None, scope: str) -> bool:
+    def _matches_scope(
+        run_id: str | None,
+        session_id: str | None,
+        scope: str,
+    ) -> bool:
         if scope == "global":
             return True
         if scope.startswith("run:"):
             return run_id == scope[4:]
+        if scope.startswith("session:"):
+            return session_id == scope[8:]
         return False

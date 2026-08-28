@@ -219,8 +219,111 @@ async def test_closed_session_rejects_message(tmp_path: Path) -> None:
     store = SessionStore(tmp_path)
     manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
     session = await manager.create("chat")
+    await manager.send_message(session.id, "hello")
     await manager.close(session.id)
 
     with pytest.raises(HandlerError) as exc:
         await manager.send_message(session.id, "again")
     assert exc.value.code == SESSION_CLOSED
+
+
+# 功能：验证磁盘中的已关闭 chat session 可恢复并切换到用户确认的新工作区
+# 设计：用首个 manager 创建并关闭会话，再用全新 manager 恢复，覆盖 daemon 重启后的冷加载路径
+async def test_resume_loads_closed_session_from_disk_and_switches_workspace(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    first = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    session = await first.create("chat", workspace_root=str(first_workspace))
+    await first.send_message(session.id, "remember this")
+    last_chat_at = store.read_meta(session.id).updated_at
+    assert store.read_meta(session.id).last_chat_at == last_chat_at
+    await first.set_memory(session.id, generate_enabled=True)
+    await first.set_ui_stats(session.id, {"rounds": 3, "steps": 9})
+    await first.close(session.id)
+    assert store.read_meta(session.id).updated_at == last_chat_at
+
+    events: list[object] = []
+    bus = EventBus()
+
+    # 收集恢复事件以确认状态持久化和通知发生在同一管理操作中
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    bus.subscribe(collect)
+    restarted = SessionManager(store, lambda: _Runner(), bus)  # type: ignore[arg-type]
+    resumed = await restarted.resume(session.id, str(second_workspace))
+
+    assert resumed.status == "waiting_for_input"
+    assert resumed.workspace_root == str(second_workspace.resolve())
+    assert resumed.updated_at == last_chat_at
+    assert resumed.last_chat_at == last_chat_at
+    assert resumed.ui_stats == {"rounds": 3, "steps": 9}
+    assert store.read_meta(session.id).status == "waiting_for_input"
+    assert store.read_meta(session.id).updated_at == last_chat_at
+    assert await restarted.get_history(session.id) == store.read_messages(session.id)
+    assert events[-1].type == "session.resumed"  # type: ignore[attr-defined]
+
+
+# 功能：验证从未收到消息的 session 在关闭时删除磁盘目录和内存索引
+# 设计：创建后不发送问题便直接关闭，断言 meta 目录消失且后续访问返回 session_not_found
+async def test_close_deletes_session_without_messages(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    session = await manager.create("chat")
+    session_dir = store.session_dir(session.id)
+
+    await manager.close(session.id)
+
+    assert not session_dir.exists()
+    with pytest.raises(HandlerError) as exc:
+        await manager.get_history(session.id)
+    assert exc.value.code == SESSION_NOT_FOUND
+
+
+# 功能：验证历史列表会清理异常退出遗留的空 session，但不会删除当前进程中的活动空会话
+# 设计：磁盘写入一个未加载空会话并在 manager 中创建活动空会话，列表应隐藏两者且仅删除遗留目录
+async def test_list_sessions_prunes_only_unloaded_empty_sessions(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    stale = Session(
+        id="sess-20260815-000000-000000000099",
+        mode="chat",
+        status="active",
+        title="",
+        created_at="2026-08-15T00:00:00+00:00",
+        updated_at="2026-08-15T00:00:00+00:00",
+    )
+    store.write_meta(stale)
+    manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+    current = await manager.create("chat")
+
+    assert manager.list_sessions() == []
+    assert not store.session_dir(stale.id).exists()
+    assert store.session_dir(current.id).exists()
+
+
+# 功能：验证旧版被 resume 改晚的 updated_at 会按 thread 最后一条消息时间自动修复
+# 设计：构造未来元数据时间和更早的真实消息时间，列表返回值及持久化迁移字段都应采用消息时间
+def test_list_sessions_migrates_last_chat_time_from_thread(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = Session(
+        id="sess-20260815-000000-000000000088",
+        mode="chat",
+        status="closed",
+        title="legacy",
+        created_at="2026-08-15T00:00:00+00:00",
+        updated_at="2026-08-28T09:28:00+00:00",
+    )
+    store.write_meta(session)
+    store.append_message(session.id, "user", "real last chat")
+    actual_chat_time = store.last_message_at(session.id)
+    manager = SessionManager(store, lambda: _Runner(), EventBus())  # type: ignore[arg-type]
+
+    listed = manager.list_sessions()
+
+    assert listed[0].updated_at == actual_chat_time
+    assert store.read_meta(session.id).last_chat_at == actual_chat_time

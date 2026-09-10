@@ -1335,7 +1335,7 @@ class AgentLiteTuiApp(App[None]):
         except (IpcError, RuntimeError, OSError) as exc:
             self._append(Static(f"[red]memory settings error: {exc}[/red]", classes="log-line"))
 
-    # 通过 slash command 管理候选和长期记忆，不把管理指令发送给 Agent
+    # 通过 slash command 管理长期记忆，不把管理指令发送给 Agent
     async def _do_memory_command(self, arguments: str) -> None:
         if self._client is None or self._session_id is None:
             return
@@ -1343,56 +1343,17 @@ class AgentLiteTuiApp(App[None]):
         action = parts[0].lower() if parts else "list"
         value = parts[1].strip() if len(parts) > 1 else ""
         try:
-            if action == "generate":
-                result = await self._client.send_command(
-                    "memory.generate", {"session_id": self._session_id}
-                )
-                candidates = result.get("candidates", [])
-                if not candidates:
-                    self._append(
-                        Static("[dim]no memory candidates found[/dim]", classes="log-line")
-                    )
-                for candidate in candidates:
-                    self._append(
-                        Static(self._render_memory_candidate(candidate), classes="log-line")
-                    )
-                return
             if action in {"list", "search"}:
                 method = "memory.search" if action == "search" else "memory.list"
                 params: dict[str, Any] = {"session_id": self._session_id}
                 if action == "search":
                     params["query"] = value
                 result = await self._client.send_command(method, params)
-                candidates = result.get("candidates", [])
                 memories = result.get("memories", [])
-                for candidate in candidates:
-                    self._append(
-                        Static(self._render_memory_candidate(candidate), classes="log-line")
-                    )
                 for memory in memories:
                     self._append(Static(self._render_memory_record(memory), classes="log-line"))
-                if not candidates and not memories:
+                if not memories:
                     self._append(Static("[dim]no memories found[/dim]", classes="log-line"))
-                return
-            if action in {"accept", "commit"} and value:
-                result = await self._client.send_command(
-                    "memory.commit", {"candidate_id": value}
-                )
-                self._append(Static(
-                    "[green]memory committed[/green]" if result.get("committed")
-                    else "[yellow]candidate was not committed[/yellow]",
-                    classes="log-line",
-                ))
-                return
-            if action == "reject" and value:
-                result = await self._client.send_command(
-                    "memory.reject", {"candidate_id": value}
-                )
-                self._append(Static(
-                    "[yellow]memory candidate rejected[/yellow]"
-                    if result.get("rejected") else "[dim]candidate not pending[/dim]",
-                    classes="log-line",
-                ))
                 return
             if action == "delete" and value:
                 result = await self._client.send_command(
@@ -1405,20 +1366,11 @@ class AgentLiteTuiApp(App[None]):
                 ))
                 return
             self._append(Static(
-                "[dim]usage: /memories list | generate | search <text> | "
-                "accept <candidate_id> | reject <candidate_id> | delete <memory_id>[/dim]",
+                "[dim]usage: /memories list | search <text> | delete <memory_id>[/dim]",
                 classes="log-line",
             ))
         except (IpcError, RuntimeError, OSError) as exc:
             self._append(Static(f"[red]memory command error: {exc}[/red]", classes="log-line"))
-
-    @staticmethod
-    def _render_memory_candidate(candidate: dict[str, Any]) -> str:
-        return (
-            f"[cyan]candidate[/cyan] [{candidate.get('scope', '')}] "
-            f"[{candidate.get('type', '')}] {candidate.get('key', '')}: "
-            f"{candidate.get('content', '')}  [dim]id={candidate.get('id', '')}[/dim]"
-        )
 
     @staticmethod
     def _render_memory_record(memory: dict[str, Any]) -> str:
@@ -2038,21 +1990,13 @@ class AgentLiteTuiApp(App[None]):
                     classes="run-err",
                 ))
 
-        elif t == "memory.candidates_created":
+        elif t == "memory.updated":
             session_id = str(event.get("session_id") or "")
             if session_id and session_id != self._session_id:
                 return
             count = int(event.get("count") or 0)
             self._append(Static(
-                f"[bold cyan]memory[/bold cyan]  {count} pending candidate(s)  "
-                "[dim]review with memory.list / memory.commit[/dim]",
-                classes="log-line",
-            ))
-
-        elif t == "memory.saved":
-            self._append(Static(
-                f"[bold green]memory saved[/bold green]  "
-                f"[dim]{event.get('key', '')}[/dim]",
+                f"[bold cyan]memory[/bold cyan]  {count} active memory update(s)",
                 classes="log-line",
             ))
 

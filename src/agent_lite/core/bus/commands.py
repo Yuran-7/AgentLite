@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Discriminator, Field
 
-from agent_lite.core.memory.model import MemoryCandidate, MemoryRecord, MemoryScope
+from agent_lite.core.memory.model import MemoryRecord, MemoryScope, RawMemoryItem
 from agent_lite.core.session.model import SessionMode, SessionStatus
 
 
@@ -198,43 +198,12 @@ class MemoryListCommand(BaseModel):
     workspace_root: str | None = None
     scope: MemoryScope | None = None
     include_deleted: bool = False
-    include_candidates: bool = True
     limit: int = 100
 
 
 class MemoryListResult(BaseModel):
     memories: list[MemoryRecord]
-    candidates: list[MemoryCandidate] = Field(default_factory=list)
-
-
-class MemoryGenerateCommand(BaseModel):
-    type: Literal["memory.generate"] = "memory.generate"
-    session_id: str
-    run_id: str | None = None
-    content: str | None = None
-
-
-class MemoryGenerateResult(BaseModel):
-    candidates: list[MemoryCandidate]
-
-
-class MemoryCommitCommand(BaseModel):
-    type: Literal["memory.commit"] = "memory.commit"
-    candidate_id: str
-
-
-class MemoryCommitResult(BaseModel):
-    committed: bool
-    memory: MemoryRecord | None = None
-
-
-class MemoryRejectCommand(BaseModel):
-    type: Literal["memory.reject"] = "memory.reject"
-    candidate_id: str
-
-
-class MemoryRejectResult(BaseModel):
-    rejected: bool
+    raw_items: list[RawMemoryItem] = Field(default_factory=list)
 
 
 class MemoryDeleteCommand(BaseModel):
@@ -266,9 +235,6 @@ Command = Annotated[
     | SessionSetStatsCommand
     | MemorySearchCommand
     | MemoryListCommand
-    | MemoryGenerateCommand
-    | MemoryCommitCommand
-    | MemoryRejectCommand
     | MemoryDeleteCommand,
     Discriminator("type"),
 ]

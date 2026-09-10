@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 SessionStatus = Literal["active", "waiting_for_input", "closed"]
 SessionMode = Literal["one_shot", "chat"]
+MemoryGenerationStatus = Literal["idle", "running", "succeeded", "failed"]
 
 
 @dataclass
@@ -21,6 +22,9 @@ class Session:
     ui_stats: dict[str, Any] = field(default_factory=dict)
     memory_generate_enabled: bool = False
     memory_use_enabled: bool = True
+    last_memory_extracted_run_id: str | None = None
+    memory_generation_status: MemoryGenerationStatus = "idle"
+    memory_source_hash: str | None = None
 
     # 将 Session 转为可写入 meta.json 的普通 dict
     def to_dict(self) -> dict[str, Any]:
@@ -37,6 +41,9 @@ class Session:
             "ui_stats": dict(self.ui_stats),
             "memory_generate_enabled": self.memory_generate_enabled,
             "memory_use_enabled": self.memory_use_enabled,
+            "last_memory_extracted_run_id": self.last_memory_extracted_run_id,
+            "memory_generation_status": self.memory_generation_status,
+            "memory_source_hash": self.memory_source_hash,
         }
 
     # 从 meta.json 的 dict 还原 Session 对象
@@ -63,4 +70,15 @@ class Session:
             ui_stats=(dict(data["ui_stats"]) if isinstance(data.get("ui_stats"), dict) else {}),
             memory_generate_enabled=bool(data.get("memory_generate_enabled", False)),
             memory_use_enabled=bool(data.get("memory_use_enabled", True)),
+            last_memory_extracted_run_id=(
+                str(data["last_memory_extracted_run_id"])
+                if data.get("last_memory_extracted_run_id") is not None
+                else None
+            ),
+            memory_generation_status=data.get("memory_generation_status", "idle"),
+            memory_source_hash=(
+                str(data["memory_source_hash"])
+                if data.get("memory_source_hash") is not None
+                else None
+            ),
         )

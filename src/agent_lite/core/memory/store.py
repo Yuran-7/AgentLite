@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from agent_lite.core.memory.model import (
-    MemoryCandidate,
+    MemoryExtractionItem,
+    MemoryOperation,
     MemoryRecord,
     MemoryScope,
-    MemoryType,
+    RawMemoryItem,
 )
 
 
@@ -35,26 +36,12 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _text_from_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content)
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-    return "".join(parts)
-
-
 class MemoryStore:
-    """SQLite-backed long-term memory and pending candidate store.
+    """SQLite-backed long-term memory and Phase 1 raw-item store.
 
     This store deliberately has no dependency on the LLM or SessionStore.  It
     can therefore be used from IPC handlers, session retrieval, and background
-    candidate generation without putting memory data into thread.jsonl.
+    consolidation without putting memory data into thread.jsonl.
     """
 
     def __init__(self, path: Path) -> None:
@@ -115,27 +102,36 @@ class MemoryStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS memory_candidates (
+                CREATE TABLE IF NOT EXISTS memory_raw_items (
                     id TEXT PRIMARY KEY,
-                    action TEXT NOT NULL,
-                    scope TEXT NOT NULL,
-                    profile_id TEXT NOT NULL,
-                    workspace_id TEXT,
-                    session_id TEXT,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
                     type TEXT NOT NULL,
+                    scope TEXT NOT NULL,
                     key TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    importance REAL NOT NULL,
                     evidence TEXT NOT NULL,
-                    source_json TEXT NOT NULL,
-                    tags_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    confidence REAL NOT NULL,
+                    stability TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    processed_at TEXT
                 );
-                CREATE INDEX IF NOT EXISTS memory_candidates_status_idx
-                    ON memory_candidates(status, created_at);
+                CREATE INDEX IF NOT EXISTS memory_raw_items_status_idx
+                    ON memory_raw_items(status, created_at);
+                CREATE INDEX IF NOT EXISTS memory_raw_items_source_idx
+                    ON memory_raw_items(session_id, source_hash);
+                CREATE TABLE IF NOT EXISTS memory_generation_runs (
+                    session_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                DROP TABLE IF EXISTS memory_candidates;
                 """
             )
             try:
@@ -185,25 +181,23 @@ class MemoryStore:
         )
 
     @staticmethod
-    def _candidate_from_row(row: sqlite3.Row) -> MemoryCandidate:
-        return MemoryCandidate(
+    def _raw_from_row(row: sqlite3.Row) -> RawMemoryItem:
+        return RawMemoryItem(
             id=row["id"],
-            action=row["action"],
-            scope=row["scope"],
-            profile_id=row["profile_id"],
-            workspace_id=row["workspace_id"],
             session_id=row["session_id"],
+            run_id=row["run_id"],
             type=row["type"],
+            scope=row["scope"],
             key=row["key"],
             content=row["content"],
-            reason=row["reason"],
-            confidence=float(row["confidence"]),
-            importance=float(row["importance"]),
             evidence=row["evidence"],
-            source=json.loads(row["source_json"]),
-            tags=json.loads(row["tags_json"]),
+            confidence=float(row["confidence"]),
+            stability=row["stability"],
+            summary=row["summary"],
+            source_hash=row["source_hash"],
             status=row["status"],
             created_at=row["created_at"],
+            processed_at=row["processed_at"],
         )
 
     def _event(
@@ -256,181 +250,271 @@ class MemoryStore:
             (scope, profile_id, key, workspace_id_value, session_id),
         ).fetchone())
 
-    def create_candidate(self, candidate: MemoryCandidate) -> MemoryCandidate:
-        with self._connect() as db:
-            existing = db.execute(
-                """SELECT * FROM memory_candidates
-                   WHERE status = 'pending' AND scope = ? AND profile_id = ?
-                     AND key = ? AND content = ? AND workspace_id IS ? AND session_id IS ?
-                   LIMIT 1""",
-                (
-                    candidate.scope,
-                    candidate.profile_id,
-                    candidate.key,
-                    candidate.content,
-                    candidate.workspace_id,
-                    candidate.session_id,
-                ),
-            ).fetchone()
-            if existing is not None:
-                return self._candidate_from_row(existing)
-            db.execute(
-                """INSERT INTO memory_candidates(
-                    id, action, scope, profile_id, workspace_id, session_id, type,
-                    key, content, reason, confidence, importance, evidence,
-                    source_json, tags_json, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    candidate.id,
-                    candidate.action,
-                    candidate.scope,
-                    candidate.profile_id,
-                    candidate.workspace_id,
-                    candidate.session_id,
-                    candidate.type,
-                    candidate.key,
-                    candidate.content,
-                    candidate.reason,
-                    candidate.confidence,
-                    candidate.importance,
-                    candidate.evidence,
-                    _json(candidate.source),
-                    _json(candidate.tags),
-                    candidate.status,
-                    candidate.created_at,
-                ),
-            )
-        return candidate
+    def claim_memory_generation(self, session_id: str, run_id: str, source_hash: str) -> bool:
+        """Claim the first successful extraction slot for a session."""
 
-    def get_candidate(self, candidate_id: str) -> MemoryCandidate | None:
+        now = _now()
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM memory_candidates WHERE id = ?", (candidate_id,)
+                "SELECT status FROM memory_generation_runs WHERE session_id = ?",
+                (session_id,),
             ).fetchone()
-            return self._candidate_from_row(row) if row is not None else None
+            if row is not None and row["status"] in {"running", "succeeded"}:
+                return False
+            if row is None:
+                db.execute(
+                    "INSERT INTO memory_generation_runs "
+                    "(session_id, run_id, source_hash, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'running', ?, ?)",
+                    (session_id, run_id, source_hash, now, now),
+                )
+            else:
+                db.execute(
+                    "UPDATE memory_generation_runs SET run_id = ?, source_hash = ?, "
+                    "status = 'running', updated_at = ? WHERE session_id = ?",
+                    (run_id, source_hash, now, session_id),
+                )
+            return True
 
-    def list_candidates(
+    def finish_memory_generation(self, session_id: str, run_id: str, status: str) -> None:
+        if status not in {"succeeded", "failed"}:
+            raise ValueError("invalid memory generation status")
+        with self._connect() as db:
+            db.execute(
+                "UPDATE memory_generation_runs SET status = ?, updated_at = ? "
+                "WHERE session_id = ? AND run_id = ?",
+                (status, _now(), session_id, run_id),
+            )
+
+    def save_raw_items(
+        self,
+        items: Iterable[MemoryExtractionItem],
+        *,
+        session_id: str,
+        run_id: str,
+        source_hash: str,
+        summary: str = "",
+    ) -> list[RawMemoryItem]:
+        """Persist Phase 1 output, deduplicated by session/source/key/content."""
+
+        saved: list[RawMemoryItem] = []
+        now = _now()
+        with self._connect() as db:
+            for item in items:
+                content = item.content.strip()
+                if not content or len(content) > 1_500 or self._contains_sensitive_data(content):
+                    continue
+                key = item.key.strip()[:200]
+                if not key:
+                    key = (
+                        "memory."
+                        + hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()[:16]
+                    )
+                existing = db.execute(
+                    "SELECT * FROM memory_raw_items WHERE session_id = ? AND source_hash = ? "
+                    "AND key = ? AND content = ? LIMIT 1",
+                    (session_id, source_hash, key, content),
+                ).fetchone()
+                if existing is not None:
+                    saved.append(self._raw_from_row(existing))
+                    continue
+                raw = RawMemoryItem(
+                    id=f"raw_{uuid.uuid4().hex}",
+                    session_id=session_id,
+                    run_id=run_id,
+                    type=item.type,
+                    scope=item.scope,
+                    key=key,
+                    content=content,
+                    evidence=item.evidence[:1_500],
+                    confidence=item.confidence,
+                    stability=item.stability,
+                    summary=summary[:2_000],
+                    source_hash=source_hash,
+                    created_at=now,
+                )
+                db.execute(
+                    "INSERT INTO memory_raw_items "
+                    "(id, session_id, run_id, type, scope, key, content, evidence, confidence, "
+                    "stability, summary, source_hash, status, created_at, processed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        raw.id, raw.session_id, raw.run_id, raw.type, raw.scope, raw.key,
+                        raw.content, raw.evidence, raw.confidence, raw.stability, raw.summary,
+                        raw.source_hash, raw.status, raw.created_at, raw.processed_at,
+                    ),
+                )
+                saved.append(raw)
+        return saved
+
+    def list_raw_items(
         self,
         *,
         session_id: str | None = None,
         status: str = "pending",
-        limit: int = 50,
-    ) -> list[MemoryCandidate]:
-        query = "SELECT * FROM memory_candidates WHERE status = ?"
+        limit: int = 100,
+    ) -> list[RawMemoryItem]:
+        query = "SELECT * FROM memory_raw_items WHERE status = ?"
         args: list[Any] = [status]
         if session_id is not None:
-            query += " AND (session_id = ? OR session_id IS NULL)"
+            query += " AND session_id = ?"
             args.append(session_id)
         query += " ORDER BY created_at DESC LIMIT ?"
-        args.append(max(1, min(limit, 200)))
+        args.append(max(1, min(limit, 500)))
         with self._connect() as db:
-            return [self._candidate_from_row(row) for row in db.execute(query, args)]
+            return [self._raw_from_row(row) for row in db.execute(query, args)]
 
-    def _set_candidate_status(self, db: sqlite3.Connection, candidate_id: str, status: str) -> None:
-        db.execute(
-            "UPDATE memory_candidates SET status = ? WHERE id = ?", (status, candidate_id)
-        )
+    def apply_memory_operations(
+        self,
+        raw_items: Iterable[RawMemoryItem],
+        operations: Iterable[MemoryOperation],
+        *,
+        session_id: str,
+        workspace_root: str | Path | None,
+    ) -> int:
+        """Validate and apply Phase 2 operations in one SQLite transaction."""
 
-    def commit_candidate(self, candidate_id: str) -> MemoryRecord | None:
+        raw_list = list(raw_items)
+        raw_by_key = {item.key: item for item in raw_list}
+        applied = 0
+        now = _now()
         with self._connect() as db:
-            row = db.execute(
-                "SELECT * FROM memory_candidates WHERE id = ?", (candidate_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            candidate = self._candidate_from_row(row)
-            if candidate.status != "pending":
-                if candidate.status == "accepted":
-                    active = self._find_active_by_key(
-                        db,
-                        scope=candidate.scope,
-                        profile_id=candidate.profile_id,
-                        workspace_id_value=candidate.workspace_id,
-                        session_id=candidate.session_id,
-                        key=candidate.key,
-                    )
-                    return self._record_from_row(active) if active is not None else None
-                return None
-            if candidate.action in ("skip", "delete"):
-                status = "rejected" if candidate.action == "skip" else "accepted"
-                self._set_candidate_status(db, candidate.id, status)
-                return None
-
-            previous = self._find_active_by_key(
-                db,
-                scope=candidate.scope,
-                profile_id=candidate.profile_id,
-                workspace_id_value=candidate.workspace_id,
-                session_id=candidate.session_id,
-                key=candidate.key,
-            )
-            now = _now()
-            record = MemoryRecord(
-                id=f"mem_{uuid.uuid4().hex}",
-                scope=candidate.scope,
-                profile_id=candidate.profile_id,
-                workspace_id=candidate.workspace_id,
-                session_id=candidate.session_id,
-                type=candidate.type,
-                key=candidate.key,
-                content=candidate.content,
-                confidence=candidate.confidence,
-                importance=candidate.importance,
-                source=candidate.source,
-                tags=candidate.tags,
-                created_at=now,
-                updated_at=now,
-                supersedes=previous["id"] if previous is not None else None,
-            )
-            if previous is not None:
-                db.execute(
-                    "UPDATE memories SET status = 'superseded', updated_at = ?, "
-                    "reason = ? WHERE id = ?",
-                    (now, "replaced by newer memory", previous["id"]),
+            for operation in operations:
+                op = (
+                    operation
+                    if isinstance(operation, MemoryOperation)
+                    else MemoryOperation.model_validate(operation)
                 )
-                self._event(db, previous["id"], "superseded", {"by": record.id})
-            db.execute(
-                """INSERT INTO memories(
-                    id, scope, profile_id, workspace_id, session_id, type, key, content,
-                    status, confidence, importance, source_json, tags_json, created_at,
-                    updated_at, expires_at, supersedes, deleted_at, reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    record.id,
-                    record.scope,
-                    record.profile_id,
-                    record.workspace_id,
-                    record.session_id,
-                    record.type,
-                    record.key,
-                    record.content,
-                    record.status,
-                    record.confidence,
-                    record.importance,
-                    _json(record.source),
-                    _json(record.tags),
-                    record.created_at,
-                    record.updated_at,
-                    record.expires_at,
-                    record.supersedes,
-                    record.deleted_at,
-                    record.reason,
-                ),
-            )
-            self._sync_fts(db, record)
-            event_type = "updated" if previous is not None else "created"
-            self._event(db, record.id, event_type, record.model_dump())
-            self._set_candidate_status(db, candidate.id, "accepted")
-            return record
+                if not op.target_key or len(op.target_key) > 200:
+                    continue
+                if op.action in {"add", "update"}:
+                    if op.type is None or op.scope is None:
+                        continue
+                    content = op.content.strip()
+                    if (
+                        not content
+                        or len(content) > 1_500
+                        or self._contains_sensitive_data(content)
+                    ):
+                        continue
+                else:
+                    content = op.content.strip()
 
-    def reject_candidate(self, candidate_id: str) -> bool:
-        with self._connect() as db:
-            updated = db.execute(
-                "UPDATE memory_candidates SET status = 'rejected' "
-                "WHERE id = ? AND status = 'pending'",
-                (candidate_id,),
-            ).rowcount
-            return bool(updated)
+                scope = op.scope
+                if scope is None:
+                    # delete/skip can inherit scope from the matching raw item only for
+                    # exact-key operations; no inherited scope is allowed for writes.
+                    continue
+                profile, ws_id, scoped_session = self._scope_values(
+                    scope, "default", workspace_root, session_id
+                )
+                if scope == "workspace" and ws_id is None:
+                    continue
+                if scope == "session" and scoped_session is None:
+                    continue
+                existing = self._find_active_by_key(
+                    db,
+                    scope=scope,
+                    profile_id=profile,
+                    workspace_id_value=ws_id,
+                    session_id=scoped_session,
+                    key=op.target_key,
+                )
+                if op.action == "skip":
+                    applied += 1
+                    continue
+                if op.action == "delete":
+                    if existing is None:
+                        continue
+                    db.execute(
+                        "UPDATE memories SET status = 'deleted', deleted_at = ?, "
+                        "updated_at = ?, reason = ? WHERE id = ?",
+                        (now, now, op.reason or "consolidation", existing["id"]),
+                    )
+                    if self._fts_available:
+                        db.execute("DELETE FROM memory_fts WHERE memory_id = ?", (existing["id"],))
+                    self._event(db, existing["id"], "deleted", {"reason": op.reason})
+                    applied += 1
+                    continue
+                if op.action == "update" and existing is None:
+                    continue
+
+                assert op.type is not None
+
+                source_item = raw_by_key.get(op.target_key) or (raw_list[0] if raw_list else None)
+                source: dict[str, Any] = {
+                    "session_id": session_id,
+                    "source": "memory_phase2",
+                }
+                if source_item is not None:
+                    source.update(
+                        run_id=source_item.run_id,
+                        source_hash=source_item.source_hash,
+                        evidence=op.evidence or source_item.evidence,
+                    )
+                record = MemoryRecord(
+                    id=f"mem_{uuid.uuid4().hex}",
+                    scope=scope,
+                    profile_id=profile,
+                    workspace_id=ws_id,
+                    session_id=scoped_session,
+                    type=op.type,
+                    key=op.target_key,
+                    content=content,
+                    confidence=op.confidence,
+                    importance=op.importance,
+                    source=source,
+                    tags=op.tags,
+                    created_at=existing["created_at"] if existing is not None else now,
+                    updated_at=now,
+                    supersedes=existing["id"] if existing is not None else None,
+                    reason=op.reason or None,
+                )
+                if existing is not None:
+                    db.execute(
+                        "UPDATE memories SET status = 'superseded', updated_at = ?, "
+                        "reason = ? WHERE id = ?",
+                        (now, "replaced by newer memory", existing["id"]),
+                    )
+                    superseded = self._record_from_row(existing).model_copy(
+                        update={"status": "superseded"}
+                    )
+                    self._sync_fts(db, superseded)
+                    self._event(db, existing["id"], "superseded", {"by": record.id})
+                db.execute(
+                    "INSERT INTO memories "
+                    "(id, scope, profile_id, workspace_id, session_id, type, key, content, status, "
+                    "confidence, importance, source_json, tags_json, created_at, updated_at, "
+                    "expires_at, supersedes, deleted_at, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.id, record.scope, record.profile_id, record.workspace_id,
+                        record.session_id, record.type, record.key, record.content, record.status,
+                        record.confidence,
+                        record.importance,
+                        _json(record.source),
+                        _json(record.tags),
+                        record.created_at, record.updated_at, record.expires_at, record.supersedes,
+                        record.deleted_at, record.reason,
+                    ),
+                )
+                self._sync_fts(db, record)
+                self._event(
+                    db,
+                    record.id,
+                    "updated" if existing is not None else "created",
+                    record.model_dump(),
+                )
+                applied += 1
+
+            if raw_list:
+                placeholders = ",".join("?" for _ in raw_list)
+                db.execute(
+                    f"UPDATE memory_raw_items SET status = 'processed', processed_at = ? "
+                    f"WHERE id IN ({placeholders})",
+                    [now, *(item.id for item in raw_list)],
+                )
+        return applied
 
     def delete(self, memory_id: str, reason: str = "user_requested") -> bool:
         with self._connect() as db:
@@ -554,123 +638,8 @@ class MemoryStore:
             used += len(line) + 1
         return "\n".join(lines)
 
-    def generate_from_messages(
-        self,
-        messages: Iterable[dict[str, Any]],
-        *,
-        session_id: str | None,
-        run_id: str | None,
-        workspace_root: str | Path | None,
-        max_candidates: int = 3,
-    ) -> list[MemoryCandidate]:
-        candidates: list[MemoryCandidate] = []
-        seen: set[tuple[str, str]] = set()
-        for message in messages:
-            if message.get("role") != "user":
-                continue
-            text = _text_from_content(message.get("content", "")).strip()
-            if not text or self._contains_sensitive_data(text):
-                continue
-            extracted = self._extract_explicit(text)
-            for content, memory_type, key, scope, reason, confidence in extracted:
-                identifier = (key, content)
-                if identifier in seen or len(candidates) >= max_candidates:
-                    continue
-                seen.add(identifier)
-                candidate = MemoryCandidate(
-                    id=f"cand_{uuid.uuid4().hex}",
-                    action="add",
-                    scope=scope,
-                    workspace_id=workspace_id(workspace_root) if scope != "global" else None,
-                    session_id=session_id if scope == "session" else None,
-                    type=memory_type,
-                    key=key,
-                    content=content,
-                    reason=reason,
-                    confidence=confidence,
-                    importance=0.8 if scope != "session" else 0.5,
-                    evidence=text[:500],
-                    source={"session_id": session_id, "run_id": run_id},
-                    tags=[memory_type],
-                    created_at=_now(),
-                )
-                candidates.append(self.create_candidate(candidate))
-        return candidates
-
     @staticmethod
     def _contains_sensitive_data(text: str) -> bool:
         return bool(re.search(
             r"(?i)(password|passwd|token|secret|api[_ -]?key|密钥|密码|口令)", text
         ))
-
-    @staticmethod
-    def _extract_explicit(
-        text: str,
-    ) -> list[tuple[str, MemoryType, str, MemoryScope, str, float]]:
-        results: list[tuple[str, MemoryType, str, MemoryScope, str, float]] = []
-        patterns = [
-            r"(?:请)?记住(?:一下)?[：:\s]*(.+)$",
-            r"remember(?: that)?[：:\s]+(.+)$",
-            r"(?:以后|今后|后续)[，,：:\s]*(.+)$",
-            r"from now on[，,：:\s]*(.+)$",
-        ]
-        captured: str | None = None
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                captured = match.group(1).strip().rstrip("。.!！")
-                break
-        if not captured or len(captured) < 2 or len(captured) > 500:
-            return results
-
-        preference = bool(
-            re.search(r"喜欢|偏好|简短|简洁|语言|回答风格|prefer|like|style", captured, re.I)
-        )
-        decision = bool(
-            re.search(
-                r"项目|本项目|统一|采用|使用|决定|架构|package|database|project",
-                captured,
-                re.I,
-            )
-        )
-        temporary = bool(
-            re.search(
-                r"本次|这次|当前任务|临时|this session|for this task|temporary",
-                captured,
-                re.I,
-            )
-        )
-        memory_type: MemoryType
-        key: str
-        scope: MemoryScope
-        reason: str
-        if temporary:
-            memory_type = "fact"
-            key = "session.note"
-            scope = "session"
-            reason = "用户明确将这条约束限定在当前 Session。"
-        elif preference:
-            memory_type = "preference"
-            key = (
-                "response.style"
-                if re.search(r"回答|简短|简洁|style", captured, re.I)
-                else "user.preference"
-            )
-            scope = "global"
-            reason = "用户明确表达了跨 Session 可复用的偏好。"
-        elif decision:
-            memory_type = "decision"
-            key = (
-                "project.database"
-                if re.search(r"sqlite|数据库|database", captured, re.I)
-                else "project.decision"
-            )
-            scope = "workspace"
-            reason = "用户明确表达了项目级技术决策。"
-        else:
-            memory_type = "fact"
-            key = "user.fact." + hashlib.sha256(captured.casefold().encode()).hexdigest()[:12]
-            scope = "global"
-            reason = "用户明确要求保留这条稳定事实。"
-        results.append((captured, memory_type, key, scope, reason, 0.95))
-        return results

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,9 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
 from agent_lite.core.bus.events import (
-    MemoryCandidatesCreatedEvent,
     MemoryDeletedEvent,
-    MemorySavedEvent,
+    MemoryUpdatedEvent,
     SessionClosedEvent,
     SessionCreatedEvent,
     SessionMessageReceivedEvent,
@@ -20,6 +20,7 @@ from agent_lite.core.bus.events import (
     SkillInvokedEvent,
 )
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.memory.pipeline import MemoryPipeline, sanitize_transcript, transcript_hash
 from agent_lite.core.memory.store import MemoryStore
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.ids import new_session_id
@@ -36,6 +37,8 @@ SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
 SESSION_BUSY = -32012
 SESSION_WORKSPACE_ALREADY_SET = -32013
+
+log = logging.getLogger(__name__)
 
 
 # 返回当前 UTC 时间的 ISO 8601 字符串
@@ -86,6 +89,12 @@ class SessionManager:
         self._memory_store = memory_store
         self._memory_use_enabled = memory_use_enabled
         self._memory_generate_enabled = memory_generate_enabled
+        self._memory_pipeline = (
+            MemoryPipeline(memory_store, provider)
+            if memory_store is not None and provider is not None
+            else None
+        )
+        self._memory_tasks: set[asyncio.Task[None]] = set()
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
@@ -271,21 +280,29 @@ class SessionManager:
                 and session.memory_generate_enabled
                 and outcome.status == "success"
             ):
-                candidates = self._memory_store.generate_from_messages(
-                    self._store.read_messages(session.id),
-                    session_id=session.id,
-                    run_id=run_id,
-                    workspace_root=session.workspace_root,
-                )
-                if candidates:
-                    await self._bus.publish(
-                        MemoryCandidatesCreatedEvent(
-                            session_id=session.id,
-                            run_id=run_id,
-                            count=len(candidates),
-                            ts=_now(),
-                        )
+                transcript = self._store.read_messages(session.id)
+                if self._memory_pipeline is not None:
+                    safe_transcript = sanitize_transcript(transcript)
+                    session.memory_source_hash = transcript_hash(safe_transcript)
+                    session.memory_generation_status = "running"
+                    self._persist_started_session(session)
+                    task = asyncio.create_task(
+                        self._run_memory_pipeline(
+                            session,
+                            run_id,
+                            safe_transcript,
+                        ),
+                        name=f"memory-pipeline-{session.id}",
                     )
+                    self._memory_tasks.add(task)
+                    task.add_done_callback(self._memory_tasks.discard)
+                else:
+                    log.warning(
+                        "memory generation enabled but no provider is available "
+                        "session_id=%s",
+                        session.id,
+                    )
+                    session.memory_generation_status = "failed"
 
             session.updated_at = _now()
             session.last_chat_at = session.updated_at
@@ -305,6 +322,48 @@ class SessionManager:
                 )
             self._store.write_meta(session)
             return run_id
+
+    async def _run_memory_pipeline(
+        self,
+        session: Session,
+        run_id: str,
+        transcript: list[dict[str, Any]],
+    ) -> None:
+        assert self._memory_pipeline is not None
+        try:
+            count = await self._memory_pipeline.process_session(
+                session_id=session.id,
+                run_id=run_id,
+                transcript=transcript,
+                workspace_root=session.workspace_root,
+            )
+            session.last_memory_extracted_run_id = run_id
+            session.memory_generation_status = "succeeded"
+            self._persist_started_session(session)
+            if count:
+                await self._bus.publish(
+                    MemoryUpdatedEvent(
+                        session_id=session.id,
+                        run_id=run_id,
+                        count=count,
+                        ts=_now(),
+                    )
+                )
+        except asyncio.CancelledError:
+            session.memory_generation_status = "failed"
+            self._persist_started_session(session)
+            raise
+        except Exception:
+            session.memory_generation_status = "failed"
+            self._persist_started_session(session)
+            log.exception("memory pipeline task failed session_id=%s run_id=%s", session.id, run_id)
+
+    async def wait_for_memory_tasks(self) -> None:
+        """Wait for currently scheduled background memory tasks (primarily for shutdown/tests)."""
+
+        tasks = list(self._memory_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # 修改当前 session 的记忆生成和检索开关，并持久化到 meta.json
     async def set_memory(
@@ -356,43 +415,6 @@ class SessionManager:
             workspace_root=workspace_root,
             limit=limit,
         )
-
-    # 从 session 历史生成 pending 候选，不会直接写入 active memories
-    def generate_memory_candidates(
-        self,
-        sid: str,
-        *,
-        run_id: str | None = None,
-        content: str | None = None,
-    ) -> list[Any]:
-        if self._memory_store is None:
-            return []
-        session = self._get_session(sid)
-        messages = self._store.read_messages(sid)
-        if content:
-            messages = [{"role": "user", "content": content}]
-        return self._memory_store.generate_from_messages(
-            messages,
-            session_id=sid,
-            run_id=run_id,
-            workspace_root=session.workspace_root,
-        )
-
-    # 提交候选记忆，并通过事件通知 TUI
-    async def commit_memory_candidate(self, candidate_id: str) -> Any:
-        if self._memory_store is None:
-            return None
-        record = self._memory_store.commit_candidate(candidate_id)
-        if record is not None:
-            await self._bus.publish(
-                MemorySavedEvent(
-                    memory_id=record.id,
-                    scope=record.scope,
-                    key=record.key,
-                    ts=_now(),
-                )
-            )
-        return record
 
     # 以 tombstone 方式删除长期记忆
     async def delete_memory(self, memory_id: str, reason: str = "user_requested") -> bool:

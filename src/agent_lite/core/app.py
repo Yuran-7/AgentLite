@@ -22,16 +22,10 @@ from agent_lite.core.bus.commands import (
     CoreShutdownResult,
     EventSubscribeCommand,
     EventSubscribeResult,
-    MemoryCommitCommand,
-    MemoryCommitResult,
     MemoryDeleteCommand,
     MemoryDeleteResult,
-    MemoryGenerateCommand,
-    MemoryGenerateResult,
     MemoryListCommand,
     MemoryListResult,
-    MemoryRejectCommand,
-    MemoryRejectResult,
     MemorySearchCommand,
     MemorySearchResult,
     PermissionRespondCommand,
@@ -258,7 +252,7 @@ class CoreApp:
         )
         return MemorySearchResult(memories=memories)
 
-    # 列出长期记忆和待审核候选
+    # 列出 active 长期记忆和 Phase 1 原始项
     async def _memory_list_handler(self, params: dict[str, Any]) -> MemoryListResult:
         assert self._sessions is not None
         cmd = MemoryListCommand.model_validate(params)
@@ -274,37 +268,12 @@ class CoreApp:
             if store is not None
             else []
         )
-        candidates = (
-            store.list_candidates(session_id=cmd.session_id, limit=cmd.limit)
-            if store is not None and cmd.include_candidates
+        raw_items = (
+            store.list_raw_items(session_id=cmd.session_id, limit=cmd.limit)
+            if store is not None
             else []
         )
-        return MemoryListResult(memories=memories, candidates=candidates)
-
-    # 生成 pending 候选，不会直接写入 active memory
-    async def _memory_generate_handler(self, params: dict[str, Any]) -> MemoryGenerateResult:
-        assert self._sessions is not None
-        cmd = MemoryGenerateCommand.model_validate(params)
-        candidates = self._sessions.generate_memory_candidates(
-            cmd.session_id,
-            run_id=cmd.run_id,
-            content=cmd.content,
-        )
-        return MemoryGenerateResult(candidates=candidates)
-
-    # 提交单条候选并返回新版本的 active memory
-    async def _memory_commit_handler(self, params: dict[str, Any]) -> MemoryCommitResult:
-        assert self._sessions is not None
-        cmd = MemoryCommitCommand.model_validate(params)
-        record = await self._sessions.commit_memory_candidate(cmd.candidate_id)
-        return MemoryCommitResult(committed=record is not None, memory=record)
-
-    # 拒绝 pending 候选，不影响已有 active memory
-    async def _memory_reject_handler(self, params: dict[str, Any]) -> MemoryRejectResult:
-        cmd = MemoryRejectCommand.model_validate(params)
-        store = self._memory_store
-        rejected = store.reject_candidate(cmd.candidate_id) if store is not None else False
-        return MemoryRejectResult(rejected=rejected)
+        return MemoryListResult(memories=memories, raw_items=raw_items)
 
     # 删除长期记忆，实际写入 tombstone
     async def _memory_delete_handler(self, params: dict[str, Any]) -> MemoryDeleteResult:
@@ -509,9 +478,6 @@ class CoreApp:
         server.register("session.compact", self._session_compact_handler)
         server.register("memory.search", self._memory_search_handler)
         server.register("memory.list", self._memory_list_handler)
-        server.register("memory.generate", self._memory_generate_handler)
-        server.register("memory.commit", self._memory_commit_handler)
-        server.register("memory.reject", self._memory_reject_handler)
         server.register("memory.delete", self._memory_delete_handler)
 
         self._shutdown = asyncio.Event()
@@ -549,6 +515,8 @@ class CoreApp:
                 run_task.cancel()
             if self._running_runs:
                 await asyncio.gather(*self._running_runs, return_exceptions=True)
+            if self._sessions is not None:
+                await self._sessions.wait_for_memory_tasks()
             if self._mcp_manager is not None:
                 await self._mcp_manager.stop_all()
             if self._browser_manager is not None:

@@ -99,8 +99,8 @@ async def test_session_set_workspace_over_ipc(
     await writer.wait_closed()
 
 
-# 功能：验证 memory.generate、memory.list、memory.commit、memory.search、memory.delete 的 IPC 闭环
-# 设计：不调用真实 LLM，直接覆盖候选生成、审核提交、可见性检索和 tombstone 删除
+# 功能：验证 memory.list、memory.search、memory.delete 的 IPC 闭环
+# 设计：不调用真实 LLM；自动记忆流水线由成功 session run 在后台触发
 async def test_memory_lifecycle_over_ipc(
     running_daemon: subprocess.Popen[bytes],
     free_port: int,
@@ -116,40 +116,15 @@ async def test_memory_lifecycle_over_ipc(
     )
     session_id = created["result"]["session_id"]
 
-    generated = await _send_recv(
-        reader,
-        writer,
-        "memory.generate",
-        {
-            "session_id": session_id,
-            "content": "remember that I prefer concise answers.",
-            "run_id": "run-memory",
-        },
-        req_id="memory-generate",
-    )
-    candidates = generated["result"]["candidates"]
-    assert len(candidates) == 1
-    candidate_id = candidates[0]["id"]
-
-    pending = await _send_recv(
+    listed = await _send_recv(
         reader,
         writer,
         "memory.list",
         {"session_id": session_id},
-        req_id="memory-list-pending",
+        req_id="memory-list",
     )
-    assert len(pending["result"]["memories"]) == 0
-    assert pending["result"]["candidates"][0]["id"] == candidate_id
-
-    committed = await _send_recv(
-        reader,
-        writer,
-        "memory.commit",
-        {"candidate_id": candidate_id},
-        req_id="memory-commit",
-    )
-    assert committed["result"]["committed"] is True
-    memory_id = committed["result"]["memory"]["id"]
+    assert listed["result"]["memories"] == []
+    assert listed["result"]["raw_items"] == []
 
     searched = await _send_recv(
         reader,
@@ -158,16 +133,16 @@ async def test_memory_lifecycle_over_ipc(
         {"session_id": session_id, "query": "concise"},
         req_id="memory-search",
     )
-    assert searched["result"]["memories"][0]["id"] == memory_id
+    assert searched["result"]["memories"] == []
 
     deleted = await _send_recv(
         reader,
         writer,
         "memory.delete",
-        {"memory_id": memory_id},
+        {"memory_id": "missing-memory"},
         req_id="memory-delete",
     )
-    assert deleted["result"]["deleted"] is True
+    assert deleted["result"]["deleted"] is False
 
     writer.close()
     await writer.wait_closed()

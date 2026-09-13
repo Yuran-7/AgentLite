@@ -181,7 +181,7 @@ class SocketServer:
             )
             return
 
-        _writer_var.set(writer)
+        _writer_var.set(writer) # 当前协程的上下文writer写入_writer_var
         try:
             result = await handler(req.params)
         except HandlerError as e:

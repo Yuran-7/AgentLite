@@ -65,7 +65,6 @@ from agent_lite.core.permissions.storage import load_policy_file
 from agent_lite.core.runner import AgentRunner
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session import SessionManager, SessionStore
-from agent_lite.core.tools.builtin.browser_session import BrowserSessionManager
 from agent_lite.core.trace.record import TraceRecord
 from agent_lite.core.trace.writer import TraceWriter
 from agent_lite.core.transport.ipc_broadcaster import IpcEventBroadcaster
@@ -89,7 +88,6 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
-        self._browser_manager: BrowserSessionManager | None = None
         self._shutdown: asyncio.Event | None = None
         self._sessions_root: Path | None = None
         self._memory_store: MemoryStore | None = None
@@ -431,11 +429,6 @@ class CoreApp:
             logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
             await self._mcp_manager.start_all(self._config.mcp.servers)
 
-        self._browser_manager = BrowserSessionManager(
-            self._config.web.browser_idle_timeout_s
-        )
-        await self._browser_manager.start()
-
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(
@@ -444,11 +437,9 @@ class CoreApp:
                 trace=self._trace,
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
-                browser_manager=self._browser_manager,
             ),
             bus=self._bus,
             provider=compact_provider,
-            browser_manager=self._browser_manager,
             memory_store=self._memory_store,
             memory_use_enabled=self._config.memory.use_enabled,
             memory_generate_enabled=self._config.memory.generate_enabled,
@@ -519,8 +510,6 @@ class CoreApp:
                 await self._sessions.wait_for_memory_tasks()
             if self._mcp_manager is not None:
                 await self._mcp_manager.stop_all()
-            if self._browser_manager is not None:
-                await self._browser_manager.stop()
             await server.stop()
             if self._trace is not None:
                 await self._trace.stop()

@@ -31,7 +31,6 @@ from agent_lite.core.skills.loader import SkillLoader
 if TYPE_CHECKING:
     from agent_lite.core.llm.base import LLMProvider
     from agent_lite.core.runner import AgentRunner
-    from agent_lite.core.tools.builtin.browser_session import BrowserSessionManager
 
 SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
@@ -76,7 +75,6 @@ class SessionManager:
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
         provider: LLMProvider | None = None,
-        browser_manager: BrowserSessionManager | None = None,
         memory_store: MemoryStore | None = None,
         memory_use_enabled: bool = True,
         memory_generate_enabled: bool = False,
@@ -85,7 +83,6 @@ class SessionManager:
         self._runner_factory = runner_factory
         self._bus = bus
         self._provider = provider
-        self._browser_manager = browser_manager
         self._memory_store = memory_store
         self._memory_use_enabled = memory_use_enabled
         self._memory_generate_enabled = memory_generate_enabled
@@ -308,8 +305,6 @@ class SessionManager:
             session.last_chat_at = session.updated_at
             if session.mode == "one_shot":
                 session.status = "closed"
-                if self._browser_manager is not None:
-                    await self._browser_manager.close_session(sid)
                 await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
             else:
                 session.status = "waiting_for_input"
@@ -433,8 +428,6 @@ class SessionManager:
             raise HandlerError(SESSION_BUSY, "session busy")
         async with lock:
             session.status = "closed"
-            if self._browser_manager is not None:
-                await self._browser_manager.close_session(sid)
             self._persist_started_session(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=_now()))
 

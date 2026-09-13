@@ -16,7 +16,6 @@ from agent_lite.core.runs import new_run_id
 from agent_lite.core.subagent.registry import BackgroundTaskRegistry
 from agent_lite.core.tools.base import BaseTool, ToolResult
 from agent_lite.core.tools.builtin.bash import ShellTool
-from agent_lite.core.tools.builtin.browser import BrowserTool
 from agent_lite.core.tools.builtin.list_dir import ListDirTool
 from agent_lite.core.tools.builtin.read_file import ReadFileTool
 from agent_lite.core.tools.builtin.update_plan import UpdatePlanTool
@@ -75,7 +74,7 @@ class SpawnAgentTool(BaseTool):
             "subagent_type": {
                 "type": "string",
                 "description": (
-                    "Agent role profile name, such as debate-judge or metagpt-qa. "
+                    "Agent role profile name, such as chatdev-tester or metagpt-qa. "
                     "Leave empty for the default profile."
                 ),
             },
@@ -283,8 +282,6 @@ class SpawnAgentTool(BaseTool):
             for t in [WebSearchTool(self._web_config), WebFetchTool(self._web_config)]:
                 if _allowed(t.name):
                     registry.register(t)
-            if self._web_config.browser_enabled and _allowed("browser"):
-                registry.register(BrowserTool(self._web_config))
 
         if _allowed("update_plan"):
             registry.register(UpdatePlanTool(child_bus, child_run_id))

@@ -63,13 +63,6 @@ class WebConfig:
     fetch_max_chars: int = 12_000
     fetch_max_bytes: int = 2_000_000
     fetch_max_redirects: int = 5
-    browser_enabled: bool = True
-    browser_headless: bool = True
-    browser_timeout_s: float = 20.0
-    browser_idle_timeout_s: float = 600.0
-    browser_max_nodes: int = 100
-    browser_max_chars: int = 8_000
-    browser_extract_limit: int = 10
     user_agent: str = "AgentLite/0.0.1 (+https://github.com/)"
 
 
@@ -255,13 +248,6 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             "fetch_max_chars",
             "fetch_max_bytes",
             "fetch_max_redirects",
-            "browser_enabled",
-            "browser_headless",
-            "browser_timeout_s",
-            "browser_idle_timeout_s",
-            "browser_max_nodes",
-            "browser_max_chars",
-            "browser_extract_limit",
             "user_agent",
         }
         unknown_web: set[str] = set(web.keys()) - allowed_web_keys
@@ -272,12 +258,6 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, bool):
                 raise SystemExit("Config error: web.enabled must be a boolean")
             config.web.enabled = val
-        for key in ("browser_enabled", "browser_headless"):
-            if key in web:
-                val = web[key]
-                if not isinstance(val, bool):
-                    raise SystemExit(f"Config error: web.{key} must be a boolean")
-                setattr(config.web, key, val)
         if "search_provider" in web:
             val = web["search_provider"]
             if val not in {"duckduckgo", "brave", "searxng"}:
@@ -296,9 +276,6 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             "fetch_max_chars",
             "fetch_max_bytes",
             "fetch_max_redirects",
-            "browser_max_nodes",
-            "browser_max_chars",
-            "browser_extract_limit",
         ):
             if key in web:
                 val = web[key]
@@ -310,14 +287,6 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, (int, float)) or val <= 0:
                 raise SystemExit("Config error: web.timeout_s must be a positive number")
             config.web.timeout_s = float(val)
-        for key in ("browser_timeout_s", "browser_idle_timeout_s"):
-            if key in web:
-                val = web[key]
-                if not isinstance(val, (int, float)) or val <= 0:
-                    raise SystemExit(
-                        f"Config error: web.{key} must be a positive number"
-                    )
-                setattr(config.web, key, float(val))
 
     if "llm" in data:
         llm = data["llm"]
@@ -594,28 +563,6 @@ def _apply_env(config: AgentLiteConfig) -> None:
     web_api_key = os.environ.get("AGENTLITE_WEB_SEARCH_API_KEY")
     if web_api_key is not None:
         config.web.search_api_key = web_api_key
-
-    browser_enabled = os.environ.get("AGENTLITE_BROWSER_ENABLED")
-    if browser_enabled is not None:
-        config.web.browser_enabled = browser_enabled.lower() not in ("0", "false", "no")
-
-    browser_headless = os.environ.get("AGENTLITE_BROWSER_HEADLESS")
-    if browser_headless is not None:
-        config.web.browser_headless = browser_headless.lower() not in ("0", "false", "no")
-
-    browser_idle_timeout = os.environ.get("AGENTLITE_BROWSER_IDLE_TIMEOUT_S")
-    if browser_idle_timeout is not None:
-        try:
-            value = float(browser_idle_timeout)
-        except ValueError as exc:
-            raise SystemExit(
-                "Config error: AGENTLITE_BROWSER_IDLE_TIMEOUT_S must be a positive number"
-            ) from exc
-        if value <= 0:
-            raise SystemExit(
-                "Config error: AGENTLITE_BROWSER_IDLE_TIMEOUT_S must be a positive number"
-            )
-        config.web.browser_idle_timeout_s = value
 
     default_model = os.environ.get("LLM_DEFAULT_MODEL")
     if default_model is not None:

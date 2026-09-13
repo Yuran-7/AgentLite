@@ -7,13 +7,11 @@ import pytest
 from agent_lite.core.agents.loader import AgentProfileLoader
 
 
-# 功能：三个多智能体 skill 引用的专用角色均可加载
+# 功能：多智能体 skill 引用的专用角色均可加载
 # 设计：参数化列举 skill 模板中的全部 subagent_type，防止角色改名或打包遗漏
 @pytest.mark.parametrize(
     "role",
     [
-        "debater",
-        "debate-judge",
         "chatdev-ceo",
         "chatdev-cpo",
         "chatdev-cto",
@@ -70,14 +68,14 @@ model = "claude-sonnet-4-6"
 def test_project_overrides_builtin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     local_agents = tmp_path / ".agentlite" / "agents"
     local_agents.mkdir(parents=True)
-    (local_agents / "debater.toml").write_text(
-        '[agent]\ndescription = "local debater"\nsystem_prompt = "local prompt"\n'
+    (local_agents / "chatdev-tester.toml").write_text(
+        '[agent]\ndescription = "local tester"\nsystem_prompt = "local prompt"\n'
         'allowed_tools = ["list_dir"]\nmodel = ""\n',
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
     loader = AgentProfileLoader()
-    profile = loader.load("debater")
+    profile = loader.load("chatdev-tester")
     assert profile is not None
-    assert profile.description == "local debater"
+    assert profile.description == "local tester"
     assert "list_dir" in profile.allowed_tools

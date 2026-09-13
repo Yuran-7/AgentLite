@@ -91,9 +91,6 @@ class PermissionManager:
 
         # Tier 2: OUTSIDE_CWD_HEURISTICS（shell only，强制 ASK，不可被任何缓存绕过）
         outside_cwd = bool(command and matches_outside_cwd(command))
-        browser_interaction = bool(
-            tool_name == "browser" and params.get("action") in {"click", "type"}
-        )
 
         if not outside_cwd:
             # Tier 3: session always 缓存
@@ -113,22 +110,21 @@ class PermissionManager:
                 )
                 return cached == "allow", f"auto_{cached}"
 
-            if not browser_interaction:
-                # Tier 5: allow_patterns（shell only）
-                if command and policy:
-                    for pat in policy.allow_patterns:
-                        if re.search(pat, command):
-                            return True, "auto_allow"
-
-                # Tier 6: tool default
-                if policy is not None:
-                    if policy.default == PermissionDecision.ALLOW:
+            # Tier 5: allow_patterns（shell only）
+            if command and policy:
+                for pat in policy.allow_patterns:
+                    if re.search(pat, command):
                         return True, "auto_allow"
-                    if policy.default == PermissionDecision.DENY:
-                        return False, "auto_deny"
+
+            # Tier 6: tool default
+            if policy is not None:
+                if policy.default == PermissionDecision.ALLOW:
+                    return True, "auto_allow"
+                if policy.default == PermissionDecision.DENY:
+                    return False, "auto_deny"
             # default == ASK（shell、unknown tool）→ fall through to Future
 
-        # ASK 路径（越界 shell、浏览器交互或 default=ASK）
+        # ASK 路径（越界 shell 或 default=ASK）
         loop = asyncio.get_event_loop() # 事件循环来自asyncio.run(CoreApp().run())
         future: asyncio.Future[str] = loop.create_future()
         self._pending[tool_use_id] = _PendingRequest(

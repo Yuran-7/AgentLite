@@ -13,8 +13,6 @@ class ToolResult:
     is_error: bool = False
     # "runtime_error" | "timeout" | "schema_error" | "permission_denied"
     error_type: str | None = None
-    # Stop executing tools after this result and let the model ask the user to act.
-    pause_for_user: bool = False
 
 
 class BaseTool(ABC):
@@ -27,6 +25,6 @@ class BaseTool(ABC):
     @abstractmethod
     async def invoke(self, params: dict[str, object]) -> ToolResult: ...
 
-    # 有状态工具可覆盖此方法释放浏览器、连接等资源
+    # 有状态工具可覆盖此方法释放连接等资源
     async def aclose(self) -> None:
         return None

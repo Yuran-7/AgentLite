@@ -27,7 +27,6 @@ from agent_lite.core.session.store import SessionStore
 from agent_lite.core.subagent.registry import BackgroundTaskRegistry
 from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from agent_lite.core.tools.builtin import (
-    BrowserTool,
     ListDirTool,
     ReadFileTool,
     ShellTool,
@@ -36,7 +35,6 @@ from agent_lite.core.tools.builtin import (
     WebSearchTool,
     WriteFileTool,
 )
-from agent_lite.core.tools.builtin.browser_session import BrowserSessionManager
 from agent_lite.core.tools.registry import ToolRegistry
 from agent_lite.core.trace.provider import TracingProvider
 from agent_lite.core.trace.writer import TraceWriter
@@ -66,7 +64,6 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
-        browser_manager: BrowserSessionManager | None = None,
     ) -> None:
         self._config = config
         self._bus = bus
@@ -76,9 +73,6 @@ class AgentRunner:
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
-        self._browser_manager = browser_manager or BrowserSessionManager(
-            config.web.browser_idle_timeout_s
-        )
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
 
@@ -121,18 +115,6 @@ class AgentRunner:
             for t in [WebSearchTool(self._config.web), WebFetchTool(self._config.web)]:
                 if _ok(t.name):
                     registry.register(t)
-            if self._config.web.browser_enabled and _ok("browser"):
-                browser_scope = session_id or f"run:{run_id or id(registry)}"
-                registry.register(
-                    BrowserTool(
-                        self._config.web,
-                        session_manager=self._browser_manager,
-                        session_id=browser_scope,
-                        allow_user_handoff=(
-                            session is not None and session.mode == "chat"
-                        ),
-                    )
-                )
         if bus is not None and run_id is not None and _ok("update_plan"):
             registry.register(UpdatePlanTool(bus, run_id))
         if provider is not None and bus is not None and run_id is not None:
@@ -220,7 +202,7 @@ class AgentRunner:
         # 4. session 汇总写入根 events.jsonl；独立 run 写入单一事件文件
         async with AsyncExitStack() as stack:
             if session is not None and store is not None:
-                EventAppender(store.events_file(session.id)).subscribe(bus)
+                EventAppender(store.events_file(session.id)).subscribe(bus) # 使用tui的情况下一般调用的是这个
             else:
                 writer = await stack.enter_async_context(EventWriter(self._events_file))
                 writer.subscribe(bus)
@@ -247,7 +229,7 @@ class AgentRunner:
                         include_payload=self._config.trace.include_llm_payload,
                     )
                 session_id_str = session.id if session is not None else ""
-                registry = self._build_registry(
+                registry = self._build_registry(  # 管理本次注册用的工具，工具注册表
                     session=session,
                     store=store,
                     run_id=run_id,
@@ -257,7 +239,7 @@ class AgentRunner:
                     workspace_root=workspace_root,
                     tool_whitelist=tool_whitelist,
                 )
-                compactor = Compactor(bus, session_dir, session_id_str)
+                compactor = Compactor(bus, session_dir, session_id_str) # 上下文压缩器
                 loop = AgentLoop(
                     provider, registry, bus,
                     permission_manager=self._permission_manager,

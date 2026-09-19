@@ -1383,7 +1383,6 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `workspace_root` | `string | null` | no |
 | `scope` | `string | null` | no |
 | `include_deleted` | `boolean` | no |
-| `include_candidates` | `boolean` | no |
 | `limit` | `integer` | no |
 
 ```json
@@ -1441,11 +1440,6 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "title": "Include Deleted",
       "type": "boolean"
     },
-    "include_candidates": {
-      "default": true,
-      "title": "Include Candidates",
-      "type": "boolean"
-    },
     "limit": {
       "default": 100,
       "title": "Limit",
@@ -1462,146 +1456,10 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | Field | Type | Required |
 |---|---|---|
 | `memories` | `array` | yes |
-| `candidates` | `array` | no |
 
 ```json
 {
   "$defs": {
-    "MemoryCandidate": {
-      "properties": {
-        "id": {
-          "title": "Id",
-          "type": "string"
-        },
-        "action": {
-          "enum": [
-            "add",
-            "update",
-            "delete",
-            "skip"
-          ],
-          "title": "Action",
-          "type": "string"
-        },
-        "scope": {
-          "enum": [
-            "global",
-            "workspace",
-            "session"
-          ],
-          "title": "Scope",
-          "type": "string"
-        },
-        "profile_id": {
-          "default": "default",
-          "title": "Profile Id",
-          "type": "string"
-        },
-        "workspace_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Workspace Id"
-        },
-        "session_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Session Id"
-        },
-        "type": {
-          "enum": [
-            "preference",
-            "fact",
-            "decision",
-            "procedure"
-          ],
-          "title": "Type",
-          "type": "string"
-        },
-        "key": {
-          "title": "Key",
-          "type": "string"
-        },
-        "content": {
-          "title": "Content",
-          "type": "string"
-        },
-        "reason": {
-          "default": "",
-          "title": "Reason",
-          "type": "string"
-        },
-        "confidence": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Confidence",
-          "type": "number"
-        },
-        "importance": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Importance",
-          "type": "number"
-        },
-        "evidence": {
-          "default": "",
-          "title": "Evidence",
-          "type": "string"
-        },
-        "source": {
-          "additionalProperties": true,
-          "title": "Source",
-          "type": "object"
-        },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Tags",
-          "type": "array"
-        },
-        "status": {
-          "default": "pending",
-          "enum": [
-            "pending",
-            "accepted",
-            "rejected"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "created_at": {
-          "title": "Created At",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "action",
-        "scope",
-        "type",
-        "key",
-        "content",
-        "confidence",
-        "importance",
-        "created_at"
-      ],
-      "title": "MemoryCandidate",
-      "type": "object"
-    },
     "MemoryRecord": {
       "properties": {
         "id": {
@@ -1777,519 +1635,12 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       },
       "title": "Memories",
       "type": "array"
-    },
-    "candidates": {
-      "items": {
-        "$ref": "#/$defs/MemoryCandidate"
-      },
-      "title": "Candidates",
-      "type": "array"
     }
   },
   "required": [
     "memories"
   ],
   "title": "MemoryListResult",
-  "type": "object"
-}
-```
-
-### MemoryGenerateCommand
-
-| Field | Type | Required |
-|---|---|---|
-| `type` | `string` | no |
-| `session_id` | `string` | yes |
-| `run_id` | `string | null` | no |
-| `content` | `string | null` | no |
-
-```json
-{
-  "properties": {
-    "type": {
-      "const": "memory.generate",
-      "default": "memory.generate",
-      "title": "Type",
-      "type": "string"
-    },
-    "session_id": {
-      "title": "Session Id",
-      "type": "string"
-    },
-    "run_id": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Run Id"
-    },
-    "content": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Content"
-    }
-  },
-  "required": [
-    "session_id"
-  ],
-  "title": "MemoryGenerateCommand",
-  "type": "object"
-}
-```
-
-### MemoryGenerateResult
-
-| Field | Type | Required |
-|---|---|---|
-| `candidates` | `array` | yes |
-
-```json
-{
-  "$defs": {
-    "MemoryCandidate": {
-      "properties": {
-        "id": {
-          "title": "Id",
-          "type": "string"
-        },
-        "action": {
-          "enum": [
-            "add",
-            "update",
-            "delete",
-            "skip"
-          ],
-          "title": "Action",
-          "type": "string"
-        },
-        "scope": {
-          "enum": [
-            "global",
-            "workspace",
-            "session"
-          ],
-          "title": "Scope",
-          "type": "string"
-        },
-        "profile_id": {
-          "default": "default",
-          "title": "Profile Id",
-          "type": "string"
-        },
-        "workspace_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Workspace Id"
-        },
-        "session_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Session Id"
-        },
-        "type": {
-          "enum": [
-            "preference",
-            "fact",
-            "decision",
-            "procedure"
-          ],
-          "title": "Type",
-          "type": "string"
-        },
-        "key": {
-          "title": "Key",
-          "type": "string"
-        },
-        "content": {
-          "title": "Content",
-          "type": "string"
-        },
-        "reason": {
-          "default": "",
-          "title": "Reason",
-          "type": "string"
-        },
-        "confidence": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Confidence",
-          "type": "number"
-        },
-        "importance": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Importance",
-          "type": "number"
-        },
-        "evidence": {
-          "default": "",
-          "title": "Evidence",
-          "type": "string"
-        },
-        "source": {
-          "additionalProperties": true,
-          "title": "Source",
-          "type": "object"
-        },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Tags",
-          "type": "array"
-        },
-        "status": {
-          "default": "pending",
-          "enum": [
-            "pending",
-            "accepted",
-            "rejected"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "created_at": {
-          "title": "Created At",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "action",
-        "scope",
-        "type",
-        "key",
-        "content",
-        "confidence",
-        "importance",
-        "created_at"
-      ],
-      "title": "MemoryCandidate",
-      "type": "object"
-    }
-  },
-  "properties": {
-    "candidates": {
-      "items": {
-        "$ref": "#/$defs/MemoryCandidate"
-      },
-      "title": "Candidates",
-      "type": "array"
-    }
-  },
-  "required": [
-    "candidates"
-  ],
-  "title": "MemoryGenerateResult",
-  "type": "object"
-}
-```
-
-### MemoryCommitCommand
-
-| Field | Type | Required |
-|---|---|---|
-| `type` | `string` | no |
-| `candidate_id` | `string` | yes |
-
-```json
-{
-  "properties": {
-    "type": {
-      "const": "memory.commit",
-      "default": "memory.commit",
-      "title": "Type",
-      "type": "string"
-    },
-    "candidate_id": {
-      "title": "Candidate Id",
-      "type": "string"
-    }
-  },
-  "required": [
-    "candidate_id"
-  ],
-  "title": "MemoryCommitCommand",
-  "type": "object"
-}
-```
-
-### MemoryCommitResult
-
-| Field | Type | Required |
-|---|---|---|
-| `committed` | `boolean` | yes |
-| `memory` | `? | null` | no |
-
-```json
-{
-  "$defs": {
-    "MemoryRecord": {
-      "properties": {
-        "id": {
-          "title": "Id",
-          "type": "string"
-        },
-        "scope": {
-          "enum": [
-            "global",
-            "workspace",
-            "session"
-          ],
-          "title": "Scope",
-          "type": "string"
-        },
-        "profile_id": {
-          "default": "default",
-          "title": "Profile Id",
-          "type": "string"
-        },
-        "workspace_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Workspace Id"
-        },
-        "session_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Session Id"
-        },
-        "type": {
-          "enum": [
-            "preference",
-            "fact",
-            "decision",
-            "procedure"
-          ],
-          "title": "Type",
-          "type": "string"
-        },
-        "key": {
-          "title": "Key",
-          "type": "string"
-        },
-        "content": {
-          "title": "Content",
-          "type": "string"
-        },
-        "status": {
-          "default": "active",
-          "enum": [
-            "active",
-            "superseded",
-            "deleted"
-          ],
-          "title": "Status",
-          "type": "string"
-        },
-        "confidence": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Confidence",
-          "type": "number"
-        },
-        "importance": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Importance",
-          "type": "number"
-        },
-        "source": {
-          "additionalProperties": true,
-          "title": "Source",
-          "type": "object"
-        },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Tags",
-          "type": "array"
-        },
-        "created_at": {
-          "title": "Created At",
-          "type": "string"
-        },
-        "updated_at": {
-          "title": "Updated At",
-          "type": "string"
-        },
-        "expires_at": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Expires At"
-        },
-        "supersedes": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Supersedes"
-        },
-        "deleted_at": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Deleted At"
-        },
-        "reason": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Reason"
-        }
-      },
-      "required": [
-        "id",
-        "scope",
-        "type",
-        "key",
-        "content",
-        "confidence",
-        "importance",
-        "created_at",
-        "updated_at"
-      ],
-      "title": "MemoryRecord",
-      "type": "object"
-    }
-  },
-  "properties": {
-    "committed": {
-      "title": "Committed",
-      "type": "boolean"
-    },
-    "memory": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/MemoryRecord"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
-    }
-  },
-  "required": [
-    "committed"
-  ],
-  "title": "MemoryCommitResult",
-  "type": "object"
-}
-```
-
-### MemoryRejectCommand
-
-| Field | Type | Required |
-|---|---|---|
-| `type` | `string` | no |
-| `candidate_id` | `string` | yes |
-
-```json
-{
-  "properties": {
-    "type": {
-      "const": "memory.reject",
-      "default": "memory.reject",
-      "title": "Type",
-      "type": "string"
-    },
-    "candidate_id": {
-      "title": "Candidate Id",
-      "type": "string"
-    }
-  },
-  "required": [
-    "candidate_id"
-  ],
-  "title": "MemoryRejectCommand",
-  "type": "object"
-}
-```
-
-### MemoryRejectResult
-
-| Field | Type | Required |
-|---|---|---|
-| `rejected` | `boolean` | yes |
-
-```json
-{
-  "properties": {
-    "rejected": {
-      "title": "Rejected",
-      "type": "boolean"
-    }
-  },
-  "required": [
-    "rejected"
-  ],
-  "title": "MemoryRejectResult",
   "type": "object"
 }
 ```
@@ -2355,32 +1706,37 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 
 Events pushed from daemon to subscribed clients over the same TCP connection.
 
-### EventPushEnvelope
+### JsonRpcNotification
 
 | Field | Type | Required |
 |---|---|---|
-| `kind` | `string` | no |
-| `event` | `object` | yes |
+| `jsonrpc` | `string` | no |
+| `method` | `string` | yes |
+| `params` | `object` | no |
 
 ```json
 {
   "properties": {
-    "kind": {
-      "const": "event",
-      "default": "event",
-      "title": "Kind",
+    "jsonrpc": {
+      "const": "2.0",
+      "default": "2.0",
+      "title": "Jsonrpc",
       "type": "string"
     },
-    "event": {
+    "method": {
+      "title": "Method",
+      "type": "string"
+    },
+    "params": {
       "additionalProperties": true,
-      "title": "Event",
+      "title": "Params",
       "type": "object"
     }
   },
   "required": [
-    "event"
+    "method"
   ],
-  "title": "EventPushEnvelope",
+  "title": "JsonRpcNotification",
   "type": "object"
 }
 ```

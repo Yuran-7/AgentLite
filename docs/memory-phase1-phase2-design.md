@@ -1,585 +1,138 @@
-# AgentLite 长期记忆方案：简化版 Phase 1 / Phase 2
+# AgentLite 长期记忆：Phase 1 / Phase 2 设计
 
-## 1. 文档目标
+本文记录当前已经实现的两阶段长期记忆。设计参考 Codex CLI `v0.147.0`，但不生成
+`raw_memories.md`，Phase 2 直接消费 `rollout_summaries/*.md`。
 
-本文记录 AgentLite 长期记忆的优化方案，参考 Codex CLI `v0.147.0` 的 memories 实现，但不直接照搬其复杂的 Git baseline、全局租约和多层任务调度。
+## 目标与边界
 
-当前 AgentLite 的记忆生成主要位于：
+Phase 1 只负责把一个 Session 的完整 transcript 压缩为一份可供未来检索的 Markdown
+摘要。它不提取原子 memory item，不写 `raw_memories.md`，也不更新全局长期记忆。
 
-- `src/agent_lite/core/memory/store.py`
-- `src/agent_lite/core/session/manager.py`
-- `src/agent_lite/core/memory/model.py`
-
-当前实现的主要问题是：
-
-1. 通过字符串匹配识别 preference、fact、decision，语义覆盖范围有限。
-2. 只处理用户消息，缺少完整任务上下文、工具结果和最终验证结果。
-3. 新候选默认进入 `memory_raw_items`，等待 Phase 2 自动合并，流程不应依赖逐条人工审批。
-
-目标方案是：
+当前数据流：
 
 ```text
-完整 session transcript
-    -> Phase 1：模型提取原始记忆
-    -> raw memory items
-    -> Phase 2：模型合并、去重、冲突处理
-    -> active memories
-    -> 后续 session 检索使用
+用户在一个新建或恢复的根 Session 中第一次发送问题
+  -> 扫描允许生成记忆的历史 Session
+  -> 选择已空闲 6 小时且不超过 10 天的最多 1 个候选
+  -> 清洗并截断候选的完整 transcript
+  -> 计算 source_hash，内容未变化则跳过
+  -> LLM 生成 {"rollout_summary": "..."}
+  -> rollout_summaries/<session_id>.md
+  -> SQLite 记录最小处理元数据
 ```
 
-## 2. Codex CLI 的实现参考
+旧版 `memories` 表及读取接口暂时保留，避免破坏已有数据；Phase 1 不再向其中写入内容。
+Phase 2 直接消费 `rollout_summaries/`，并维护可检索的 `MEMORY.md` 与注入 prompt 的
+`memory_summary.md`；具体流程见下文。
 
-参考源码仓库：
+## 输出契约
+
+模型必须只返回：
+
+```json
+{"rollout_summary":"<Markdown or empty string>"}
+```
+
+空字符串表示 no-op：当前 Session 没有足以帮助未来 Agent 的信息。此时不创建空 Markdown，
+但仍记录 `source_hash`，避免对完全相同的 transcript 重复调用模型。
+
+每个 Session 使用固定文件名：
 
 ```text
-C:\Users\HuanZhu\Desktop\Repo\codex-rust-v0.147.0
+<memory database parent>/rollout_summaries/<session_id>.md
 ```
 
-### 2.1 启动入口和后台执行
+固定文件名让持续对话只更新一份摘要，不需要 slug，也不会留下同一 Session 的过期版本。
+写入先落到同目录临时文件，再原子替换正式文件。
 
-Codex 在收到用户输入后启动 memories startup task：
+## SQLite schema
 
-```text
-codex-rs/app-server/src/request_processors/turn_processor.rs:578
-```
-
-它先提交当前用户输入，再调用 `start_memories_startup_task`。因此 memories 不是当前回答的前置步骤。
-
-启动任务实现：
-
-```text
-codex-rs/memories/write/src/start.rs:23
-```
-
-核心结构是：
-
-```rust
-tokio::spawn(async move {
-    phase1::run(...).await;
-    phase2::run(...).await;
-});
-```
-
-含义是：整个 memories 流程在后台异步运行；后台流程内部仍然是 `Phase 1 -> Phase 2` 的顺序。
-
-### 2.2 旧 session 的筛选
-
-Codex 不会直接处理当前正在进行的 session，而是扫描 state DB 中之前的 rollout。筛选逻辑位于：
-
-```text
-codex-rs/state/src/runtime/memories.rs:133-280
-```
-
-重要条件包括：
+Phase 1 只需要判断“这个 Session 的当前内容是否已经处理”，因此元数据表只有三列：
 
 ```sql
-threads.memory_mode = 'enabled'
-threads.id != current_thread_id
-threads.updated_at_ms <= idle_cutoff
-```
-
-默认参数定义位于：
-
-```text
-codex-rs/config/src/types.rs:46-48
-```
-
-当前源码默认值为：
-
-- 每次启动最多处理 2 个 rollout
-- rollout 最大年龄 10 天
-- 至少空闲 6 小时
-
-因此 Codex 是“每次用户输入都尝试启动后台检查”，但不是“每次 run 都一定调用 Phase 1 模型”。没有符合条件的 rollout 时，任务会快速结束。
-
-### 2.3 Phase 1：单个 rollout 提取
-
-Phase 1 的实现位于：
-
-```text
-codex-rs/memories/write/src/phase1.rs
-```
-
-加载完整 rollout 的位置：
-
-```text
-codex-rs/memories/write/src/phase1.rs:283-324
-```
-
-它使用：
-
-```rust
-RolloutRecorder::load_rollout_items(rollout_path)
-```
-
-然后把过滤后的完整会话交给专门的模型，而不是用关键词判断记忆类型。
-
-Phase 1 输出被限制为严格 JSON：
-
-```text
-codex-rs/memories/write/src/phase1.rs:128-146
-```
-
-格式为：
-
-```json
-{
-  "raw_memory": "...",
-  "rollout_summary": "...",
-  "rollout_slug": "..."
-}
-```
-
-如果没有长期价值，模型返回空字段：
-
-```json
-{
-  "raw_memory": "",
-  "rollout_summary": "",
-  "rollout_slug": ""
-}
-```
-
-Phase 1 提示词要求模型重点识别：
-
-- 稳定的用户偏好和反复纠正
-- 高价值的排障经验、命令和路径
-- 已验证的项目事实和技术决策
-- 能减少未来用户重复说明的信息
-
-同时排除一次性问题、临时状态、普通知识和未经验证的推测。
-
-提示词位置：
-
-```text
-codex-rs/memories/write/templates/memories/stage_one_system.md:28-80
-codex-rs/memories/write/templates/memories/stage_one_system.md:222-235
-```
-
-### 2.4 Phase 1 使用的模型
-
-Phase 1 的模型选择位于：
-
-```text
-codex-rs/memories/write/src/phase1.rs:193-198
-```
-
-用户可以通过配置覆盖：
-
-```toml
-[memories]
-extract_model = "..."
-consolidation_model = "..."
-```
-
-配置字段定义：
-
-```text
-codex-rs/config/src/types.rs:315-318
-```
-
-如果没有覆盖，provider 会选择默认模型：
-
-```text
-codex-rs/model-provider/src/provider.rs:136-147
-```
-
-当前 `v0.147.0` 源码默认标识为：
-
-```text
-Phase 1：gpt-5.6-luna
-Phase 2：gpt-5.6-terra
-```
-
-这些模型调用通常在后台完成，对普通用户是透明的；它们也不一定等于当前对话使用的模型。不同 provider 可以覆盖默认模型，例如：
-
-```text
-codex-rs/model-provider/src/amazon_bedrock/mod.rs:138-144
-```
-
-### 2.5 Phase 1 的中间存储
-
-Phase 1 不直接写最终 `MEMORY.md`，而是先写入 state DB 的 `stage1_outputs` 表。
-
-表结构：
-
-```text
-codex-rs/state/memory_migrations/0001_memories.sql:1-15
-```
-
-它保存：
-
-- `thread_id`
-- `raw_memory`
-- `rollout_summary`
-- `rollout_slug`
-- `generated_at`
-- `usage_count`
-- `last_usage`
-- Phase 2 选择状态
-
-这个中间层相当于“模型提取出的原始记忆素材”，不是逐条等待用户审批的候选列表。
-
-### 2.6 Phase 2：全局 consolidation
-
-Phase 2 实现位于：
-
-```text
-codex-rs/memories/write/src/phase2.rs:46-210
-```
-
-主要流程：
-
-1. 获取全局 Phase 2 锁。
-2. 选择当前需要处理的 `stage1_outputs`。
-3. 同步为 `raw_memories.md` 和 `rollout_summaries/`。
-4. 用 Git 计算 memory workspace diff。
-5. 没有变化时直接结束。
-6. 有变化时启动 consolidation agent。
-7. consolidation agent 更新 `MEMORY.md`、`memory_summary.md` 和 `skills/`。
-
-是否启动 consolidation agent 的判断：
-
-```text
-codex-rs/memories/write/src/phase2.rs:138-166
-```
-
-consolidation agent 的限制配置：
-
-```text
-codex-rs/memories/write/src/phase2.rs:311-366
-```
-
-它被设置为：
-
-- 不使用 memories
-- 不使用 MCP
-- 不使用网络
-- 不递归使用 collab
-- 只允许写 memory root
-
-consolidation 提示词：
-
-```text
-codex-rs/memories/write/templates/memories/consolidation.md:111-197
-```
-
-### 2.7 Codex 的用户控制方式
-
-Codex 主要提供两个开关：
-
-```text
-use_memories
-generate_memories
-```
-
-相关配置逻辑：
-
-```text
-codex-rs/tui/src/app/config_persistence.rs:648-722
-```
-
-含义是：
-
-- `use_memories`：当前 session 是否读取已有记忆
-- `generate_memories`：当前 session 是否允许作为未来记忆的输入
-
-这不是每生成一条候选就询问用户，而是“会话级授权 + 模型判断 + 后台整理”。
-
-## 3. AgentLite 简化版方案
-
-### 3.1 目标架构
-
-```text
-run 完成
-    ↓
-检查 session 是否允许生成记忆
-    ↓
-后台调用 Phase 1 模型
-    ↓
-memory_raw_items
-    ↓
-后台调用 Phase 2 模型
-    ↓
-程序验证操作
-    ↓
-SQLite transaction
-    ↓
-active memories
-```
-
-不建议第一版实现 Codex 的 Git baseline、复杂租约和跨启动选择算法。
-
-### 3.2 Phase 1 触发策略
-
-第一版可以在 run 成功后启动后台任务：
-
-```python
-outcome = await runner.run(...)
-
-if outcome.status == "success" and session.memory_generate_enabled:
-    asyncio.create_task(
-        memory_pipeline.extract_session(session.id)
-    )
-```
-
-为了避免同一个 session 被重复提取，增加：
-
-```text
-last_memory_extracted_run_id
-memory_generation_status
-memory_source_hash
-```
-
-建议初始策略：
-
-```text
-一个 session 第一次成功完成 run 后提取一次
-```
-
-后续再增加：
-
-- session idle 延迟
-- 增量提取
-- 应用启动时扫描旧 session
-- 失败重试
-
-### 3.3 Phase 1 输入
-
-输入完整 session transcript，而不是只传用户消息：
-
-```json
-[
-  {"role": "user", "content": "..."},
-  {"role": "assistant", "content": "..."},
-  {"role": "tool", "content": "..."}
-]
-```
-
-发送前过滤：
-
-- token、密码、API key
-- 大段无关工具输出
-- 二进制内容
-- 内部系统提示词
-- 外部网页中的指令性内容
-
-### 3.4 Phase 1 输出协议
-
-建议使用结构化 JSON：
-
-```json
-{
-  "should_store": true,
-  "summary": "本次会话的主要内容",
-  "items": [
-    {
-      "type": "preference",
-      "scope": "global",
-      "key": "response.style",
-      "content": "用户偏好简洁、直接的技术回答",
-      "evidence": "用户多次要求回答简洁",
-      "confidence": 0.95,
-      "stability": "stable"
-    }
-  ]
-}
-```
-
-没有长期价值时：
-
-```json
-{
-  "should_store": false,
-  "summary": "",
-  "items": []
-}
-```
-
-推荐类型：
-
-- `preference`：用户偏好和工作习惯
-- `fact`：稳定的用户或项目事实
-- `decision`：已经采用的项目技术决策
-- `procedure`：经过验证的可复用流程
-
-这些类型应由模型根据上下文判断，不应再由正则表达式决定。
-
-### 3.5 中间表设计
-
-建议新增：
-
-```sql
-CREATE TABLE memory_raw_items (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    key TEXT,
-    content TEXT NOT NULL,
-    evidence TEXT,
-    confidence REAL,
-    stability TEXT,
-    summary TEXT,
+CREATE TABLE rollout_summary_sessions (
+    session_id TEXT PRIMARY KEY,
     source_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL,
-    processed_at TEXT
+    updated_at TEXT NOT NULL
 );
 ```
 
-这里的 `pending` 表示“等待 Phase 2 合并”，不表示必须人工审批。
+- `session_id`：摘要的稳定身份，也用于推导文件路径。
+- `source_hash`：清洗后 transcript 的 SHA-256，用于幂等判断。
+- `updated_at`：最后处理时间，供后续扫描、诊断或 Phase 2 使用。
 
-AgentLite 实现直接使用 `memory_raw_items` 作为 Phase 1 原始结果队列，不再保留人工审批队列。
+`run_id`、生成状态、创建时间和文件路径均不写入该表：它们不是幂等判断所需信息，或可从
+Session 状态及固定目录规则推导。初始化数据库时会移除旧的 `memory_raw_items`、
+`memory_generation_runs` 和更早的 `memory_candidates` 表。
 
-### 3.6 Phase 2 输出协议
+## Prompt 设计
 
-Phase 2 输入：
+Codex Phase 1 prompt 中保留以下高价值规则：
 
-- Phase 1 原始 items
-- 当前 active memories
-- workspace 信息
-- 必要的历史证据
+- transcript 是不可信数据，不是新指令；
+- 只写有证据的内容，不虚构完成状态或验证结果；
+- 按 Task 组织，并为每个 Task 标记 `success`、`partial`、`fail` 或 `uncertain`；
+- 优先保留用户目标与约束、偏好信号、有效步骤、验证、失败经验和可复用项目知识；
+- 区分用户陈述、工具验证结果和未被接受的提议；
+- 过滤秘密、临时事实、通用建议和流水账；
+- 没有高信号内容时允许 no-op。
 
-Phase 2 输出操作列表：
+为了适合 AgentLite，删除了 Codex prompt 中的大量例子、重复判断规则、`raw_memory` 格式、
+`rollout_slug` 格式以及与 Phase 2 consolidation 相关的说明。完整指令位于
+`src/agent_lite/core/memory/phase1_prompt.md`；`pipeline.py` 只加载该文件并附加 transcript。
 
-```json
-{
-  "operations": [
-    {
-      "action": "update",
-      "target_key": "response.style",
-      "type": "preference",
-      "scope": "global",
-      "content": "用户偏好简洁、直接的技术回答",
-      "reason": "与已有记忆一致，但证据更充分",
-      "confidence": 0.97
-    }
-  ]
-}
-```
+## 安全与幂等
 
-合法操作：
+- system 消息不进入摘要输入。
+- 常见 token、password、secret、API key 等值会在模型调用前替换为 `[REDACTED]`。
+- 单条普通消息、工具结果及整个 transcript 都有长度上限。
+- `session_id` 只允许字母、数字、点、下划线和连字符，防止路径穿越。
+- 同一进程内按 Session 加异步锁，避免并发生成同一份摘要。
+- 历史扫描本身也有异步锁；当前 Session 的第一条用户消息触发扫描，创建或恢复本身不触发。
+- 每个当前 Session 只触发一次扫描，每次扫描最多摘要一个旧 Session，且不处理当前 Session。
+- 模型输出必须是严格 JSON；摘要超过 40,000 字符时按无效输出处理。
 
-```text
-add
-update
-delete
-skip
-```
+## Phase 2：全局 consolidation
 
-模型只提出操作，不能直接写数据库。程序必须先校验：
+Phase 2 在每次历史扫描结束后检查记忆 workspace，即使本次 Phase 1 没有生成新摘要，
+也能发现上一次失败、人工修改或文件删除。它维护两个正式产物：
 
-- 操作类型
-- memory type
-- scope
-- 内容长度
-- 敏感信息
-- confidence 范围
-- update 的目标是否存在
-- workspace/session 边界
+- `MEMORY.md`：按 Task Group 组织的详细、可检索操作手册；
+- `memory_summary.md`：以 `v1` 开头、最多 10,000 字符、每轮注入 system prompt 的紧凑记忆。
 
-校验通过后再用一个 SQLite transaction 执行写入。
-
-### 3.7 冲突处理
-
-建议通过 `scope + key` 定位同一类记忆。
-
-例如：
+记忆数据库所在目录是独立 Git workspace。Git 只作为“上次成功 consolidation”的一次性
+baseline，不承担业务存储或长期版本历史。Phase 2 的顺序是：
 
 ```text
-scope=global
-key=response.style
+获取全局异步锁
+  -> 对比成功 baseline 与当前 MEMORY.md、memory_summary.md、rollout_summaries/
+  -> 无变化且两个产物有效：跳过模型调用
+  -> 有变化或产物无效：写 phase2_workspace_diff.md
+  -> 复制输入到 agentlite-phase2-* staging 目录
+  -> 运行受限 consolidation AgentLoop
+  -> 校验 staging 中的两个产物
+  -> 原子发布到正式记忆目录
+  -> 再次校验
+  -> 重建不保留历史的单提交 Git baseline
 ```
 
-新旧记忆冲突时，让 Phase 2 模型决定：
+没有 baseline 时必须执行完整 INIT，不能把尚未 consolidation 的 rollout summaries 直接
+记为已处理。Phase 2 失败时不推进 baseline，下一次扫描仍能看到同一批变化。
 
-- 保留旧记忆
-- 更新为新记忆
-- 合并为条件性偏好
-- 废弃旧记忆
+### Consolidation agent 权限
 
-旧记录不建议物理删除，可以使用：
+Agent 只获得三个专用工具：
 
-```text
-active
-superseded
-deleted
-```
+- `list_memory_files`
+- `read_memory_file`
+- `write_memory_artifact`
 
-### 3.8 读取策略
+写工具只允许覆盖 staging 中的 `MEMORY.md` 和 `memory_summary.md`。Agent 没有 shell、网络、
+MCP、项目工作区写入或子 Agent 权限。rollout summary 只读，路径穿越和绝对路径都会被拒绝。
+完整 prompt 位于 `src/agent_lite/core/memory/phase2_prompt.md`。
 
-不要把所有记忆都放进 system prompt。建议使用三层结构：
+### System prompt 注入时序
 
-```text
-memory_summary
-    始终加载，负责导航
-
-active memories
-    根据当前问题搜索 top-K
-
-evidence/history
-    只有在必要时读取
-```
-
-第一版继续使用 SQLite FTS 即可：
-
-1. 按当前问题搜索。
-2. 按 `scope` 过滤。
-3. 按 `confidence` 和 `importance` 排序。
-4. 限制最大条数和最大字符数。
-
-后续再考虑 embedding。
-
-## 4. 推荐的改造顺序
-
-### 第一步：替换字符串提取
-
-将：
-
-```text
-src/agent_lite/core/memory/store.py:_extract_explicit
-```
-
-替换为：
-
-```python
-MemoryExtractor.extract(transcript)
-```
-
-先实现 `MemoryExtractor` 和 `memory_raw_items`，让 Phase 1 结果与 active memories 解耦。
-
-### 第二步：实现 Phase 2
-
-新增：
-
-```python
-MemoryConsolidator.consolidate(
-    raw_items,
-    existing_memories,
-)
-```
-
-它只返回 add/update/delete/skip 操作，由程序执行实际写入。
-
-### 第三步：增加后台调度
-
-最后再增加：
-
-- session idle 检查
-- 应用启动扫描旧 session
-- retry 和 backoff
-- source hash 去重
-- usage_count
-- 记忆过期、降级和遗忘
-
-## 5. 最终设计原则
-
-1. 用模型理解完整 session，而不是用关键词识别单句话。
-2. Phase 1 负责“从单个 session 提取原始记忆”。
-3. Phase 2 负责“跨 session 合并和维护长期记忆”。
-4. 用户控制 session 是否可以读取或生成记忆，而不是默认逐条审批。
-5. 模型只生成结构化候选或操作，最终数据库写入由程序校验并执行。
-6. 所有记忆都必须经过敏感信息过滤、scope 限制、长度限制和幂等处理。
-7. 记忆是辅助召回层，项目强制规则仍应放在 `AGENT.md`、文档或代码中。
+用户消息到达后，主任务先读取上一次成功发布的 `memory_summary.md`，随后才调度后台记忆
+任务。因此本轮对话使用稳定的旧版本，新生成的记忆从下一轮开始生效。`MEMORY.md` 不会
+整份放入 prompt；`memory_summary.md` 中的索引用于提示详细记忆中有哪些主题。

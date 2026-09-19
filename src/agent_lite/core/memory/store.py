@@ -4,26 +4,21 @@ import hashlib
 import json
 import re
 import sqlite3
-import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from agent_lite.core.memory.model import (
-    MemoryExtractionItem,
-    MemoryOperation,
-    MemoryRecord,
-    MemoryScope,
-    RawMemoryItem,
-)
+from agent_lite.core.memory.model import MemoryRecord, MemoryScope, RolloutSummaryMetadata
 
 
+# 返回当前 UTC 时间的 ISO 8601 字符串。
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# 为工作区绝对路径生成稳定且不泄露路径内容的标识。
 def workspace_id(workspace_root: str | Path | None) -> str | None:
     if workspace_root is None or not str(workspace_root).strip():
         return None
@@ -32,24 +27,24 @@ def workspace_id(workspace_root: str | Path | None) -> str | None:
     return f"sha256:{digest}"
 
 
+# 将值序列化为紧凑 JSON。
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 class MemoryStore:
-    """SQLite-backed long-term memory and Phase 1 raw-item store.
+    """SQLite metadata and filesystem artifacts for long-term memory."""
 
-    This store deliberately has no dependency on the LLM or SessionStore.  It
-    can therefore be used from IPC handlers, session retrieval, and background
-    consolidation without putting memory data into thread.jsonl.
-    """
-
+    # 初始化数据库及 rollout summary 目录。
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.rollout_summaries_dir = self.path.parent / "rollout_summaries"
+        self.rollout_summaries_dir.mkdir(parents=True, exist_ok=True)
         self._fts_available = False
         self._initialize()
 
+    # 打开带事务管理的 SQLite 连接。
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=10.0)
@@ -65,6 +60,7 @@ class MemoryStore:
         finally:
             connection.close()
 
+    # 创建当前 schema，并移除已废弃的 Phase 1 原子项表。
     def _initialize(self) -> None:
         with self._connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
@@ -102,36 +98,14 @@ class MemoryStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS memory_raw_items (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    run_id TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    scope TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    evidence TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    stability TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    source_hash TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TEXT NOT NULL,
-                    processed_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS memory_raw_items_status_idx
-                    ON memory_raw_items(status, created_at);
-                CREATE INDEX IF NOT EXISTS memory_raw_items_source_idx
-                    ON memory_raw_items(session_id, source_hash);
-                CREATE TABLE IF NOT EXISTS memory_generation_runs (
+                CREATE TABLE IF NOT EXISTS rollout_summary_sessions (
                     session_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
                     source_hash TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 DROP TABLE IF EXISTS memory_candidates;
+                DROP TABLE IF EXISTS memory_raw_items;
+                DROP TABLE IF EXISTS memory_generation_runs;
                 """
             )
             try:
@@ -148,14 +122,12 @@ class MemoryStore:
                     ).fetchall()
                     db.executemany(
                         "INSERT INTO memory_fts(memory_id, key, content, tags) VALUES (?, ?, ?, ?)",
-                        [
-                            (row["id"], row["key"], row["content"], row["tags_json"])
-                            for row in rows
-                        ],
+                        [(row["id"], row["key"], row["content"], row["tags_json"]) for row in rows],
                     )
             except sqlite3.OperationalError:
                 self._fts_available = False
 
+    # 将数据库行转换为长期记忆模型。
     @staticmethod
     def _record_from_row(row: sqlite3.Row) -> MemoryRecord:
         return MemoryRecord(
@@ -180,26 +152,53 @@ class MemoryStore:
             reason=row["reason"],
         )
 
-    @staticmethod
-    def _raw_from_row(row: sqlite3.Row) -> RawMemoryItem:
-        return RawMemoryItem(
-            id=row["id"],
-            session_id=row["session_id"],
-            run_id=row["run_id"],
-            type=row["type"],
-            scope=row["scope"],
-            key=row["key"],
-            content=row["content"],
-            evidence=row["evidence"],
-            confidence=float(row["confidence"]),
-            stability=row["stability"],
-            summary=row["summary"],
-            source_hash=row["source_hash"],
-            status=row["status"],
-            created_at=row["created_at"],
-            processed_at=row["processed_at"],
-        )
+    # 返回指定 Session 的稳定 rollout summary 路径。
+    def rollout_summary_path(self, session_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", session_id):
+            raise ValueError(f"invalid session ID: {session_id!r}")
+        return self.rollout_summaries_dir / f"{session_id}.md"
 
+    # 判断 Session 当前内容是否已经生成过摘要。
+    def is_rollout_summary_current(self, session_id: str, source_hash: str) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT source_hash FROM rollout_summary_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return row is not None and row["source_hash"] == source_hash
+
+    # 原子写入 rollout summary，并更新三列 Session 元数据。
+    def save_rollout_summary(
+        self, *, session_id: str, source_hash: str, summary: str
+    ) -> Path | None:
+        path = self.rollout_summary_path(session_id)
+        content = summary.strip()
+        if content:
+            temporary = path.with_suffix(".md.tmp")
+            temporary.write_text(content + "\n", encoding="utf-8")
+            temporary.replace(path)
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO rollout_summary_sessions(session_id, source_hash, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                       source_hash = excluded.source_hash,
+                       updated_at = excluded.updated_at""",
+                (session_id, source_hash, _now()),
+            )
+        return path if content else None
+
+    # 读取一条 rollout summary 的最小元数据。
+    def get_rollout_summary_metadata(self, session_id: str) -> RolloutSummaryMetadata | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT session_id, source_hash, updated_at FROM rollout_summary_sessions "
+                "WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return RolloutSummaryMetadata.model_validate(dict(row)) if row is not None else None
+
+    # 记录长期记忆的审计事件。
     def _event(
         self, db: sqlite3.Connection, memory_id: str, event_type: str, payload: Any
     ) -> None:
@@ -209,313 +208,7 @@ class MemoryStore:
             (memory_id, event_type, _json(payload), _now()),
         )
 
-    def _sync_fts(self, db: sqlite3.Connection, record: MemoryRecord) -> None:
-        if not self._fts_available:
-            return
-        db.execute("DELETE FROM memory_fts WHERE memory_id = ?", (record.id,))
-        if record.status == "active":
-            db.execute(
-                "INSERT INTO memory_fts(memory_id, key, content, tags) VALUES (?, ?, ?, ?)",
-                (record.id, record.key, record.content, " ".join(record.tags)),
-            )
-
-    def _scope_values(
-        self,
-        scope: MemoryScope,
-        profile_id: str,
-        workspace_root: str | Path | None,
-        session_id: str | None,
-    ) -> tuple[str, str | None, str | None]:
-        if scope == "global":
-            return profile_id, None, None
-        if scope == "workspace":
-            return profile_id, workspace_id(workspace_root), None
-        return profile_id, workspace_id(workspace_root), session_id
-
-    def _find_active_by_key(
-        self,
-        db: sqlite3.Connection,
-        *,
-        scope: MemoryScope,
-        profile_id: str,
-        workspace_id_value: str | None,
-        session_id: str | None,
-        key: str,
-    ) -> sqlite3.Row | None:
-        return cast(sqlite3.Row | None, db.execute(
-            """SELECT * FROM memories
-               WHERE status = 'active' AND scope = ? AND profile_id = ?
-                 AND key = ? AND workspace_id IS ? AND session_id IS ?
-               ORDER BY updated_at DESC LIMIT 1""",
-            (scope, profile_id, key, workspace_id_value, session_id),
-        ).fetchone())
-
-    def claim_memory_generation(self, session_id: str, run_id: str, source_hash: str) -> bool:
-        """Claim the first successful extraction slot for a session."""
-
-        now = _now()
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT status FROM memory_generation_runs WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-            if row is not None and row["status"] in {"running", "succeeded"}:
-                return False
-            if row is None:
-                db.execute(
-                    "INSERT INTO memory_generation_runs "
-                    "(session_id, run_id, source_hash, status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, 'running', ?, ?)",
-                    (session_id, run_id, source_hash, now, now),
-                )
-            else:
-                db.execute(
-                    "UPDATE memory_generation_runs SET run_id = ?, source_hash = ?, "
-                    "status = 'running', updated_at = ? WHERE session_id = ?",
-                    (run_id, source_hash, now, session_id),
-                )
-            return True
-
-    def finish_memory_generation(self, session_id: str, run_id: str, status: str) -> None:
-        if status not in {"succeeded", "failed"}:
-            raise ValueError("invalid memory generation status")
-        with self._connect() as db:
-            db.execute(
-                "UPDATE memory_generation_runs SET status = ?, updated_at = ? "
-                "WHERE session_id = ? AND run_id = ?",
-                (status, _now(), session_id, run_id),
-            )
-
-    def save_raw_items(
-        self,
-        items: Iterable[MemoryExtractionItem],
-        *,
-        session_id: str,
-        run_id: str,
-        source_hash: str,
-        summary: str = "",
-    ) -> list[RawMemoryItem]:
-        """Persist Phase 1 output, deduplicated by session/source/key/content."""
-
-        saved: list[RawMemoryItem] = []
-        now = _now()
-        with self._connect() as db:
-            for item in items:
-                content = item.content.strip()
-                if not content or len(content) > 1_500 or self._contains_sensitive_data(content):
-                    continue
-                key = item.key.strip()[:200]
-                if not key:
-                    key = (
-                        "memory."
-                        + hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()[:16]
-                    )
-                existing = db.execute(
-                    "SELECT * FROM memory_raw_items WHERE session_id = ? AND source_hash = ? "
-                    "AND key = ? AND content = ? LIMIT 1",
-                    (session_id, source_hash, key, content),
-                ).fetchone()
-                if existing is not None:
-                    saved.append(self._raw_from_row(existing))
-                    continue
-                raw = RawMemoryItem(
-                    id=f"raw_{uuid.uuid4().hex}",
-                    session_id=session_id,
-                    run_id=run_id,
-                    type=item.type,
-                    scope=item.scope,
-                    key=key,
-                    content=content,
-                    evidence=item.evidence[:1_500],
-                    confidence=item.confidence,
-                    stability=item.stability,
-                    summary=summary[:2_000],
-                    source_hash=source_hash,
-                    created_at=now,
-                )
-                db.execute(
-                    "INSERT INTO memory_raw_items "
-                    "(id, session_id, run_id, type, scope, key, content, evidence, confidence, "
-                    "stability, summary, source_hash, status, created_at, processed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        raw.id, raw.session_id, raw.run_id, raw.type, raw.scope, raw.key,
-                        raw.content, raw.evidence, raw.confidence, raw.stability, raw.summary,
-                        raw.source_hash, raw.status, raw.created_at, raw.processed_at,
-                    ),
-                )
-                saved.append(raw)
-        return saved
-
-    def list_raw_items(
-        self,
-        *,
-        session_id: str | None = None,
-        status: str = "pending",
-        limit: int = 100,
-    ) -> list[RawMemoryItem]:
-        query = "SELECT * FROM memory_raw_items WHERE status = ?"
-        args: list[Any] = [status]
-        if session_id is not None:
-            query += " AND session_id = ?"
-            args.append(session_id)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        args.append(max(1, min(limit, 500)))
-        with self._connect() as db:
-            return [self._raw_from_row(row) for row in db.execute(query, args)]
-
-    def apply_memory_operations(
-        self,
-        raw_items: Iterable[RawMemoryItem],
-        operations: Iterable[MemoryOperation],
-        *,
-        session_id: str,
-        workspace_root: str | Path | None,
-    ) -> int:
-        """Validate and apply Phase 2 operations in one SQLite transaction."""
-
-        raw_list = list(raw_items)
-        raw_by_key = {item.key: item for item in raw_list}
-        applied = 0
-        now = _now()
-        with self._connect() as db:
-            for operation in operations:
-                op = (
-                    operation
-                    if isinstance(operation, MemoryOperation)
-                    else MemoryOperation.model_validate(operation)
-                )
-                if not op.target_key or len(op.target_key) > 200:
-                    continue
-                if op.action in {"add", "update"}:
-                    if op.type is None or op.scope is None:
-                        continue
-                    content = op.content.strip()
-                    if (
-                        not content
-                        or len(content) > 1_500
-                        or self._contains_sensitive_data(content)
-                    ):
-                        continue
-                else:
-                    content = op.content.strip()
-
-                scope = op.scope
-                if scope is None:
-                    # delete/skip can inherit scope from the matching raw item only for
-                    # exact-key operations; no inherited scope is allowed for writes.
-                    continue
-                profile, ws_id, scoped_session = self._scope_values(
-                    scope, "default", workspace_root, session_id
-                )
-                if scope == "workspace" and ws_id is None:
-                    continue
-                if scope == "session" and scoped_session is None:
-                    continue
-                existing = self._find_active_by_key(
-                    db,
-                    scope=scope,
-                    profile_id=profile,
-                    workspace_id_value=ws_id,
-                    session_id=scoped_session,
-                    key=op.target_key,
-                )
-                if op.action == "skip":
-                    applied += 1
-                    continue
-                if op.action == "delete":
-                    if existing is None:
-                        continue
-                    db.execute(
-                        "UPDATE memories SET status = 'deleted', deleted_at = ?, "
-                        "updated_at = ?, reason = ? WHERE id = ?",
-                        (now, now, op.reason or "consolidation", existing["id"]),
-                    )
-                    if self._fts_available:
-                        db.execute("DELETE FROM memory_fts WHERE memory_id = ?", (existing["id"],))
-                    self._event(db, existing["id"], "deleted", {"reason": op.reason})
-                    applied += 1
-                    continue
-                if op.action == "update" and existing is None:
-                    continue
-
-                assert op.type is not None
-
-                source_item = raw_by_key.get(op.target_key) or (raw_list[0] if raw_list else None)
-                source: dict[str, Any] = {
-                    "session_id": session_id,
-                    "source": "memory_phase2",
-                }
-                if source_item is not None:
-                    source.update(
-                        run_id=source_item.run_id,
-                        source_hash=source_item.source_hash,
-                        evidence=op.evidence or source_item.evidence,
-                    )
-                record = MemoryRecord(
-                    id=f"mem_{uuid.uuid4().hex}",
-                    scope=scope,
-                    profile_id=profile,
-                    workspace_id=ws_id,
-                    session_id=scoped_session,
-                    type=op.type,
-                    key=op.target_key,
-                    content=content,
-                    confidence=op.confidence,
-                    importance=op.importance,
-                    source=source,
-                    tags=op.tags,
-                    created_at=existing["created_at"] if existing is not None else now,
-                    updated_at=now,
-                    supersedes=existing["id"] if existing is not None else None,
-                    reason=op.reason or None,
-                )
-                if existing is not None:
-                    db.execute(
-                        "UPDATE memories SET status = 'superseded', updated_at = ?, "
-                        "reason = ? WHERE id = ?",
-                        (now, "replaced by newer memory", existing["id"]),
-                    )
-                    superseded = self._record_from_row(existing).model_copy(
-                        update={"status": "superseded"}
-                    )
-                    self._sync_fts(db, superseded)
-                    self._event(db, existing["id"], "superseded", {"by": record.id})
-                db.execute(
-                    "INSERT INTO memories "
-                    "(id, scope, profile_id, workspace_id, session_id, type, key, content, status, "
-                    "confidence, importance, source_json, tags_json, created_at, updated_at, "
-                    "expires_at, supersedes, deleted_at, reason) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        record.id, record.scope, record.profile_id, record.workspace_id,
-                        record.session_id, record.type, record.key, record.content, record.status,
-                        record.confidence,
-                        record.importance,
-                        _json(record.source),
-                        _json(record.tags),
-                        record.created_at, record.updated_at, record.expires_at, record.supersedes,
-                        record.deleted_at, record.reason,
-                    ),
-                )
-                self._sync_fts(db, record)
-                self._event(
-                    db,
-                    record.id,
-                    "updated" if existing is not None else "created",
-                    record.model_dump(),
-                )
-                applied += 1
-
-            if raw_list:
-                placeholders = ",".join("?" for _ in raw_list)
-                db.execute(
-                    f"UPDATE memory_raw_items SET status = 'processed', processed_at = ? "
-                    f"WHERE id IN ({placeholders})",
-                    [now, *(item.id for item in raw_list)],
-                )
-        return applied
-
+    # 软删除一条旧版 active memory，并保留 tombstone。
     def delete(self, memory_id: str, reason: str = "user_requested") -> bool:
         with self._connect() as db:
             row = db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
@@ -532,11 +225,13 @@ class MemoryStore:
             self._event(db, memory_id, "deleted", {"reason": reason})
             return True
 
+    # 按 ID 读取一条旧版长期记忆。
     def get(self, memory_id: str) -> MemoryRecord | None:
         with self._connect() as db:
             row = db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
             return self._record_from_row(row) if row is not None else None
 
+    # 列出满足作用域条件的旧版长期记忆。
     def list_memories(
         self,
         *,
@@ -564,6 +259,7 @@ class MemoryStore:
         with self._connect() as db:
             return [self._record_from_row(row) for row in db.execute(query, args)]
 
+    # 用轻量词法匹配检索当前调用方可见的旧版长期记忆。
     def search(
         self,
         query: str,
@@ -583,7 +279,6 @@ class MemoryStore:
                           OR (scope = 'session' AND session_id = ?))""",
                 (profile_id, current_workspace, session_id),
             ).fetchall()
-
         tokens = [
             token.casefold()
             for token in re.findall(r"[\w\u4e00-\u9fff]+", query)
@@ -602,6 +297,7 @@ class MemoryStore:
         scored.sort(key=lambda pair: (pair[0], pair[1].updated_at), reverse=True)
         return [record for _, record in scored[: max(1, min(limit, 50))]]
 
+    # 将相关旧版长期记忆格式化为可注入模型的上下文。
     def format_relevant(
         self,
         query: str,
@@ -627,8 +323,7 @@ class MemoryStore:
         ]
         used = sum(len(line) + 1 for line in lines)
         for record in records:
-            source = record.source
-            source_text = ", ".join(f"{key}={value}" for key, value in source.items())
+            source_text = ", ".join(f"{key}={value}" for key, value in record.source.items())
             line = f"- [{record.scope}][{record.type}][{record.key}] {record.content}"
             if source_text:
                 line += f" (source: {source_text})"
@@ -638,8 +333,18 @@ class MemoryStore:
             used += len(line) + 1
         return "\n".join(lines)
 
-    @staticmethod
-    def _contains_sensitive_data(text: str) -> bool:
-        return bool(re.search(
-            r"(?i)(password|passwd|token|secret|api[_ -]?key|密钥|密码|口令)", text
-        ))
+    # 读取上一次成功发布的紧凑记忆，供每轮 system prompt 注入。
+    def format_memory_summary(self, *, max_chars: int = 10_000) -> str:
+        path = self.path.parent / "memory_summary.md"
+        if not path.is_file():
+            return ""
+        content = path.read_text(encoding="utf-8").strip()
+        if content.splitlines()[:1] != ["v1"]:
+            return ""
+        bounded = content[: max(1, max_chars)]
+        return (
+            "## Long-term memory\n\n"
+            "Treat this as fallible historical context. The current user request and "
+            "workspace evidence take priority.\n\n"
+            + bounded
+        )

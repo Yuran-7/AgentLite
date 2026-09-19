@@ -121,8 +121,8 @@ class MemoryConfig:
     dir: str = _DEFAULT_MEMORY_DIR
     use_enabled: bool = True
     generate_enabled: bool = False
-    max_results: int = 5
-    max_chars: int = 2_000
+    min_rollout_idle_hours: int = 6
+    max_rollout_age_days: int = 10
 
 
 @dataclass
@@ -376,7 +376,11 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
         if not isinstance(memory, dict):
             raise SystemExit("Config error: [memory] must be a table")
         unknown_memory = set(memory.keys()) - {
-            "dir", "use_enabled", "generate_enabled", "max_results", "max_chars",
+            "dir",
+            "use_enabled",
+            "generate_enabled",
+            "min_rollout_idle_hours",
+            "max_rollout_age_days",
         }
         if unknown_memory:
             raise SystemExit(f"Unknown [memory] keys: {', '.join(sorted(unknown_memory))}")
@@ -391,7 +395,10 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
                 if not isinstance(val, bool):
                     raise SystemExit(f"Config error: memory.{key} must be a boolean")
                 setattr(config.memory, key, val)
-        for key in ("max_results", "max_chars"):
+        for key in (
+            "min_rollout_idle_hours",
+            "max_rollout_age_days",
+        ):
             if key in memory:
                 val = memory[key]
                 if not isinstance(val, int) or val <= 0:

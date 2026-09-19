@@ -124,7 +124,7 @@ async def test_memory_lifecycle_over_ipc(
         req_id="memory-list",
     )
     assert listed["result"]["memories"] == []
-    assert listed["result"]["raw_items"] == []
+    assert set(listed["result"]) == {"memories"}
 
     searched = await _send_recv(
         reader,

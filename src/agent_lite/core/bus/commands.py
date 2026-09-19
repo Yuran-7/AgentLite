@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Discriminator, Field
 
-from agent_lite.core.memory.model import MemoryRecord, MemoryScope, RawMemoryItem
+from agent_lite.core.memory.model import MemoryRecord, MemoryScope
 from agent_lite.core.session.model import SessionMode, SessionStatus
 
 
@@ -214,7 +214,6 @@ class MemoryListCommand(BaseModel):
 
 class MemoryListResult(BaseModel):
     memories: list[MemoryRecord]
-    raw_items: list[RawMemoryItem] = Field(default_factory=list)
 
 
 class MemoryDeleteCommand(BaseModel):

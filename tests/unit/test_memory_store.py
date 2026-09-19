@@ -3,175 +3,66 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from agent_lite.core.memory.model import MemoryExtractionItem, MemoryOperation
+import pytest
+
 from agent_lite.core.memory.store import MemoryStore, workspace_id
 
 
-def test_store_removes_legacy_candidate_table(tmp_path: Path) -> None:
+# 功能：验证初始化会移除旧候选表与两张已废弃的 Phase 1 表。
+# 设计：先构造旧 schema，再初始化新 store 并检查 SQLite 的权威表清单。
+def test_store_migrates_obsolete_phase1_tables(tmp_path: Path) -> None:
     database = tmp_path / "memory.db"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE memory_candidates (id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE memory_raw_items (id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE memory_generation_runs (session_id TEXT PRIMARY KEY)")
 
     MemoryStore(database)
 
     with sqlite3.connect(database) as connection:
-        table = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_candidates'"
-        ).fetchone()
-    assert table is None
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert "memory_candidates" not in tables
+    assert "memory_raw_items" not in tables
+    assert "memory_generation_runs" not in tables
+    assert "rollout_summary_sessions" in tables
 
 
-def test_raw_item_is_pending_until_phase2_applies_operation(tmp_path: Path) -> None:
+# 功能：验证 rollout summary 文件与元数据可被覆盖更新而不产生重复文件。
+# 设计：对同一 Session 保存两次并检查固定路径、最新内容和最新哈希。
+def test_rollout_summary_uses_stable_session_path(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.db")
-    raw = store.save_raw_items(
-        [
-            MemoryExtractionItem(
-                type="preference",
-                scope="global",
-                key="response.style",
-                content="Answer concisely.",
-                confidence=0.9,
-                stability="stable",
-            )
-        ],
-        session_id="sess-1",
-        run_id="run-1",
-        source_hash="hash-1",
+
+    first_path = store.save_rollout_summary(
+        session_id="session-1", source_hash="hash-1", summary="# First"
+    )
+    second_path = store.save_rollout_summary(
+        session_id="session-1", source_hash="hash-2", summary="# Second"
     )
 
-    assert store.search("concisely") == []
-    assert store.list_raw_items(session_id="sess-1")[0].status == "pending"
-    store.apply_memory_operations(
-        raw,
-        [
-            MemoryOperation(
-                action="add",
-                target_key="response.style",
-                type="preference",
-                scope="global",
-                content="Answer concisely.",
-                confidence=0.9,
-                importance=0.8,
-            )
-        ],
-        session_id="sess-1",
-        workspace_root=None,
-    )
-
-    assert store.search("concisely")[0].key == "response.style"
-    assert store.list_raw_items(session_id="sess-1", status="processed")
+    assert first_path == second_path == tmp_path / "rollout_summaries" / "session-1.md"
+    assert second_path is not None
+    assert second_path.read_text(encoding="utf-8") == "# Second\n"
+    assert list(store.rollout_summaries_dir.glob("*.md")) == [second_path]
+    metadata = store.get_rollout_summary_metadata("session-1")
+    assert metadata is not None and metadata.source_hash == "hash-2"
 
 
-def test_phase2_update_supersedes_old_record_and_delete_keeps_tombstone(tmp_path: Path) -> None:
+# 功能：验证 Session ID 不能逃逸 rollout_summaries 目录。
+# 设计：传入路径穿越字符串并断言在任何写入前被拒绝。
+def test_rollout_summary_rejects_unsafe_session_id(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.db")
-    first = store.save_raw_items(
-        [
-            MemoryExtractionItem(
-                type="preference",
-                scope="global",
-                key="response.style",
-                content="Answer concisely.",
-                confidence=0.9,
-            )
-        ],
-        session_id="sess-1",
-        run_id="run-1",
-        source_hash="hash-1",
-    )
-    store.apply_memory_operations(
-        first,
-        [
-            MemoryOperation(
-                action="add",
-                target_key="response.style",
-                type="preference",
-                scope="global",
-                content="Answer concisely.",
-                confidence=0.9,
-            )
-        ],
-        session_id="sess-1",
-        workspace_root=None,
-    )
-    second = store.save_raw_items(
-        [
-            MemoryExtractionItem(
-                type="preference",
-                scope="global",
-                key="response.style",
-                content="Answer concisely and directly.",
-                confidence=0.95,
-            )
-        ],
-        session_id="sess-2",
-        run_id="run-2",
-        source_hash="hash-2",
-    )
-    store.apply_memory_operations(
-        second,
-        [
-            MemoryOperation(
-                action="update",
-                target_key="response.style",
-                type="preference",
-                scope="global",
-                content="Answer concisely and directly.",
-                confidence=0.95,
-            )
-        ],
-        session_id="sess-2",
-        workspace_root=None,
-    )
 
-    visible = store.search("directly")
-    assert len(visible) == 1
-    old = store.list_memories(include_deleted=True, limit=10)
-    assert any(memory.status == "superseded" for memory in old)
-    assert store.delete(visible[0].id)
-    assert store.get(visible[0].id).status == "deleted"  # type: ignore[union-attr]
-
-
-def test_search_only_returns_visible_scopes(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "memory.db")
-    workspace = tmp_path / "repo"
-    workspace.mkdir()
-
-    items = [
-        ("global", None, "user.fact", "The user likes tea."),
-        ("workspace", workspace_id(workspace), "project.database", "This workspace uses SQLite."),
-        ("workspace", workspace_id(tmp_path), "project.database", "The other workspace uses Postgres."),
-    ]
-    for index, (scope, scoped_workspace, key, content) in enumerate(items):
-        raw = store.save_raw_items(
-            [
-                MemoryExtractionItem(
-                    type="fact" if scope == "global" else "decision",
-                    scope=scope,  # type: ignore[arg-type]
-                    key=key,
-                    content=content,
-                    confidence=0.9,
-                )
-            ],
-            session_id=f"sess-{index}",
-            run_id=f"run-{index}",
-            source_hash=f"hash-{index}",
-        )
-        store.apply_memory_operations(
-            raw,
-            [
-                MemoryOperation(
-                    action="add",
-                    target_key=key,
-                    type="fact" if scope == "global" else "decision",
-                    scope=scope,  # type: ignore[arg-type]
-                    content=content,
-                    confidence=0.9,
-                )
-            ],
-            session_id=f"sess-{index}",
-            workspace_root=workspace if scoped_workspace == workspace_id(workspace) else tmp_path,
+    with pytest.raises(ValueError, match="invalid session ID"):
+        store.save_rollout_summary(
+            session_id="../escape", source_hash="hash", summary="unsafe"
         )
 
-    visible = store.search("database", workspace_root=workspace, session_id="sess")
-    assert [record.content for record in visible] == ["This workspace uses SQLite."]
-    assert store.search("tea", workspace_root=workspace, session_id="sess")[0].scope == "global"
+
+# 功能：验证同一工作区路径始终映射为同一匿名标识。
+# 设计：分别传入 Path 与字符串形式，排除调用类型造成的哈希差异。
+def test_workspace_id_is_stable(tmp_path: Path) -> None:
+    assert workspace_id(tmp_path) == workspace_id(str(tmp_path))
+    assert workspace_id(None) is None

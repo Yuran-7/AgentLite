@@ -1,14 +1,11 @@
 from agent_lite.core.memory.loader import load_agent_context, load_context_file
 from agent_lite.core.memory.model import (
-    MemoryConsolidation,
-    MemoryExtraction,
-    MemoryExtractionItem,
-    MemoryOperation,
     MemoryRecord,
-    RawMemoryItem,
+    RolloutSummary,
+    RolloutSummaryMetadata,
 )
+from agent_lite.core.memory.phase2 import MemoryConsolidator
 from agent_lite.core.memory.pipeline import (
-    MemoryConsolidator,
     MemoryExtractor,
     MemoryPipeline,
     sanitize_transcript,
@@ -17,21 +14,16 @@ from agent_lite.core.memory.pipeline import (
 from agent_lite.core.memory.store import MemoryStore, workspace_id
 
 __all__ = [
-    "MemoryConsolidation",
-    "MemoryConsolidator",
-    "MemoryExtraction",
-    "MemoryExtractionItem",
     "MemoryExtractor",
-    "MemoryOperation",
+    "MemoryConsolidator",
     "MemoryPipeline",
     "MemoryRecord",
     "MemoryStore",
-    "RawMemoryItem",
+    "RolloutSummary",
+    "RolloutSummaryMetadata",
     "load_agent_context",
     "load_context_file",
     "sanitize_transcript",
     "transcript_hash",
     "workspace_id",
 ]
-
-__all__ = ["load_agent_context", "load_context_file"]

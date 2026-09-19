@@ -3,14 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
 from agent_lite.core.bus.events import (
     MemoryDeletedEvent,
-    MemoryUpdatedEvent,
     SessionClosedEvent,
     SessionCreatedEvent,
     SessionMessageReceivedEvent,
@@ -78,6 +77,8 @@ class SessionManager:
         memory_store: MemoryStore | None = None,
         memory_use_enabled: bool = True,
         memory_generate_enabled: bool = False,
+        memory_min_rollout_idle_hours: int = 6,
+        memory_max_rollout_age_days: int = 10,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
@@ -86,12 +87,18 @@ class SessionManager:
         self._memory_store = memory_store
         self._memory_use_enabled = memory_use_enabled
         self._memory_generate_enabled = memory_generate_enabled
+        self._memory_min_rollout_idle = timedelta(
+            hours=max(1, memory_min_rollout_idle_hours)
+        )
+        self._memory_max_rollout_age = timedelta(days=max(1, memory_max_rollout_age_days))
         self._memory_pipeline = (
             MemoryPipeline(memory_store, provider)
             if memory_store is not None and provider is not None
             else None
         )
         self._memory_tasks: set[asyncio.Task[None]] = set()
+        self._memory_scan_lock = asyncio.Lock()
+        self._memory_scan_started_sessions: set[str] = set()
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
@@ -129,6 +136,17 @@ class SessionManager:
             )
         )
         return session
+
+    # 在后台安排一次历史 Session 扫描。
+    def _schedule_memory_scan(self, *, exclude_session_id: str) -> None:
+        if self._memory_pipeline is None:
+            return
+        task = asyncio.create_task(
+            self._scan_historical_sessions(exclude_session_id=exclude_session_id),
+            name="memory-phase1-scan",
+        )
+        self._memory_tasks.add(task)
+        task.add_done_callback(self._memory_tasks.discard)
 
     # 列出可恢复的 chat session，可选限制为指定工作区
     def list_sessions(self, workspace_root: str | None = None) -> list[Session]:
@@ -217,6 +235,10 @@ class SessionManager:
             if session.status == "closed":
                 raise HandlerError(SESSION_CLOSED, "session already closed")
 
+            memory_context = ""
+            if self._memory_store is not None and session.memory_use_enabled:
+                memory_context = self._memory_store.format_memory_summary()
+
             if session.status == "waiting_for_input":
                 await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
 
@@ -224,6 +246,9 @@ class SessionManager:
             await self._bus.publish(
                 SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
             )
+            if sid not in self._memory_scan_started_sessions:
+                self._memory_scan_started_sessions.add(sid)
+                self._schedule_memory_scan(exclude_session_id=sid)
 
             if not session.title:
                 session.title = content[:40]
@@ -262,45 +287,11 @@ class SessionManager:
                 "system_prompt_override": system_prompt_override,
                 "tool_whitelist": tool_whitelist,
             }
-            if self._memory_store is not None and session.memory_use_enabled:
-                memory_context = self._memory_store.format_relevant(
-                    content,
-                    workspace_root=session.workspace_root,
-                    session_id=session.id,
-                )
-                if memory_context:
-                    runner_kwargs["memory_context"] = memory_context
+            if memory_context:
+                runner_kwargs["memory_context"] = memory_context
             try:
-                outcome = await runner.run_and_capture(goal, **runner_kwargs)
+                await runner.run_and_capture(goal, **runner_kwargs)
 
-                if (
-                    self._memory_store is not None
-                    and session.memory_generate_enabled
-                    and outcome.status == "success"
-                ):
-                    transcript = self._store.read_messages(session.id)
-                    if self._memory_pipeline is not None:
-                        safe_transcript = sanitize_transcript(transcript)
-                        session.memory_source_hash = transcript_hash(safe_transcript)
-                        session.memory_generation_status = "running"
-                        self._persist_started_session(session)
-                        task = asyncio.create_task(
-                            self._run_memory_pipeline(
-                                session,
-                                run_id,
-                                safe_transcript,
-                            ),
-                            name=f"memory-pipeline-{session.id}",
-                        )
-                        self._memory_tasks.add(task)
-                        task.add_done_callback(self._memory_tasks.discard)
-                    else:
-                        log.warning(
-                            "memory generation enabled but no provider is available "
-                            "session_id=%s",
-                            session.id,
-                        )
-                        session.memory_generation_status = "failed"
             finally:
                 # 取消和异常也必须恢复 Session 状态并释放 async with lock。
                 session.updated_at = _now()
@@ -325,29 +316,18 @@ class SessionManager:
     async def _run_memory_pipeline(
         self,
         session: Session,
-        run_id: str,
+        run_id: str | None,
         transcript: list[dict[str, Any]],
     ) -> None:
         assert self._memory_pipeline is not None
         try:
-            count = await self._memory_pipeline.process_session(
+            await self._memory_pipeline.process_session(
                 session_id=session.id,
-                run_id=run_id,
                 transcript=transcript,
-                workspace_root=session.workspace_root,
             )
             session.last_memory_extracted_run_id = run_id
             session.memory_generation_status = "succeeded"
             self._persist_started_session(session)
-            if count:
-                await self._bus.publish(
-                    MemoryUpdatedEvent(
-                        session_id=session.id,
-                        run_id=run_id,
-                        count=count,
-                        ts=_now(),
-                    )
-                )
         except asyncio.CancelledError:
             session.memory_generation_status = "failed"
             self._persist_started_session(session)
@@ -356,6 +336,52 @@ class SessionManager:
             session.memory_generation_status = "failed"
             self._persist_started_session(session)
             log.exception("memory pipeline task failed session_id=%s run_id=%s", session.id, run_id)
+
+    # 扫描已空闲的历史 Session，并为有限数量的候选生成 rollout summary。
+    async def _scan_historical_sessions(
+        self, *, exclude_session_id: str | None = None
+    ) -> None:
+        if self._memory_pipeline is None or self._memory_scan_lock.locked():
+            return
+        async with self._memory_scan_lock:
+            now = datetime.now(UTC)
+            candidates: list[tuple[Session, list[dict[str, Any]]]] = []
+            for session in self.list_sessions():
+                if session.id == exclude_session_id or not session.memory_generate_enabled:
+                    continue
+                try:
+                    updated_at = datetime.fromisoformat(session.updated_at)
+                except ValueError:
+                    continue
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=UTC)
+                age = now - updated_at
+                if not self._memory_min_rollout_idle <= age <= self._memory_max_rollout_age:
+                    continue
+                transcript = self._store.read_messages(session.id)
+                source_hash = transcript_hash(sanitize_transcript(transcript))
+                if self._memory_store is not None and self._memory_store.is_rollout_summary_current(
+                    session.id, source_hash
+                ):
+                    continue
+                candidates.append((session, transcript))
+                if candidates:
+                    break
+            for session, transcript in candidates:
+                session.memory_generation_status = "running"
+                self._store.write_meta(session)
+                run_id = session.run_ids[-1] if session.run_ids else None
+                await self._run_memory_pipeline(
+                    session,
+                    run_id,
+                    transcript,
+                )
+            try:
+                await self._memory_pipeline.consolidate_if_needed()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("memory Phase 2 consolidation failed")
 
     async def wait_for_memory_tasks(self) -> None:
         """Wait for currently scheduled background memory tasks (primarily for shutdown/tests)."""

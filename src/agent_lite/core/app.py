@@ -316,12 +316,7 @@ class CoreApp:
             if store is not None
             else []
         )
-        raw_items = (
-            store.list_raw_items(session_id=cmd.session_id, limit=cmd.limit)
-            if store is not None
-            else []
-        )
-        return MemoryListResult(memories=memories, raw_items=raw_items)
+        return MemoryListResult(memories=memories)
 
     # 删除长期记忆，实际写入 tombstone
     async def _memory_delete_handler(self, params: dict[str, Any]) -> MemoryDeleteResult:
@@ -493,6 +488,8 @@ class CoreApp:
             memory_store=self._memory_store,
             memory_use_enabled=self._config.memory.use_enabled,
             memory_generate_enabled=self._config.memory.generate_enabled,
+            memory_min_rollout_idle_hours=self._config.memory.min_rollout_idle_hours,
+            memory_max_rollout_age_days=self._config.memory.max_rollout_age_days,
         )
 
         server = SocketServer(

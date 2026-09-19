@@ -202,8 +202,13 @@ class SpawnAgentTool(BaseTool):
                 )
             )
 
+        cancelled = False
         try:
             await child_loop.run(child_context)
+        except asyncio.CancelledError:
+            cancelled = True
+            if not child_context.is_done():
+                child_context.mark_failed("cancelled")
         finally:
             await child_registry.aclose()
 
@@ -215,6 +220,9 @@ class SpawnAgentTool(BaseTool):
                 ts=_now(),
             )
         )
+
+        if cancelled:
+            raise asyncio.CancelledError()
 
         if child_context.status == "success":
             return ToolResult(
@@ -238,8 +246,13 @@ class SpawnAgentTool(BaseTool):
         run_id: str,
         registry: ToolRegistry,
     ) -> None:
+        cancelled = False
         try:
             await loop.run(context)
+        except asyncio.CancelledError:
+            cancelled = True
+            if not context.is_done():
+                context.mark_failed("cancelled")
         finally:
             await registry.aclose()
         await self._parent_bus.publish(
@@ -250,6 +263,8 @@ class SpawnAgentTool(BaseTool):
                 ts=_now(),
             )
         )
+        if cancelled:
+            raise asyncio.CancelledError()
 
     # 构造子 registry；基于角色配置过滤工具，深度允许时注册嵌套 SpawnAgentTool
     def _build_child_registry(

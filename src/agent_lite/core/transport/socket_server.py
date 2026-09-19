@@ -75,7 +75,7 @@ class SocketServer:
             pass
 
         self._server = await asyncio.start_server(
-            self._handle_connection,  # 每当有新连接建立时，由事件循环调用此处理函数
+            self._handle_connection,  # 每当有新连接建立时，由事件循环调用此处理函数，生成一个新的协程，并将这个协程加入事件循环中执行
             host=self._host,
             port=self._port,
             limit=_MAX_LINE_BYTES,
@@ -108,7 +108,7 @@ class SocketServer:
         self._active_writers.add(writer)
         try:
             try:
-                await self._read_loop(reader, writer)
+                await self._read_loop(reader, writer)   # 理论上是一个循环，不断处理可能到来的请求
             except ConnectionError:
                 logger.debug("client disconnected during read: %s", peer)
             except OSError as exc:

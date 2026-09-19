@@ -12,9 +12,10 @@ class JsonRpcRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class EventPushEnvelope(BaseModel):
-    kind: Literal["event"] = "event"
-    event: dict[str, Any]  # Event.model_dump() 的序列化结果
+class JsonRpcNotification(BaseModel):
+    jsonrpc: Literal["2.0"] = "2.0"
+    method: str
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class JsonRpcSuccess(BaseModel):

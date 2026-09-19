@@ -56,10 +56,14 @@ async def test_replay_unified_session_log_filters_run_tree(tmp_path: Path) -> No
     )
 
     replayed = [
-        json.loads(line)["event"]
+        json.loads(line)["params"]
         for line in writer.data.decode().splitlines()
     ]
+    frames = [json.loads(line) for line in writer.data.decode().splitlines()]
     assert count == 4
+    assert all(frame["jsonrpc"] == "2.0" for frame in frames)
+    assert all(frame["method"] == "event.push" for frame in frames)
+    assert all("id" not in frame for frame in frames)
     assert [event["run_id"] for event in replayed] == [
         "run-one",
         "child-one",

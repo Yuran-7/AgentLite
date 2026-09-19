@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import time
+from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ from agent_lite.core.bus.commands import (
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
+    SessionCancelCommand,
+    SessionCancelResult,
     SessionCloseCommand,
     SessionCloseResult,
     SessionCompactCommand,
@@ -53,7 +56,7 @@ from agent_lite.core.bus.commands import (
     SessionSetWorkspaceResult,
     SessionSummary,
 )
-from agent_lite.core.bus.envelope import EventPushEnvelope
+from agent_lite.core.bus.envelope import JsonRpcNotification
 from agent_lite.core.config import AgentLiteConfig, get_config
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.factory import create_llm_provider
@@ -77,6 +80,12 @@ def _now() -> str:
     return datetime.datetime.now(UTC).isoformat()
 
 
+@dataclass(frozen=True)
+class _RunningRun:
+    session_id: str
+    task: asyncio.Task[str]
+
+
 class CoreApp:
     def __init__(self) -> None:
         self._start_time = time.monotonic()
@@ -84,7 +93,7 @@ class CoreApp:
         self._broadcaster: IpcEventBroadcaster | None = None
         self._trace: TraceWriter | None = None
         self._config: AgentLiteConfig | None = None
-        self._running_runs: set[asyncio.Task[Any]] = set()
+        self._running_runs: dict[str, _RunningRun] = {}
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
@@ -134,12 +143,34 @@ class CoreApp:
             workspace_root=cmd.workspace_root,
         )
         run_id = new_run_id()
-        run_task = asyncio.create_task(
-            self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
-        )
-        self._running_runs.add(run_task)
-        run_task.add_done_callback(self._running_runs.discard)
+        self._start_session_run(session.id, cmd.goal, run_id)
         return AgentRunResult(run_id=run_id)
+
+    # 创建独立的业务 Task 并按 run_id 登记，使 RPC Task 可以独立处理取消结果
+    def _start_session_run(
+        self,
+        session_id: str,
+        content: str,
+        run_id: str,
+    ) -> asyncio.Task[str]:
+        assert self._sessions is not None
+        task = asyncio.create_task(
+            self._sessions.send_message(session_id, content, run_id=run_id),
+            name=f"agent-run-{run_id}",
+        )
+        self._running_runs[run_id] = _RunningRun(session_id=session_id, task=task)
+
+        def _discard(_completed: asyncio.Future[str]) -> None:
+            self._discard_running_run(run_id, task)
+
+        task.add_done_callback(_discard)
+        return task
+
+    # 仅在登记的仍是同一 Task 时删除，避免延迟回调误删新 run
+    def _discard_running_run(self, run_id: str, task: asyncio.Task[str]) -> None:
+        running = self._running_runs.get(run_id)
+        if running is not None and running.task is task:
+            self._running_runs.pop(run_id, None)
 
     # 创建 chat 或 one_shot session，并返回 session_id
     async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
@@ -203,12 +234,31 @@ class CoreApp:
         )
         return SessionSetWorkspaceResult(workspace_root=workspace_root)
 
-    # 向 session 发送一条用户消息并同步等待对应 run 完成
+    # 向 session 发送消息；RPC Task 等待独立业务 Task，取消后仍能正常回包
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
         assert self._sessions is not None
         cmd = SessionSendMessageCommand.model_validate(params)
-        run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
+        run_id = new_run_id()
+        task = self._start_session_run(cmd.session_id, cmd.content, run_id)
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
         return SessionSendMessageResult(run_id=run_id)
+
+    # 按 run_id 取消当前 Agent 运行，不关闭 Session、TUI 或 Core
+    async def _session_cancel_handler(self, params: dict[str, Any]) -> SessionCancelResult:
+        cmd = SessionCancelCommand.model_validate(params)
+        running = self._running_runs.get(cmd.run_id)
+        if running is None or running.task.done():
+            return SessionCancelResult(run_id=cmd.run_id, accepted=False)
+        if running.session_id != cmd.session_id:
+            return SessionCancelResult(run_id=cmd.run_id, accepted=False)
+        if self._permission_manager is not None:
+            self._permission_manager.cancel_session(cmd.session_id, reason="run_cancelled")
+        running.task.cancel()
+        return SessionCancelResult(run_id=cmd.run_id, accepted=True)
 
     # 返回 session 的完整内部 messages 历史
     async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
@@ -370,8 +420,8 @@ class CoreApp:
             event_type: str = event.get("type", "")
             if not any(fnmatch.fnmatch(event_type, p) for p in topics):
                 continue
-            envelope = EventPushEnvelope(event=event)
-            writer.write(envelope.model_dump_json().encode() + b"\n")
+            notification = JsonRpcNotification(method="event.push", params=event)
+            writer.write(notification.model_dump_json().encode() + b"\n")
             count += 1
 
         if count:
@@ -461,6 +511,7 @@ class CoreApp:
         server.register("session.resume", self._session_resume_handler)
         server.register("session.set_workspace", self._session_set_workspace_handler)
         server.register("session.send_message", self._session_send_handler)
+        server.register("session.cancel", self._session_cancel_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.set_memory", self._session_set_memory_handler)
         server.register("session.set_stats", self._session_set_stats_handler)
@@ -471,41 +522,34 @@ class CoreApp:
         server.register("memory.list", self._memory_list_handler)
         server.register("memory.delete", self._memory_delete_handler)
 
-        self._shutdown = asyncio.Event()
+        shutdown = asyncio.Event()
+        self._shutdown = shutdown
         addr = await server.start()  # 启动监听；新连接由 SocketServer 的回调处理
         logger.info("agentlite-core %s listening addr=%s", agent_lite.__version__, addr)
         logger.info("config: %s", self._config)
 
         loop = asyncio.get_running_loop()  # 获取 asyncio.run 已启动的事件循环
-        async_signals: list[signal.Signals] = []
-        sync_signals: dict[signal.Signals, Any] = {}
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, self._shutdown.set)
-                async_signals.append(sig)
-            except NotImplementedError:
-                previous = signal.getsignal(sig)
-                signal.signal(
-                    sig,
-                    lambda _signum, _frame: loop.call_soon_threadsafe(
-                        self._shutdown.set  # type: ignore[union-attr]
-                    ),
-                )
-                sync_signals[sig] = previous
+        previous_signal_handlers = {
+            sig: signal.signal(
+                sig,
+                lambda _signum, _frame: loop.call_soon_threadsafe(shutdown.set),
+            )
+            for sig in (signal.SIGINT, signal.SIGTERM)
+        }
 
         try:
-            await self._shutdown.wait()  # 挂起当前协程，直到信号或 core.shutdown 触发事件
+            # 挂起主协程，直到信号或 core.shutdown 触发事件。
+            await shutdown.wait()
         finally:
-            for sig in async_signals:
-                loop.remove_signal_handler(sig)
-            for sig, previous in sync_signals.items():
+            for sig, previous in previous_signal_handlers.items():
                 signal.signal(sig, previous)
 
             logger.info("shutting down pid=%d", os.getpid())
-            for run_task in list(self._running_runs):
+            run_tasks = [running.task for running in self._running_runs.values()]
+            for run_task in run_tasks:
                 run_task.cancel()
             if self._running_runs:
-                await asyncio.gather(*self._running_runs, return_exceptions=True)
+                await asyncio.gather(*run_tasks, return_exceptions=True)
             if self._sessions is not None:
                 await self._sessions.wait_for_memory_tasks()
             if self._mcp_manager is not None:

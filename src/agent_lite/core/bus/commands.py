@@ -118,6 +118,17 @@ class SessionSendMessageResult(BaseModel):
     run_id: str
 
 
+class SessionCancelCommand(BaseModel):
+    type: Literal["session.cancel"] = "session.cancel"
+    session_id: str
+    run_id: str
+
+
+class SessionCancelResult(BaseModel):
+    run_id: str
+    accepted: bool
+
+
 class SessionGetHistoryCommand(BaseModel):
     type: Literal["session.get_history"] = "session.get_history"
     session_id: str
@@ -227,6 +238,7 @@ Command = Annotated[
     | SessionResumeCommand
     | SessionSetWorkspaceCommand
     | SessionSendMessageCommand
+    | SessionCancelCommand
     | SessionGetHistoryCommand
     | SessionCloseCommand
     | PermissionRespondCommand

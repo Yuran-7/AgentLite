@@ -27,8 +27,8 @@ def _run_started(run_id: str = "r1", session_id: str | None = None) -> RunStarte
     )
 
 
-# 功能：验证 subscribe 后 handle 将匹配 topic 的事件写入 writer，且内容是合法的 EventPushEnvelope
-# 设计：用 MagicMock writer 捕获写入的字节，反序列化后断言 kind 和 event.type，排除对网络层的依赖
+# 功能：验证 subscribe 后 handle 将匹配 topic 的事件写入 JSON-RPC Notification
+# 设计：用 MagicMock writer 捕获写入的字节，检查 event.push 的完整 wire 结构
 async def test_subscriber_receives_matching_event() -> None:
     broadcaster = IpcEventBroadcaster()
     writer = _make_writer()
@@ -38,8 +38,10 @@ async def test_subscriber_receives_matching_event() -> None:
 
     writer.write.assert_called_once()  # type: ignore[attr-defined]
     data = json.loads(writer.write.call_args[0][0].rstrip(b"\n"))  # type: ignore[attr-defined]
-    assert data["kind"] == "event"
-    assert data["event"]["type"] == "run.started"
+    assert data["jsonrpc"] == "2.0"
+    assert data["method"] == "event.push"
+    assert data["params"]["type"] == "run.started"
+    assert "id" not in data
 
 
 # 功能：验证无订阅时 handle 不向任何 writer 写入数据
@@ -68,7 +70,7 @@ async def test_topic_glob_matches_step_not_run() -> None:
 
     assert writer.write.call_count == 1  # type: ignore[attr-defined]
     data = json.loads(writer.write.call_args[0][0].rstrip(b"\n"))  # type: ignore[attr-defined]
-    assert data["event"]["type"] == "step.started"
+    assert data["params"]["type"] == "step.started"
 
 
 # 功能：验证 scope="global" 的订阅能收到任意 run_id 的事件

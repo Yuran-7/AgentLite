@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -85,6 +86,41 @@ async def test_shell_timeout() -> None:
     result = await ShellTool().invoke({"command": "sleep 5", "timeout": 1})
     assert result.is_error
     assert result.error_type == "timeout"
+
+
+# 功能：取消 shell 工具时必须终止并回收已启动的子进程
+# 设计：用可控假进程阻塞 communicate，取消 invoke 后断言 kill 被调用
+async def test_shell_cancellation_kills_child_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Process:
+        def __init__(self) -> None:
+            self.killed = False
+            self.returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, None]:
+            if not self.killed:
+                await asyncio.Event().wait()
+            return b"", None
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -1
+
+    process = _Process()
+
+    async def _create_process(*_args: object, **_kwargs: object) -> _Process:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create_process)
+    task = asyncio.create_task(ShellTool().invoke({"command": "long-running"}))
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.killed
 
 
 # 功能：验证 stderr 被合并到 stdout 输出中

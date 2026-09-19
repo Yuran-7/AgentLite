@@ -270,52 +270,56 @@ class SessionManager:
                 )
                 if memory_context:
                     runner_kwargs["memory_context"] = memory_context
-            outcome = await runner.run_and_capture(goal, **runner_kwargs)
+            try:
+                outcome = await runner.run_and_capture(goal, **runner_kwargs)
 
-            if (
-                self._memory_store is not None
-                and session.memory_generate_enabled
-                and outcome.status == "success"
-            ):
-                transcript = self._store.read_messages(session.id)
-                if self._memory_pipeline is not None:
-                    safe_transcript = sanitize_transcript(transcript)
-                    session.memory_source_hash = transcript_hash(safe_transcript)
-                    session.memory_generation_status = "running"
-                    self._persist_started_session(session)
-                    task = asyncio.create_task(
-                        self._run_memory_pipeline(
-                            session,
-                            run_id,
-                            safe_transcript,
-                        ),
-                        name=f"memory-pipeline-{session.id}",
+                if (
+                    self._memory_store is not None
+                    and session.memory_generate_enabled
+                    and outcome.status == "success"
+                ):
+                    transcript = self._store.read_messages(session.id)
+                    if self._memory_pipeline is not None:
+                        safe_transcript = sanitize_transcript(transcript)
+                        session.memory_source_hash = transcript_hash(safe_transcript)
+                        session.memory_generation_status = "running"
+                        self._persist_started_session(session)
+                        task = asyncio.create_task(
+                            self._run_memory_pipeline(
+                                session,
+                                run_id,
+                                safe_transcript,
+                            ),
+                            name=f"memory-pipeline-{session.id}",
+                        )
+                        self._memory_tasks.add(task)
+                        task.add_done_callback(self._memory_tasks.discard)
+                    else:
+                        log.warning(
+                            "memory generation enabled but no provider is available "
+                            "session_id=%s",
+                            session.id,
+                        )
+                        session.memory_generation_status = "failed"
+            finally:
+                # 取消和异常也必须恢复 Session 状态并释放 async with lock。
+                session.updated_at = _now()
+                session.last_chat_at = session.updated_at
+                if session.mode == "one_shot":
+                    session.status = "closed"
+                    await self._bus.publish(
+                        SessionClosedEvent(session_id=sid, ts=session.updated_at)
                     )
-                    self._memory_tasks.add(task)
-                    task.add_done_callback(self._memory_tasks.discard)
                 else:
-                    log.warning(
-                        "memory generation enabled but no provider is available "
-                        "session_id=%s",
-                        session.id,
+                    session.status = "waiting_for_input"
+                    await self._bus.publish(
+                        SessionWaitingForInputEvent(
+                            session_id=sid,
+                            last_run_id=run_id,
+                            ts=session.updated_at,
+                        )
                     )
-                    session.memory_generation_status = "failed"
-
-            session.updated_at = _now()
-            session.last_chat_at = session.updated_at
-            if session.mode == "one_shot":
-                session.status = "closed"
-                await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
-            else:
-                session.status = "waiting_for_input"
-                await self._bus.publish(
-                    SessionWaitingForInputEvent(
-                        session_id=sid,
-                        last_run_id=run_id,
-                        ts=session.updated_at,
-                    )
-                )
-            self._store.write_meta(session)
+                self._store.write_meta(session)
             return run_id
 
     async def _run_memory_pipeline(

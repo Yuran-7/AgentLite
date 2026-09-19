@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -11,6 +12,7 @@ from agent_lite.core.bus.envelope import JsonRpcRequest
 type EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024  # 64 MB per frame，兼容 MCP 大文件工具结果
+logger = logging.getLogger(__name__)
 
 
 class IpcError(RuntimeError):
@@ -84,23 +86,55 @@ class SocketClient:
     # 解析单行消息并路由到 pending future（RPC 响应）或 event handler（服务器推送）
     async def _dispatch(self, line: bytes) -> None:
         try:
-            msg: dict[str, Any] = json.loads(line)
+            raw: Any = json.loads(line)
         except json.JSONDecodeError:
+            logger.warning("invalid JSON-RPC message: malformed JSON")
             return
 
-        if "jsonrpc" in msg:
-            req_id: str | None = msg.get("id")
-            if req_id and req_id in self._pending:
-                fut = self._pending.pop(req_id)
-                if not fut.done():
-                    if "error" in msg:
-                        err = msg["error"]
-                        fut.set_exception(
-                            IpcError(err.get("code", -1), err.get("message", "unknown"))
-                        )
-                    else:
-                        fut.set_result(msg.get("result") or {})
-        elif msg.get("kind") == "event":
-            event_data: dict[str, Any] = msg.get("event", {})
+        if not isinstance(raw, dict) or raw.get("jsonrpc") != "2.0":
+            logger.warning("invalid JSON-RPC message: expected version 2.0 object")
+            return
+
+        msg: dict[str, Any] = raw
+        if "method" in msg and "id" not in msg:
+            method = msg.get("method")
+            if method != "event.push":
+                logger.warning("unknown notification method: %s", method)
+                return
+            params = msg.get("params")
+            if params is None:
+                params = {}
+            if not isinstance(params, dict):
+                logger.warning("invalid event.push notification: params must be an object")
+                return
+            event_data: dict[str, Any] = params
             for handler in self._event_handlers:
-                await handler(event_data)
+                try:
+                    await handler(event_data)
+                except Exception:
+                    logger.exception("event.push handler failed")
+            return
+
+        has_result = "result" in msg
+        has_error = "error" in msg
+        if "id" in msg and "method" not in msg and has_result != has_error:
+            req_id = msg.get("id")
+            if not isinstance(req_id, str):
+                logger.warning("invalid JSON-RPC response: id must be a string")
+                return
+            fut = self._pending.pop(req_id, None)
+            if fut is None or fut.done():
+                return
+            if has_error:
+                err = msg["error"]
+                if not isinstance(err, dict):
+                    fut.set_exception(IpcError(-1, "invalid error response"))
+                    return
+                fut.set_exception(
+                    IpcError(err.get("code", -1), err.get("message", "unknown"))
+                )
+            else:
+                fut.set_result(msg.get("result") or {})
+            return
+
+        logger.warning("invalid JSON-RPC message structure")

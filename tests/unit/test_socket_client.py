@@ -79,9 +79,8 @@ async def test_send_command_raises_ipc_error() -> None:
         await client.close()
 
 
-# 功能：验证 server 推送 kind=event 的消息时，on_event 注册的 handler 能收到 event 字典
-# 设计：server 先返回 RPC 响应（解除 send_command 的等待），再推送事件；用 asyncio.Event 等待 handler 被调用，
-#       避免 sleep 轮询；断言 event 内容中的 type 字段是否正确
+# 功能：验证 Response 与 event.push Notification 在同一连接交错到达时能正确分发
+# 设计：server 先推送无 id 的 Notification，再返回带 id 的 Response，分别验证 handler 和 Future
 async def test_event_push_routed_to_handler() -> None:
     received_events: list[dict[str, Any]] = []
     push_done = asyncio.Event()
@@ -89,10 +88,14 @@ async def test_event_push_routed_to_handler() -> None:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         line = await reader.readline()
         req = json.loads(line)
+        push = {
+            "jsonrpc": "2.0",
+            "method": "event.push",
+            "params": {"type": "run.started", "run_id": "r1", "session_id": "s1"},
+        }
+        writer.write(json.dumps(push).encode() + b"\n")
         resp = {"jsonrpc": "2.0", "id": req["id"], "result": {"subscription_id": "sub-1"}}
         writer.write(json.dumps(resp).encode() + b"\n")
-        push = {"kind": "event", "event": {"type": "run.started", "run_id": "r1"}}
-        writer.write(json.dumps(push).encode() + b"\n")
         await writer.drain()
         writer.close()
         await writer.wait_closed()
@@ -116,10 +119,83 @@ async def test_event_push_routed_to_handler() -> None:
         await asyncio.wait_for(push_done.wait(), timeout=2.0)
 
         assert len(received_events) == 1
-        assert received_events[0]["type"] == "run.started"
+        assert received_events[0] == {
+            "type": "run.started",
+            "run_id": "r1",
+            "session_id": "s1",
+        }
 
         await loop_task
         await client.close()
+
+
+# 功能：验证 Notification 只走事件 handler，不会创建或完成 pending Future
+# 设计：预先放入一个 pending Future，直接分发无 id 通知后检查它仍未完成
+async def test_notification_does_not_touch_pending_future() -> None:
+    client = SocketClient("127.0.0.1", 1)
+    future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    client._pending["request-1"] = future  # type: ignore[attr-defined]
+    received: list[dict[str, Any]] = []
+
+    async def collect(event_data: dict[str, Any]) -> None:
+        received.append(event_data)
+
+    client.on_event(collect)
+    await client._dispatch(  # type: ignore[attr-defined]
+        b'{"jsonrpc":"2.0","method":"event.push","params":{"type":"llm.token"}}\n'
+    )
+
+    assert received == [{"type": "llm.token"}]
+    assert client._pending == {"request-1": future}  # type: ignore[attr-defined]
+    assert not future.done()
+    future.cancel()
+
+
+# 功能：未知 Notification 只记录警告，并且不影响后续合法 event.push
+# 设计：连续分发未知和已知通知，检查日志及 handler 最终只收到合法事件
+async def test_unknown_notification_is_logged_and_next_message_is_processed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = SocketClient("127.0.0.1", 1)
+    received: list[dict[str, Any]] = []
+
+    async def collect(event_data: dict[str, Any]) -> None:
+        received.append(event_data)
+
+    client.on_event(collect)
+    with caplog.at_level(
+        "WARNING", logger="agent_lite.core.transport.socket_client"
+    ):
+        await client._dispatch(  # type: ignore[attr-defined]
+            b'{"jsonrpc":"2.0","method":"server.unknown","params":{}}\n'
+        )
+        await client._dispatch(  # type: ignore[attr-defined]
+            b'{"jsonrpc":"2.0","method":"event.push","params":{"type":"run.finished"}}\n'
+        )
+
+    assert "unknown notification method: server.unknown" in caplog.text
+    assert received == [{"type": "run.finished"}]
+
+
+# 功能：验证错误版本、非对象及非对象 params 都被丢弃，缺省 params 则视为空对象
+# 设计：集中覆盖协议边界，断言只有缺省 params 的合法 Notification 触发 handler
+async def test_invalid_notifications_are_ignored_and_missing_params_is_empty_object() -> None:
+    client = SocketClient("127.0.0.1", 1)
+    received: list[dict[str, Any]] = []
+
+    async def collect(event_data: dict[str, Any]) -> None:
+        received.append(event_data)
+
+    client.on_event(collect)
+    for frame in (
+        b'[]\n',
+        b'{"jsonrpc":"1.0","method":"event.push","params":{}}\n',
+        b'{"jsonrpc":"2.0","method":"event.push","params":[]}\n',
+        b'{"jsonrpc":"2.0","method":"event.push"}\n',
+    ):
+        await client._dispatch(frame)  # type: ignore[attr-defined]
+
+    assert received == [{}]
 
 
 # 功能：验证 server 关闭连接后 run_event_loop 正常退出（不挂起）

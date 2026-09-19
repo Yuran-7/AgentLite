@@ -821,7 +821,7 @@ class AgentLiteTuiApp(App[None]):
 
     TITLE = "AgentLite"
     BINDINGS = [
-        Binding("ctrl+c", "quit", "quit", priority=True),
+        Binding("ctrl+c", "cancel_run", "stop / quit", priority=True),
     ]
     CSS = """
     Screen { background: $background; }
@@ -858,7 +858,7 @@ class AgentLiteTuiApp(App[None]):
         "[bold cyan]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██║     ██║   ██║   ██╔══╝  [/bold cyan]\n"
         "[bold cyan]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████╗██║   ██║   ███████╗[/bold cyan]\n"
         "[bold cyan]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝   ╚═╝   ╚══════╝[/bold cyan]\n"
-        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
+        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 停止/退出[/dim]"
     )
 
     # 初始化连接参数和 TUI 内部状态
@@ -886,6 +886,8 @@ class AgentLiteTuiApp(App[None]):
         self._plan_blocks: dict[str, PlanBlock] = {}
         self._session_id: str | None = None
         self._busy = False
+        self._current_run_id: str | None = None
+        self._cancel_requested = False
         self._last_context_pct: float = 0.0
         self._last_usage: tuple[int, int, int] = (0, 0, 0)
         self._rounds = 0
@@ -1021,6 +1023,46 @@ class AgentLiteTuiApp(App[None]):
                 self._append(Static("[yellow]warning: failed to close session[/yellow]"))
         self.exit()
 
+    # 运行期间 Ctrl+C 只取消当前 run；空闲时保持原有退出行为
+    async def action_cancel_run(self) -> None:
+        if not self._busy:
+            await self.action_quit()
+            return
+        if (
+            self._client is None
+            or self._session_id is None
+            or self._current_run_id is None
+            or self._cancel_requested
+        ):
+            return
+
+        session_id = self._session_id
+        run_id = self._current_run_id
+        self._cancel_requested = True
+        prompt = self._prompt()
+        if prompt is not None:
+            prompt.disabled = True
+            prompt.border_title = "stopping agent..."
+        self._update_header("stopping")
+        self._append(Static("[yellow]■ stopping current run...[/yellow]", classes="log-line"))
+        try:
+            result = await self._client.send_command(
+                "session.cancel",
+                {"session_id": session_id, "run_id": run_id},
+            )
+            if not result.get("accepted", False):
+                self._cancel_requested = False
+                if self._busy and self._current_run_id == run_id:
+                    if prompt is not None:
+                        prompt.border_title = "agent is working..."
+                    self._update_header("running")
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._cancel_requested = False
+            if prompt is not None:
+                prompt.border_title = "agent is working..."
+            self._update_header("running")
+            self._append(Static(f"[red]cancel error: {exc}[/red]", classes="log-line"))
+
     # 将输入框提交内容发送给当前 chat session；用 worker 发送，避免 await 阻塞 App 消息泵
     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         content = event.value.strip()
@@ -1071,6 +1113,8 @@ class AgentLiteTuiApp(App[None]):
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
         self._busy = True
+        self._current_run_id = None
+        self._cancel_requested = False
         prompt = event.text_area
         prompt.text = ""
         prompt.disabled = True
@@ -1457,6 +1501,8 @@ class AgentLiteTuiApp(App[None]):
             )
         except (IpcError, RuntimeError, OSError) as e:
             self._busy = False
+            self._current_run_id = None
+            self._cancel_requested = False
             prompt = self._prompt()
             if prompt is not None:
                 prompt.disabled = False
@@ -1835,7 +1881,28 @@ class AgentLiteTuiApp(App[None]):
             session_id = str(event.get("session_id") or "")
             if session_id and session_id != self._session_id:
                 return
+            last_run_id = str(event.get("last_run_id") or "")
+            if (
+                self._current_run_id is not None
+                and last_run_id
+                and last_run_id != self._current_run_id
+            ):
+                return
+            was_cancelled = self._cancel_requested
             self._busy = False
+            self._current_run_id = None
+            self._cancel_requested = False
+            if was_cancelled:
+                for tool_block in self._pending_tool_blocks.values():
+                    tool_block.set_result("cancelled", 0, is_error=True)
+                self._pending_tool_blocks.clear()
+                for permission_block in self._pending_permission_blocks.values():
+                    permission_block._resolve("cancelled")
+                self._pending_permission_blocks.clear()
+                try:
+                    self.query_one(PermissionSelect).remove()
+                except Exception:
+                    pass
             prompt = self._prompt()
             if prompt is not None:
                 prompt.disabled = False
@@ -1858,7 +1925,10 @@ class AgentLiteTuiApp(App[None]):
             self._update_header("disconnected")
 
         elif t == "run.started":
-            run_id = event.get("run_id", "")
+            run_id = str(event.get("run_id") or "")
+            session_id = str(event.get("session_id") or "")
+            if self._busy and (not session_id or session_id == self._session_id):
+                self._current_run_id = run_id
             goal = event.get("goal", "")
             self._append(Static(
                 f"[dim]run[/dim]  [cyan]{run_id}[/cyan]  [dim]{_preview(goal, 96)}[/dim]",
@@ -1972,13 +2042,20 @@ class AgentLiteTuiApp(App[None]):
 
         elif t == "run.finished":
             run_id = str(event.get("run_id") or "")
+            if self._current_run_id is not None and run_id != self._current_run_id:
+                return
             status = event.get("status", "")
             steps = int(event.get("steps") or 0)
             reason = event.get("reason") or ""
             if run_id not in self._subagent_run_ids:
                 self._rounds += 1
                 self._steps += steps
-            if status == "success":
+            if reason == "cancelled":
+                self._append(Static(
+                    f"[bold yellow]■ stopped[/bold yellow]  [dim]{steps} steps[/dim]",
+                    classes="run-err",
+                ))
+            elif status == "success":
                 self._append(Static(
                     f"[bold green]✓ completed[/bold green]  [dim]{steps} steps[/dim]",
                     classes="run-ok",

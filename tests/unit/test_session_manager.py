@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,17 @@ class _Runner:
             run_id,
         )
         return RunOutcome(status="success", result="done", reason=None)
+
+
+class _BlockingRunner:
+    def __init__(self, started: asyncio.Event) -> None:
+        self._started = started
+
+    # 持续等待，使测试可在确定 run 已进入后取消 Task
+    async def run_and_capture(self, goal: str, **_kwargs: object) -> RunOutcome:
+        self._started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 # 功能：验证 create 只创建内存 session，首次消息后才写入 meta
@@ -176,6 +188,36 @@ async def test_send_message_chat_enters_waiting_and_writes_thread(tmp_path: Path
     messages = store.read_messages(session.id)
     assert messages[0] == {"role": "user", "content": "hello"}
     assert messages[1]["role"] == "assistant"
+
+
+# 功能：取消正在执行的 run 后 Session 仍恢复 waiting_for_input 并持久化
+# 设计：取消阻塞 runner 的 Task，同时检查状态、最后事件及会话锁已释放
+async def test_cancelled_run_restores_session_and_releases_lock(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    events: list[object] = []
+    bus = EventBus()
+
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    bus.subscribe(collect)
+    store = SessionStore(tmp_path)
+    manager = SessionManager(store, lambda: _BlockingRunner(started), bus)  # type: ignore[arg-type]
+    session = await manager.create("chat")
+    task = asyncio.create_task(
+        manager.send_message(session.id, "stop me", run_id="run-cancel")
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert session.status == "waiting_for_input"
+    assert store.read_meta(session.id).status == "waiting_for_input"
+    assert events[-1].type == "session.waiting_for_input"  # type: ignore[attr-defined]
+    assert events[-1].last_run_id == "run-cancel"  # type: ignore[attr-defined]
+    assert not manager._locks[session.id].locked()  # type: ignore[attr-defined]
 
 
 # 功能：验证 one_shot session 在单次消息完成后自动 closed

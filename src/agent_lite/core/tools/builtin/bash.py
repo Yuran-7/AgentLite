@@ -127,6 +127,10 @@ class ShellTool(BaseTool):
                 stdout_bytes, _ = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout
                 )
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.communicate()
+                raise
             except TimeoutError:
                 proc.kill()
                 await proc.communicate()

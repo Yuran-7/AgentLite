@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel
 
 from agent_lite.core.config import AgentLiteConfig
@@ -76,6 +78,25 @@ class _CapturingProvider:
         return self.response
 
 
+class _BlockingProvider:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def chat(
+        self,
+        messages: list[dict[str, object]],
+        tool_schemas: list[dict[str, object]],
+        bus: EventBus,
+        run_id: str,
+        *,
+        step: int = 0,
+        system: str | None = None,
+    ) -> LlmResponse:
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 # --- helpers -----------------------------------------------------------------
 
 
@@ -143,6 +164,39 @@ async def test_run_finished_event_published_on_max_steps(tmp_path: Path) -> None
     finished = next(e for e in events if e.type == "run.finished")  # type: ignore[attr-defined]
     assert finished.status == "failed"  # type: ignore[attr-defined]
     assert finished.reason == "exceeded_max_steps"  # type: ignore[attr-defined]
+
+
+# 功能：取消 AgentRunner 时仍发布并持久化 run.finished(failed/cancelled)
+# 设计：在 provider.chat 的 await 点取消 Task，同时检查事件总线和 events.jsonl
+async def test_cancelled_run_publishes_and_persists_finished_event(tmp_path: Path) -> None:
+    provider = _BlockingProvider()
+    events: list[BaseModel] = []
+
+    async def collect(event: BaseModel) -> None:
+        events.append(event)
+
+    runner = AgentRunner(
+        _config(),
+        provider=provider,  # type: ignore[arg-type]
+        extra_handlers=[collect],
+        events_file=tmp_path / "events.jsonl",
+    )
+    task = asyncio.create_task(runner.run("cancel me", run_id="run-cancel"))
+    await provider.started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    finished = next(e for e in events if e.type == "run.finished")  # type: ignore[attr-defined]
+    assert finished.status == "failed"  # type: ignore[attr-defined]
+    assert finished.reason == "cancelled"  # type: ignore[attr-defined]
+    persisted = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert persisted[-1]["type"] == "run.finished"
+    assert persisted[-1]["reason"] == "cancelled"
 
 
 # 功能：验证 events.jsonl 第一行为 run.started、最后一行为 run.finished

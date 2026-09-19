@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from agent_lite.core.bus.commands import CoreShutdownCommand, PingCommand, PongResult
+from agent_lite.core.bus.commands import (
+    CoreShutdownCommand,
+    PingCommand,
+    PongResult,
+    SessionCancelCommand,
+    SessionCancelResult,
+)
 from agent_lite.core.bus.events import CoreStartedEvent
 
 
@@ -29,6 +35,18 @@ def test_core_shutdown_command_roundtrip() -> None:
     cmd = CoreShutdownCommand()
     restored = CoreShutdownCommand.model_validate_json(cmd.model_dump_json())
     assert restored.type == "core.shutdown"
+
+
+# 功能：验证 session.cancel 命令通过 session_id 和 run_id 精确定位运行
+# 设计：往返序列化命令与响应，锁定 Ctrl+C 取消的 IPC 合约
+def test_session_cancel_command_and_result_roundtrip() -> None:
+    command = SessionCancelCommand(session_id="session-1", run_id="run-1")
+    restored = SessionCancelCommand.model_validate_json(command.model_dump_json())
+    result = SessionCancelResult(run_id=restored.run_id, accepted=True)
+
+    assert restored.type == "session.cancel"
+    assert restored.session_id == "session-1"
+    assert result.model_dump() == {"run_id": "run-1", "accepted": True}
 
 
 # 功能：验证缺少必填 client 字段时 pydantic 校验失败

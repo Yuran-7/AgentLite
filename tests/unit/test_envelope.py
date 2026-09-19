@@ -5,10 +5,28 @@ from pydantic import ValidationError
 
 from agent_lite.core.bus.envelope import (
     PARSE_ERROR,
+    JsonRpcNotification,
     JsonRpcRequest,
     JsonRpcSuccess,
     make_error,
 )
+
+
+# 功能：验证 JSON-RPC Notification 序列化包含协议字段且绝不包含 id
+# 设计：直接检查 wire JSON，防止 Core 主动推送被误当成需要响应的 Request
+def test_notification_wire_shape_has_no_id() -> None:
+    notification = JsonRpcNotification(
+        method="event.push",
+        params={"type": "llm.token", "run_id": "r1", "token": "hello"},
+    )
+
+    data = notification.model_dump()
+    assert data == {
+        "jsonrpc": "2.0",
+        "method": "event.push",
+        "params": {"type": "llm.token", "run_id": "r1", "token": "hello"},
+    }
+    assert "id" not in JsonRpcNotification.model_fields
 
 
 # 功能：验证 JsonRpcRequest 序列化后再反序列化，所有字段值完整保留

@@ -666,13 +666,73 @@ async def test_tool_block_hover_and_chevron_toggle() -> None:
         assert str(chevron.content) == ">"
 
 
-# 功能：验证 TUI 使用 VS Code 终端可传递的 Ctrl+C 退出且具有应用级优先级
-# 设计：直接检查声明式绑定，防止退回会被 VS Code 截获的 Ctrl+Q 或被输入框覆盖
-def test_quit_binding_uses_priority_ctrl_c() -> None:
-    quit_bindings = [binding for binding in AgentLiteTuiApp.BINDINGS if binding.action == "quit"]
-    assert len(quit_bindings) == 1
-    assert quit_bindings[0].key == "ctrl+c"
-    assert quit_bindings[0].priority
+# 功能：验证 Ctrl+C 优先路由到“取消当前 run / 空闲退出”动作
+# 设计：直接检查应用级绑定，防止输入框抢走 Ctrl+C 或回退到直接 quit
+def test_cancel_binding_uses_priority_ctrl_c() -> None:
+    bindings = [
+        binding for binding in AgentLiteTuiApp.BINDINGS
+        if binding.action == "cancel_run"
+    ]
+    assert len(bindings) == 1
+    assert bindings[0].key == "ctrl+c"
+    assert bindings[0].priority
+
+
+# 功能：运行期间 Ctrl+C 发送 session.cancel，直到 Session ready 事件才恢复输入
+# 设计：驱动完整 TUI 状态机，验证 RPC 参数、停止文案和最终输入状态
+async def test_ctrl_c_cancels_current_run_without_exiting() -> None:
+    class _CancelClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        async def send_command(
+            self, method: str, params: dict[str, object]
+        ) -> dict[str, object]:
+            self.calls.append((method, params))
+            return {"run_id": params.get("run_id", ""), "accepted": True}
+
+    app = _ContextStatusHarness()
+    client = _CancelClient()
+
+    async with app.run_test(size=(100, 24)):
+        app._client = client  # type: ignore[assignment]
+        app._session_id = "session-1"  # type: ignore[attr-defined]
+        app._busy = True  # type: ignore[attr-defined]
+        app._current_run_id = "run-1"  # type: ignore[attr-defined]
+
+        await app.action_cancel_run()
+
+        assert client.calls == [
+            (
+                "session.cancel",
+                {"session_id": "session-1", "run_id": "run-1"},
+            )
+        ]
+        assert app._busy  # type: ignore[attr-defined]
+        assert app._cancel_requested  # type: ignore[attr-defined]
+        assert app.query_one("#prompt").disabled
+
+        app._handle_event({  # type: ignore[attr-defined]
+            "type": "run.finished",
+            "run_id": "run-1",
+            "status": "failed",
+            "reason": "cancelled",
+            "steps": 2,
+        })
+        assert app._busy  # type: ignore[attr-defined]
+
+        app._handle_event({  # type: ignore[attr-defined]
+            "type": "session.waiting_for_input",
+            "session_id": "session-1",
+            "last_run_id": "run-1",
+        })
+
+        assert not app._busy  # type: ignore[attr-defined]
+        assert app._current_run_id is None  # type: ignore[attr-defined]
+        assert not app._cancel_requested  # type: ignore[attr-defined]
+        assert not app.query_one("#prompt").disabled
+        rendered = " ".join(str(widget.content) for widget in app.query("#log-view Static"))
+        assert "stopped" in rendered
 
 
 # 功能：验证提交用户输入时会追加 user turn，并进入 busy 状态

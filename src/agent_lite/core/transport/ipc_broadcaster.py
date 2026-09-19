@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
-from agent_lite.core.bus.envelope import EventPushEnvelope
+from agent_lite.core.bus.envelope import JsonRpcNotification
 from agent_lite.core.trace.record import TraceRecord
 from agent_lite.core.trace.writer import TraceWriter
 
@@ -54,6 +54,8 @@ class IpcEventBroadcaster:
     # 将事件推送到所有匹配的订阅客户端，写入失败时延迟清理死连接
     async def handle(self, event: BaseModel) -> None:
         event_dict = event.model_dump()
+        notification = JsonRpcNotification(method="event.push", params=event_dict)
+        frame = notification.model_dump_json().encode() + b"\n"
         event_type: str = event_dict.get("type", "")
         run_id: str | None = event_dict.get("run_id")
         session_id: str | None = event_dict.get("session_id")
@@ -77,8 +79,7 @@ class IpcEventBroadcaster:
             if not self._matches_scope(run_id, session_id, sub.scope):
                 continue
             try:
-                envelope = EventPushEnvelope(event=event_dict)
-                sub.writer.write(envelope.model_dump_json().encode() + b"\n")
+                sub.writer.write(frame)
                 await sub.writer.drain()
                 if self._trace is not None:
                     client_id = str(sub.writer.get_extra_info("peername", "<unknown>"))

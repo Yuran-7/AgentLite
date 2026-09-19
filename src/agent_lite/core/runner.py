@@ -259,6 +259,8 @@ class AgentRunner:
                 if not context.is_done():
                     context.mark_failed("llm_error")
             finally:
+                if cancelled:
+                    await self._task_registry.cancel_all()
                 if registry is not None:
                     await registry.aclose()
 

@@ -27,6 +27,7 @@ from agent_lite.core.session.store import SessionStore
 from agent_lite.core.subagent.registry import BackgroundTaskRegistry
 from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from agent_lite.core.tools.builtin import (
+    CosilLocalizeTool,
     ListDirTool,
     ReadFileTool,
     ShellTool,
@@ -118,6 +119,8 @@ class AgentRunner:
         if bus is not None and run_id is not None and _ok("update_plan"):
             registry.register(UpdatePlanTool(bus, run_id))
         if provider is not None and bus is not None and run_id is not None:
+            if _ok("cosil_localize") and workspace_root is not None:
+                registry.register(CosilLocalizeTool(provider, bus, run_id, workspace_root))
             if _ok("spawn_agent"):
                 registry.register(
                     SpawnAgentTool(
@@ -202,7 +205,8 @@ class AgentRunner:
         # 4. session 汇总写入根 events.jsonl；独立 run 写入单一事件文件
         async with AsyncExitStack() as stack:
             if session is not None and store is not None:
-                EventAppender(store.events_file(session.id)).subscribe(bus) # 使用tui的情况下一般调用的是这个
+                # 使用 TUI 时通常走这个分支。
+                EventAppender(store.events_file(session.id)).subscribe(bus)
             else:
                 writer = await stack.enter_async_context(EventWriter(self._events_file))
                 writer.subscribe(bus)

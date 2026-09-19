@@ -146,6 +146,36 @@ OpenAI-compatible 协议使用 Chat Completions；Anthropic-compatible 协议使
   `agent.subagent_allowed_tools`，再加入对应 `.agentlite/agents/<role>.toml` 的
   `allowed_tools`；两层取交集。匿名子 Agent 只受全局能力上限约束。
 
+### CoSIL 风格代码定位
+
+根 Agent 在 session 设置了工作区后会获得 `cosil_localize` 工具。它面向 Python
+仓库，把 CoSIL 的两阶段思路适配为一次 AgentLite 工具调用：
+
+1. 解析 Python AST，并把仓库结构缓存到
+   `.agentlite/cosil/repo_structures/<instance-id>.json`；
+2. 根据 issue 和仓库结构初选文件；
+3. 用静态 import 关系加入一跳依赖与反向依赖，再让模型反思重排；
+4. 在候选文件中迭代读取类、方法和顶层函数；
+5. 每段源码使用独立模型上下文做相关性剪枝，最后汇总文件与符号位置。
+
+典型参数：
+
+```json
+{
+  "issue": "Configuration loading fails when an optional section is missing",
+  "top_k_files": 5,
+  "top_k_symbols": 10,
+  "max_rounds": 6,
+  "include_tests": false,
+  "refresh_structure": false
+}
+```
+
+工具固定使用当前 session 的 workspace，不接受任意仓库路径。结构指纹未变化时复用缓存；
+需要强制重建时设置 `refresh_structure=true`。一次调用会产生多次 LLM 请求，因此应只用于
+措辞或位置未知、需要跨文件和函数级定位的问题；精确标识符仍优先使用 `rg`。当前结构分析
+与源码工具聚焦 Python，其他语言文件不会进入候选集。
+
 ---
 
 ## 开发

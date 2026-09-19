@@ -70,6 +70,7 @@ _PREVIEW_KEY: dict[str, str] = {
     "list_dir":   "path",
     "web_search": "query",
     "web_fetch":  "url",
+    "cosil_localize": "issue",
 }
 _PREVIEW_MAX = 60
 

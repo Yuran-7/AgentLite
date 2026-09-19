@@ -18,3 +18,4 @@ uv.lock
 workspace/
 # Legacy/project override session storage; the default is ~/.agentlite/sessions/.
 .agentlite/sessions/
+.agentlite/cosil/

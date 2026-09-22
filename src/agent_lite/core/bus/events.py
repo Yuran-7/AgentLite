@@ -231,6 +231,21 @@ class SubagentFinishedEvent(BaseModel):
     ts: str
 
 
+class TaskNotificationQueuedEvent(BaseModel):
+    type: Literal["task.notification_queued"] = "task.notification_queued"
+    session_id: str
+    task_id: str
+    ts: str
+
+
+class TaskNotificationDeliveredEvent(BaseModel):
+    type: Literal["task.notification_delivered"] = "task.notification_delivered"
+    session_id: str
+    task_id: str
+    run_id: str
+    ts: str
+
+
 class SkillInvokedEvent(BaseModel):
     type: Literal["skill.invoked"] = "skill.invoked"
     skill_name: str
@@ -272,6 +287,8 @@ Event = Annotated[
     | PermissionDeniedEvent
     | SubagentStartedEvent
     | SubagentFinishedEvent
+    | TaskNotificationQueuedEvent
+    | TaskNotificationDeliveredEvent
     | SkillInvokedEvent,
     Discriminator("type"),
 ]

@@ -1,4 +1,4 @@
-from agent_lite.core.subagent.registry import BackgroundTaskRegistry
-from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
+from agent_lite.core.subagent.registry import SubagentTaskManager, SubagentTaskRecord
+from agent_lite.core.subagent.tool import SpawnAgentTool
 
-__all__ = ["BackgroundTaskRegistry", "SpawnAgentTool", "AgentResultTool"]
+__all__ = ["SubagentTaskManager", "SubagentTaskRecord", "SpawnAgentTool"]

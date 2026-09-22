@@ -37,6 +37,9 @@ class SessionStore:
     def events_file(self, sid: str) -> Path:
         return self.session_dir(sid) / "events.jsonl"
 
+    def tasks_dir(self, sid: str) -> Path:
+        return self.session_dir(sid) / "tasks"
+
     # 将 session meta 写入 meta.json
     def write_meta(self, session: Session) -> None:
         path = self.session_dir(session.id)
@@ -107,10 +110,16 @@ class SessionStore:
         role: str,
         content: MessageContent,
         run_id: str | None = None,
+        kind: str = "chat",
+        notification_id: str | None = None,
     ) -> None:
         row: dict[str, Any] = {"ts": _now(), "role": role, "content": content}
         if run_id is not None:
             row["run_id"] = run_id
+        if kind != "chat":
+            row["kind"] = kind
+        if notification_id is not None:
+            row["notification_id"] = notification_id
         path = self.session_dir(sid)
         path.mkdir(parents=True, exist_ok=True)
         with (path / "thread.jsonl").open("a", encoding="utf-8") as f:
@@ -129,6 +138,12 @@ class SessionStore:
                 role=str(msg["role"]),
                 content=msg["content"],
                 run_id=run_id,
+                kind=str(msg.get("kind", "chat")),
+                notification_id=(
+                    str(msg["notification_id"])
+                    if msg.get("notification_id") is not None
+                    else None
+                ),
             )
 
     # 读取完整 thread 并返回可直接传给 Anthropic 的 messages
@@ -160,6 +175,28 @@ class SessionStore:
         messages = self._trim_orphan_tool_use(messages)
         from agent_lite.core.compact.budget import truncate_tool_results
         return truncate_tool_results(messages)
+
+    def read_history_messages(self, sid: str) -> list[dict[str, Any]]:
+        path = self.session_dir(sid) / "thread.jsonl"
+        if not path.exists():
+            return []
+        messages: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("role") not in ("user", "assistant"):
+                continue
+            message = {"role": row["role"], "content": row.get("content", "")}
+            if "kind" in row:
+                message["kind"] = row["kind"]
+            if "notification_id" in row:
+                message["notification_id"] = row["notification_id"]
+            messages.append(message)
+        return messages
 
     # 裁掉尾部未配对 tool_use 以及其后的消息，避免 Anthropic messages.invalid
     def _trim_orphan_tool_use(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

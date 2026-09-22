@@ -159,7 +159,7 @@ await asyncio.create_subprocess_exec(
 
 ## 子 Agent 的启动方式
 
-多智能体能力通过 `spawn_agent` 工具触发。父 Agent 需要提供子任务描述和完整 prompt；子 Agent 不会自动读取父 Agent 的对话历史，因此 prompt 必须包含它所需的上下文。可选的 `subagent_type` 会加载对应角色配置，覆盖子 Agent 的 system prompt。
+多智能体能力通过 `spawn_agent` 工具触发。父 Agent 需要提供子任务描述和完整 prompt；子 Agent 不会自动读取父 Agent 的对话历史，因此 prompt 必须包含它所需的上下文。`subagent_type` 默认为 `general-purpose`，也可以选择内置的 `explore`、`plan` 或 Markdown 定义的自定义 Agent。
 
 ```text
 父 Agent
@@ -190,17 +190,37 @@ await asyncio.create_subprocess_exec(
 
 ## 上下文和工具隔离
 
-子 Agent 是“冷启动”执行：它使用新建的 `ExecutionContext`，初始目标是 `spawn_agent` 的 `prompt`，不继承父 Agent 的消息列表。子 Agent 会新建自己的 `ToolRegistry`，再根据全局配置和角色 profile 的 `allowed_tools` 过滤工具。
+子 Agent 是“冷启动”执行：它使用新建的 `ExecutionContext`，初始目标是 `spawn_agent` 的 `prompt`，不继承父 Agent 的消息列表。子 Agent 会新建自己的 `ToolRegistry`，再根据全局上限、Agent 的 `tools` 白名单和 `disallowedTools` 黑名单过滤工具。
 
-默认情况下，子 Agent 可以使用文件、shell、计划、再次派生子 Agent 和查询后台结果等工具；实际可用工具不能超过 `agent.subagent_allowed_tools` 设置的全局上限。角色 profile 只能进一步缩小权限，不能扩大这个上限。
+默认情况下，`general-purpose` 使用 `agent.subagent_allowed_tools` 设置的全局上限；`explore` 和 `plan` 是只读 Agent，不提供写文件、shell 或继续派生能力。自定义 Agent 只能进一步缩小权限，不能扩大全局上限。
 
 虽然子 Agent 有独立的执行上下文，但它复用父 session 的 `PermissionManager` 和 `session_id`。因此子 Agent 的工具调用仍然要经过权限检查，`always` 决策也属于同一个 session 的权限上下文。当前实现没有为子 Agent 提供独立的操作系统沙箱。
 
 ## 前台与后台执行
 
-`run_in_background=false` 时，父 Agent 会等待子 Agent 完成，然后直接获得子 Agent 的最终文本结果。`run_in_background=true` 时，工具立即返回 `run_id`，子 Agent 由 `asyncio.create_task` 在后台运行；父 Agent 后续通过 `agent_result(run_id)` 查询结果或等待其完成。
+`run_in_background=false` 时，父 Agent 会等待子 Agent 完成，然后直接获得子 Agent 的最终文本结果。`run_in_background=true` 时，工具立即返回稳定的 `task_id` 和绝对 `output_file` 路径，子 Agent 由 `asyncio.create_task` 在后台运行。
 
-后台子 Agent 由共享的 `BackgroundTaskRegistry` 管理，支持状态查询、超时等待和异常返回。前台和后台模式使用相同的子 Agent 创建流程，区别只在于父 Agent 是否等待执行结束。
+后台子 Agent 由 Core 生命周期内共享的 `SubagentTaskManager` 管理。任务结束后，管理器写入终态输出文件并自动投递 `<task-notification>`：父 run 尚在执行时在安全循环边界注入；父 run 已结束时则为所属 session 创建 continuation run。没有轮询结果工具，读取输出文件也不会消费或抑制通知。
+
+## 自定义 Agent
+
+用户级 Agent 放在 `~/.agentlite/agents/*.md`，项目级 Agent 放在 `<workspace>/.agentlite/agents/*.md`。同名定义按“项目 > 用户 > 内置”覆盖：
+
+```md
+---
+name: reviewer
+description: Review code changes for correctness and regressions
+tools: [read_file, list_dir, shell]
+disallowedTools: [write_file]
+model: inherit
+maxTurns: 12
+background: false
+---
+
+You are a code review specialist...
+```
+
+`tools` 和 `disallowedTools` 也接受逗号分隔字符串；`bash` 会规范化为 `shell`。`model: inherit` 复用父模型，其他值作为当前协议下的精确 model ID。非法或不支持的 frontmatter 字段会生成加载诊断，不影响其他 Agent。
 
 ## 事件转发与 TUI 展示
 

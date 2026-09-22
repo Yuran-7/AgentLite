@@ -17,6 +17,8 @@ from agent_lite.core.bus.events import (
     SessionWaitingForInputEvent,
     SessionWorkspaceSetEvent,
     SkillInvokedEvent,
+    TaskNotificationDeliveredEvent,
+    TaskNotificationQueuedEvent,
 )
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.memory.pipeline import MemoryPipeline, sanitize_transcript, transcript_hash
@@ -26,6 +28,7 @@ from agent_lite.core.session.ids import new_session_id
 from agent_lite.core.session.model import Session, SessionMode
 from agent_lite.core.session.store import SessionStore
 from agent_lite.core.skills.loader import SkillLoader
+from agent_lite.core.subagent.registry import SubagentTaskManager
 
 if TYPE_CHECKING:
     from agent_lite.core.llm.base import LLMProvider
@@ -79,6 +82,7 @@ class SessionManager:
         memory_generate_enabled: bool = False,
         memory_min_rollout_idle_hours: int = 6,
         memory_max_rollout_age_days: int = 10,
+        task_manager: SubagentTaskManager | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
@@ -102,6 +106,122 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
+        self._task_manager = task_manager
+        self._pending_task_notifications: dict[str, list[tuple[str, str]]] = {}
+        self._notification_pumps: dict[str, asyncio.Task[None]] = {}
+        if self._task_manager is not None:
+            self._task_manager.set_notification_handler(self._on_task_notification)
+            self._task_manager.set_notification_event_handlers(
+                self._on_task_notification_queued,
+                self._on_task_notification_delivered,
+            )
+
+    async def _on_task_notification_queued(
+        self, session_id: str, task_id: str
+    ) -> None:
+        await self._bus.publish(
+            TaskNotificationQueuedEvent(
+                session_id=session_id, task_id=task_id, ts=_now()
+            )
+        )
+
+    async def _on_task_notification_delivered(
+        self, session_id: str, task_id: str, run_id: str
+    ) -> None:
+        await self._bus.publish(
+            TaskNotificationDeliveredEvent(
+                session_id=session_id,
+                task_id=task_id,
+                run_id=run_id,
+                ts=_now(),
+            )
+        )
+
+    async def _on_task_notification(
+        self, session_id: str, task_id: str, message: str
+    ) -> None:
+        self._pending_task_notifications.setdefault(session_id, []).append(
+            (task_id, message)
+        )
+        pump = self._notification_pumps.get(session_id)
+        if pump is None or pump.done():
+            pump = asyncio.create_task(
+                self._drain_task_notifications(session_id),
+                name=f"task-notifications-{session_id}",
+            )
+            self._notification_pumps[session_id] = pump
+
+    async def _drain_task_notifications(self, sid: str) -> None:
+        await asyncio.sleep(0.05)
+        session = self._sessions.get(sid)
+        lock = self._locks.get(sid)
+        if session is None or lock is None:
+            dropped = self._pending_task_notifications.pop(sid, [])
+            if self._task_manager is not None:
+                for task_id, _message in dropped:
+                    await self._task_manager.release_notification(task_id)
+            return
+
+        async with lock:
+            batch = self._pending_task_notifications.pop(sid, [])
+            if not batch:
+                return
+            if session.status == "closed" and session.mode != "one_shot":
+                if self._task_manager is not None:
+                    for task_id, _message in batch:
+                        await self._task_manager.release_notification(task_id)
+                return
+
+            task_ids = [item[0] for item in batch]
+            content = "\n\n".join(item[1] for item in batch)
+            run_id = new_run_id()
+            self._store.append_message(
+                sid,
+                "user",
+                content,
+                run_id=run_id,
+                kind="task_notification",
+                notification_id=",".join(task_ids),
+            )
+            if self._task_manager is not None:
+                for task_id in task_ids:
+                    await self._task_manager.mark_notification_delivered(task_id, run_id)
+            session.status = "active"
+            session.run_ids.append(run_id)
+            self._persist_started_session(session)
+            try:
+                await self._runner_factory().run_and_capture(
+                    content,
+                    run_id=run_id,
+                    session=session,
+                    store=self._store,
+                )
+            finally:
+                session.updated_at = _now()
+                session.last_chat_at = session.updated_at
+                session.status = (
+                    "closed" if session.mode == "one_shot" else "waiting_for_input"
+                )
+                self._store.write_meta(session)
+                if session.mode == "one_shot":
+                    await self._bus.publish(
+                        SessionClosedEvent(session_id=sid, ts=session.updated_at)
+                    )
+                else:
+                    await self._bus.publish(
+                        SessionWaitingForInputEvent(
+                            session_id=sid,
+                            last_run_id=run_id,
+                            ts=session.updated_at,
+                        )
+                    )
+
+        if self._pending_task_notifications.get(sid):
+            next_pump = asyncio.create_task(
+                self._drain_task_notifications(sid),
+                name=f"task-notifications-{sid}",
+            )
+            self._notification_pumps[sid] = next_pump
 
     # 创建新 session；首次发送消息时才创建目录并写入 meta.json
     async def create(
@@ -185,6 +305,11 @@ class SessionManager:
             )
             self._store.write_meta(session)
             await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
+            if self._task_manager is not None:
+                asyncio.create_task(
+                    self._task_manager.recover_session(sid),
+                    name=f"recover-subagents-{sid}",
+                )
             return session
 
     # 为未绑定工作区的 session 设置工作区；未开始对话时只更新内存
@@ -460,6 +585,8 @@ class SessionManager:
             session.status = "closed"
             self._persist_started_session(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=_now()))
+        if self._task_manager is not None:
+            await self._task_manager.cancel_session(sid)
 
     # 手动压缩指定 session 的 thread，将摘要持久化写入 thread.jsonl
     async def compact(self, sid: str, focus: str = "") -> Any:
@@ -490,7 +617,7 @@ class SessionManager:
     # 读取指定 session 的完整 thread 历史
     async def get_history(self, sid: str) -> list[dict[str, Any]]:
         self._get_session(sid)
-        return self._store.read_messages(sid)
+        return self._store.read_history_messages(sid)
 
     # 从内存索引取 session，不存在时抛 JSON-RPC 结构化错误
     def _get_session(self, sid: str) -> Session:

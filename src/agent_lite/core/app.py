@@ -68,6 +68,7 @@ from agent_lite.core.permissions.storage import load_policy_file
 from agent_lite.core.runner import AgentRunner
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session import SessionManager, SessionStore
+from agent_lite.core.subagent.registry import SubagentTaskManager
 from agent_lite.core.trace.record import TraceRecord
 from agent_lite.core.trace.writer import TraceWriter
 from agent_lite.core.transport.ipc_broadcaster import IpcEventBroadcaster
@@ -100,6 +101,7 @@ class CoreApp:
         self._shutdown: asyncio.Event | None = None
         self._sessions_root: Path | None = None
         self._memory_store: MemoryStore | None = None
+        self._task_manager: SubagentTaskManager | None = None
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -463,6 +465,7 @@ class CoreApp:
         self._bus.subscribe(self._broadcaster.handle)
         self._sessions_root = Path(self._config.session.dir).expanduser().resolve()
         store = SessionStore(self._sessions_root)
+        self._task_manager = SubagentTaskManager(store.tasks_dir)
         logger.info("sessions: root=%s", self._sessions_root)
         self._memory_store = MemoryStore(Path(self._config.memory.dir).expanduser())
         logger.info("memory: db=%s", self._memory_store.path)
@@ -482,6 +485,7 @@ class CoreApp:
                 trace=self._trace,
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
+                task_manager=self._task_manager,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -490,6 +494,7 @@ class CoreApp:
             memory_generate_enabled=self._config.memory.generate_enabled,
             memory_min_rollout_idle_hours=self._config.memory.min_rollout_idle_hours,
             memory_max_rollout_age_days=self._config.memory.max_rollout_age_days,
+            task_manager=self._task_manager,
         )
 
         server = SocketServer(
@@ -549,6 +554,8 @@ class CoreApp:
                 await asyncio.gather(*run_tasks, return_exceptions=True)
             if self._sessions is not None:
                 await self._sessions.wait_for_memory_tasks()
+            if self._task_manager is not None:
+                await self._task_manager.cancel_all()
             if self._mcp_manager is not None:
                 await self._mcp_manager.stop_all()
             await server.stop()

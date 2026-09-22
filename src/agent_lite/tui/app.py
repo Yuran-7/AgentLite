@@ -1313,6 +1313,15 @@ class AgentLiteTuiApp(App[None]):
             Static(f"[bold cyan]Resumed[/bold cyan]  {escape(title)}", id="banner")
         )
         for message in messages:
+            if message.get("kind") == "task_notification":
+                notification_id = escape(str(message.get("notification_id") or "unknown"))
+                await log_view.mount(
+                    Static(
+                        f"[dim]Background task notification delivered: {notification_id}[/dim]",
+                        classes="log-line",
+                    )
+                )
+                continue
             text = self._history_text(message.get("content"))
             if not text:
                 continue
@@ -1842,6 +1851,7 @@ class AgentLiteTuiApp(App[None]):
                 "permission.*",
                 "context.*",
                 "subagent.*",
+                "task.*",
                 "skill.*",
                 "memory.*",
             ],

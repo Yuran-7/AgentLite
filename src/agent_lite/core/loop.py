@@ -15,6 +15,7 @@ from agent_lite.core.tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from agent_lite.core.compact.compactor import Compactor
     from agent_lite.core.permissions.manager import PermissionManager
+    from agent_lite.core.subagent.registry import SubagentTaskManager
 
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class AgentLoop:
         compactor: Compactor | None = None,
         compact_threshold: float = 0.80,
         session_id: str = "",
+        task_manager: SubagentTaskManager | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -44,10 +46,21 @@ class AgentLoop:
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
+        self._task_manager = task_manager
 
     # 驱动 plan→act→observe 循环直到上下文终止；CancelledError 向上传播
     async def run(self, context: ExecutionContext) -> None:
         while not context.is_done():
+            if self._task_manager is not None:
+                notifications = await self._task_manager.drain_run_notifications(
+                    context.run_id
+                )
+                if notifications:
+                    context.add_user_message(
+                        "\n\n".join(message for _task_id, message in notifications),
+                        kind="task_notification",
+                        notification_id=",".join(task_id for task_id, _message in notifications),
+                    )
             context.step += 1  # step 初始为 0，第一次循环从 1 开始
             await self._bus.publish(
                 StepStartedEvent(run_id=context.run_id, step=context.step, ts=_now())
@@ -113,8 +126,24 @@ class AgentLoop:
                         is_error=True,
                     )
 
-            # Termination check — end_turn wins over max_steps if both hit on same step
-            if response.stop_reason == "end_turn":
+            injected_notifications: list[tuple[str, str]] = []
+            if self._task_manager is not None:
+                injected_notifications = await self._task_manager.drain_run_notifications(
+                    context.run_id
+                )
+                if injected_notifications:
+                    context.add_user_message(
+                        "\n\n".join(
+                            message for _task_id, message in injected_notifications
+                        ),
+                        kind="task_notification",
+                        notification_id=",".join(
+                            task_id for task_id, _message in injected_notifications
+                        ),
+                    )
+
+            # A notification arriving before termination starts another safe model round.
+            if response.stop_reason == "end_turn" and not injected_notifications:
                 context.result = response.text or ""
                 context.mark_success()
             elif context.step >= context.max_steps:

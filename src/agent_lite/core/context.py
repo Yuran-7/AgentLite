@@ -16,6 +16,7 @@ class ExecutionContext:
     agent_context: str = ""
     workspace_root: Path | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
+    message_metadata: dict[int, dict[str, str]] = field(default_factory=dict)
     step: int = 0
     status: str = "running"  # "running" | "success" | "failed"
     reason: str | None = None
@@ -49,6 +50,30 @@ class ExecutionContext:
     # 将 LLM 响应的 content blocks 追加为 assistant 消息
     def add_assistant_message(self, content: list[Any]) -> None:
         self.messages.append({"role": "assistant", "content": content})
+
+    def add_user_message(
+        self,
+        content: str,
+        *,
+        kind: str | None = None,
+        notification_id: str | None = None,
+    ) -> None:
+        self.messages.append({"role": "user", "content": content})
+        metadata: dict[str, str] = {}
+        if kind is not None:
+            metadata["kind"] = kind
+        if notification_id is not None:
+            metadata["notification_id"] = notification_id
+        if metadata:
+            self.message_metadata[len(self.messages) - 1] = metadata
+
+    def persistence_messages(self, start: int) -> list[dict[str, Any]]:
+        persisted: list[dict[str, Any]] = []
+        for index, message in enumerate(self.messages[start:], start=start):
+            row = dict(message)
+            row.update(self.message_metadata.get(index, {}))
+            persisted.append(row)
+        return persisted
 
     # 将工具调用结果追加为 user 消息；同一步的多个结果共享同一条消息
     def add_tool_result(

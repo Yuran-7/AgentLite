@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from agent_lite.core.agents.loader import AgentRegistry
 from agent_lite.core.bus.events import RunFinishedEvent, RunStartedEvent
 from agent_lite.core.compact.compactor import Compactor
 from agent_lite.core.config import AgentLiteConfig
@@ -24,8 +25,9 @@ from agent_lite.core.permissions.manager import PermissionManager
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.model import Session
 from agent_lite.core.session.store import SessionStore
-from agent_lite.core.subagent.registry import BackgroundTaskRegistry
-from agent_lite.core.subagent.tool import AgentResultTool, SpawnAgentTool
+from agent_lite.core.subagent.registry import SubagentTaskManager
+from agent_lite.core.subagent.tool import SpawnAgentTool
+from agent_lite.core.tools.base import BaseTool
 from agent_lite.core.tools.builtin import (
     CosilLocalizeTool,
     ListDirTool,
@@ -65,6 +67,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
+        task_manager: SubagentTaskManager | None = None,
     ) -> None:
         self._config = config
         self._bus = bus
@@ -75,7 +78,19 @@ class AgentRunner:
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
         # 跨 run 共享的后台 subagent 任务注册表
-        self._task_registry = BackgroundTaskRegistry()
+        self._task_manager = task_manager or SubagentTaskManager(
+            lambda _session_id: self._events_file.parent / "tasks"
+        )
+
+    def _create_provider(self, model: str) -> LLMProvider:
+        provider = create_llm_provider(replace(self._config.llm, default_model=model))
+        if self._trace is not None:
+            return TracingProvider(
+                provider,
+                self._trace,
+                include_payload=self._config.trace.include_llm_payload,
+            )
+        return provider
 
     # 构建工具注册表，并按需注入计划和 SpawnAgentTool
     def _build_registry(
@@ -122,6 +137,9 @@ class AgentRunner:
             if _ok("cosil_localize") and workspace_root is not None:
                 registry.register(CosilLocalizeTool(provider, bus, run_id, workspace_root))
             if _ok("spawn_agent"):
+                extra_tools: list[BaseTool] = []
+                if self._mcp_manager is not None:
+                    extra_tools.extend(self._mcp_manager.get_tools())
                 registry.register(
                     SpawnAgentTool(
                         provider=provider,
@@ -129,17 +147,18 @@ class AgentRunner:
                         parent_run_id=run_id,
                         permission_manager=self._permission_manager,
                         max_steps=self._config.agent.max_steps,
-                        task_registry=self._task_registry,
+                        task_manager=self._task_manager,
                         session_id=session_id,
                         workspace_root=workspace_root,
                         agent_context=agent_context,
                         web_config=self._config.web,
                         subagent_allowed_tools=self._config.agent.subagent_allowed_tools,
                         depth=0,
+                        agent_registry=AgentRegistry(workspace_root),
+                        provider_factory=self._create_provider,
+                        extra_tools=extra_tools,
                     )
                 )
-            if _ok("agent_result"):
-                registry.register(AgentResultTool(self._task_registry))
         if self._mcp_manager is not None:
             for mcp_tool in self._mcp_manager.get_tools():
                 if _ok(mcp_tool.name):
@@ -241,6 +260,7 @@ class AgentRunner:
                     bus=bus,
                     session_id=session_id_str,
                     workspace_root=workspace_root,
+                    agent_context=agent_ctx,
                     tool_whitelist=tool_whitelist,
                 )
                 compactor = Compactor(bus, session_dir, session_id_str) # 上下文压缩器
@@ -250,8 +270,13 @@ class AgentRunner:
                     compactor=compactor,
                     compact_threshold=self._config.compaction.auto_threshold,
                     session_id=session_id_str,
+                    task_manager=self._task_manager,
                 )
-                await loop.run(context)
+                await self._task_manager.activate_run(run_id)
+                try:
+                    await loop.run(context)
+                finally:
+                    await self._task_manager.deactivate_run(run_id)
             except asyncio.CancelledError:
                 cancelled = True
                 if not context.is_done():
@@ -263,8 +288,6 @@ class AgentRunner:
                 if not context.is_done():
                     context.mark_failed("llm_error")
             finally:
-                if cancelled:
-                    await self._task_registry.cancel_all()
                 if registry is not None:
                     await registry.aclose()
 
@@ -279,7 +302,11 @@ class AgentRunner:
             )
 
         if session is not None and store is not None:
-            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+            store.append_messages(
+                session.id,
+                context.persistence_messages(prefill_len),
+                run_id=run_id,
+            )
 
         if cancelled:
             raise asyncio.CancelledError()

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
+from agent_lite.core.context import ExecutionContext
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.runner import RunOutcome
 from agent_lite.core.session.manager import (
@@ -16,6 +17,7 @@ from agent_lite.core.session.manager import (
 )
 from agent_lite.core.session.model import Session
 from agent_lite.core.session.store import SessionStore
+from agent_lite.core.subagent.registry import SubagentTaskManager
 
 
 class _Runner:
@@ -188,6 +190,99 @@ async def test_send_message_chat_enters_waiting_and_writes_thread(tmp_path: Path
     messages = store.read_messages(session.id)
     assert messages[0] == {"role": "user", "content": "hello"}
     assert messages[1]["role"] == "assistant"
+
+
+async def test_background_notifications_batch_into_one_continuation(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    task_manager = SubagentTaskManager(store.tasks_dir)
+    events: list[object] = []
+    bus = EventBus()
+
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    bus.subscribe(collect)
+    manager = SessionManager(
+        store,
+        lambda: _Runner(),  # type: ignore[arg-type]
+        bus,
+        task_manager=task_manager,
+    )
+    session = await manager.create("chat")
+    await manager.send_message(session.id, "start")
+    sleepers: list[asyncio.Task[None]] = []
+    for task_id in ("child-a", "child-b"):
+        sleeper = asyncio.create_task(asyncio.sleep(10))
+        sleepers.append(sleeper)
+        task_manager.register(
+            task_id=task_id,
+            task=sleeper,
+            context=ExecutionContext(run_id=task_id, goal="work", max_steps=1),
+            session_id=session.id,
+            owner_run_id="finished-parent",
+            agent_type="general-purpose",
+            description=task_id,
+        )
+
+    await asyncio.gather(
+        task_manager.finish("child-a", status="completed", result="one"),
+        task_manager.finish("child-b", status="completed", result="two"),
+    )
+
+    async def delivered() -> None:
+        while not all(
+            task_manager.get(task_id).notification_delivered  # type: ignore[union-attr]
+            for task_id in ("child-a", "child-b")
+        ):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(delivered(), timeout=1)
+    history = store.read_history_messages(session.id)
+    notifications = [m for m in history if m.get("kind") == "task_notification"]
+    assert len(notifications) == 1
+    assert notifications[0]["notification_id"] == "child-a,child-b"
+    assert len(session.run_ids) == 2
+    assert [event.type for event in events].count("task.notification_queued") == 2  # type: ignore[attr-defined]
+    assert [event.type for event in events].count("task.notification_delivered") == 2  # type: ignore[attr-defined]
+    for sleeper in sleepers:
+        sleeper.cancel()
+    await asyncio.gather(*sleepers, return_exceptions=True)
+
+
+async def test_one_shot_background_notification_runs_continuation(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    task_manager = SubagentTaskManager(store.tasks_dir)
+    manager = SessionManager(
+        store,
+        lambda: _Runner(),  # type: ignore[arg-type]
+        EventBus(),
+        task_manager=task_manager,
+    )
+    session = await manager.create("one_shot")
+    await manager.send_message(session.id, "start")
+    assert session.status == "closed"
+    sleeper = asyncio.create_task(asyncio.sleep(10))
+    task_manager.register(
+        task_id="child",
+        task=sleeper,
+        context=ExecutionContext(run_id="child", goal="work", max_steps=1),
+        session_id=session.id,
+        owner_run_id="finished-parent",
+        agent_type="general-purpose",
+        description="child",
+    )
+
+    await task_manager.finish("child", status="completed", result="done")
+
+    async def delivered() -> None:
+        while not task_manager.get("child").notification_delivered:  # type: ignore[union-attr]
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(delivered(), timeout=1)
+    assert session.status == "closed"
+    assert len(session.run_ids) == 2
+    sleeper.cancel()
+    await asyncio.gather(sleeper, return_exceptions=True)
 
 
 # 功能：取消正在执行的 run 后 Session 仍恢复 waiting_for_input 并持久化

@@ -81,11 +81,10 @@ dir = "~/.agentlite/sessions"  # 按日期分层：YYYY/MM/DD/<session-id>
 
 [agent]
 max_steps = 20
-# 所有子 Agent 的能力上限；默认不允许联网。角色 allowed_tools 只能继续收窄。
+# 所有子 Agent 的能力上限；自定义 Agent 的 tools/disallowedTools 只能继续收窄。
 subagent_allowed_tools = [
   "read_file", "shell", "write_file", "list_dir",
-  "task_create", "task_update", "task_list", "task_get",
-  "spawn_agent", "agent_result",
+  "update_plan", "spawn_agent",
 ]
 
 [web]
@@ -143,8 +142,8 @@ OpenAI-compatible 协议使用 Chat Completions；Anthropic-compatible 协议使
   私有/链路本地地址和带凭据 URL，并在每次重定向后重新检查目标。
 - 根 Agent 在 `[web].enabled = true` 时获得搜索和抓取工具。
 - 子 Agent 默认不获得联网工具。需要时先把工具加入
-  `agent.subagent_allowed_tools`，再加入对应 `.agentlite/agents/<role>.toml` 的
-  `allowed_tools`；两层取交集。匿名子 Agent 只受全局能力上限约束。
+  `agent.subagent_allowed_tools`，再加入对应 `.agentlite/agents/<role>.md` frontmatter
+  的 `tools`；两层取交集。未指定 `tools` 的 Agent 只受全局能力上限约束。
 
 ### CoSIL 风格代码定位
 

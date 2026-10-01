@@ -27,7 +27,6 @@ _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "list_dir",
     "update_plan",
     "spawn_agent",
-    "agent_result",
 ]
 
 

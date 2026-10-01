@@ -22,7 +22,7 @@ def test_builtin_skill_found() -> None:
 # 设计：参数化列举通用 skill 与两种多智能体工作流，防止打包时遗漏文件
 @pytest.mark.parametrize(
     "name",
-    ["init", "review", "chatdev", "metagpt"],
+    ["init", "review"],
 )
 def test_all_builtin_skills_found(name: str) -> None:
     loader = SkillLoader()
@@ -40,12 +40,9 @@ def test_orchestrate_skill_removed() -> None:
 # 功能：多智能体 skill 应限制父 Agent 只能使用编排工具
 # 设计：解析真实内建文件并比较工具集合，避免父 Agent 绕过角色直接修改工作区
 @pytest.mark.parametrize("name", ["chatdev", "metagpt"])
-def test_multi_agent_skills_only_allow_orchestration_tools(name: str) -> None:
+def test_removed_multi_agent_skills_are_not_found(name: str) -> None:
     loader = SkillLoader()
-    skill = loader.resolve(name)
-    assert skill is not None
-    assert set(skill.allowed_tools) <= {"spawn_agent", "agent_result", "update_plan"}
-    assert "spawn_agent" in skill.allowed_tools
+    assert loader.resolve(name) is None
 
 
 # 功能：不存在的 skill 名应返回 None

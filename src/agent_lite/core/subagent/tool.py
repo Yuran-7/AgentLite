@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from agent_lite.core.agents.loader import AgentProfile, AgentProfileLoader
+from agent_lite.core.agents.loader import AgentDefinition, AgentRegistry
 from agent_lite.core.bus.events import SubagentFinishedEvent, SubagentStartedEvent
 from agent_lite.core.context import ExecutionContext
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.loop import AgentLoop
 from agent_lite.core.runs import new_run_id
-from agent_lite.core.subagent.registry import BackgroundTaskRegistry
+from agent_lite.core.subagent.registry import SubagentTaskManager
 from agent_lite.core.tools.base import BaseTool, ToolResult
 from agent_lite.core.tools.builtin.bash import ShellTool
+from agent_lite.core.tools.builtin.cosil_localize import CosilLocalizeTool
 from agent_lite.core.tools.builtin.list_dir import ListDirTool
 from agent_lite.core.tools.builtin.read_file import ReadFileTool
 from agent_lite.core.tools.builtin.update_plan import UpdatePlanTool
@@ -29,61 +31,23 @@ if TYPE_CHECKING:
     from agent_lite.core.llm.base import LLMProvider
     from agent_lite.core.permissions.manager import PermissionManager
 
-_profile_loader = AgentProfileLoader()
-
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
 class SpawnAgentParams(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
     description: str
     prompt: str
     run_in_background: bool = False
-    subagent_type: str = ""
+    subagent_type: str = "general-purpose"
 
 
-# 在隔离的冷启动上下文中派生子 agent，支持前台阻塞和后台并行两种模式
 class SpawnAgentTool(BaseTool):
     name = "spawn_agent"
-    description = (
-        "Spawn an isolated sub-agent to handle a self-contained sub-task. "
-        "The sub-agent starts with a clean context containing only the provided prompt — "
-        "it does not inherit the current conversation history. "
-        "Use run_in_background=true to run in parallel; retrieve result later with agent_result."
-    )
-    input_schema: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "description": {
-                "type": "string",
-                "description": "3-5 word task description shown in progress display",
-            },
-            "prompt": {
-                "type": "string",
-                "description": (
-                    "Complete task description including all context the sub-agent needs. "
-                    "The sub-agent cannot see the parent conversation, so be explicit."
-                ),
-            },
-            "run_in_background": {
-                "type": "boolean",
-                "description": "When true, returns immediately with a run_id; use agent_result to poll.",  # noqa: E501
-            },
-            "subagent_type": {
-                "type": "string",
-                "description": (
-                    "Agent role profile name, such as chatdev-tester or metagpt-qa. "
-                    "Leave empty for the default profile."
-                ),
-            },
-        },
-        "required": ["description", "prompt"],
-    }
     params_model = SpawnAgentParams
 
-    # 构造 SpawnAgentTool；depth=0 表示根 agent，最大允许嵌套深度为 2
     def __init__(
         self,
         provider: LLMProvider,
@@ -91,46 +55,97 @@ class SpawnAgentTool(BaseTool):
         parent_run_id: str,
         permission_manager: PermissionManager | None,
         max_steps: int,
-        task_registry: BackgroundTaskRegistry,
+        task_manager: SubagentTaskManager,
         session_id: str,
         workspace_root: Path | None = None,
         agent_context: str = "",
         web_config: WebConfig | None = None,
         subagent_allowed_tools: list[str] | None = None,
         depth: int = 0,
+        agent_registry: AgentRegistry | None = None,
+        provider_factory: Callable[[str], LLMProvider] | None = None,
+        extra_tools: list[BaseTool] | None = None,
     ) -> None:
         self._provider = provider
+        self._provider_factory = provider_factory
         self._parent_bus = parent_bus
         self._parent_run_id = parent_run_id
         self._permission_manager = permission_manager
         self._max_steps = max_steps
-        self._task_registry = task_registry
+        self._task_manager = task_manager
         self._session_id = session_id
         self._workspace_root = workspace_root
         self._agent_context = agent_context
         self._web_config = web_config
-        self._subagent_allowed_tools = (
-            {
-                "shell" if name == "bash" else name
-                for name in subagent_allowed_tools
-            }
+        configured_tools = (
+            subagent_allowed_tools
             if subagent_allowed_tools is not None
-            else {
+            else [
                 "read_file",
                 "shell",
                 "write_file",
                 "list_dir",
                 "update_plan",
                 "spawn_agent",
-                "agent_result",
-            }
+            ]
         )
+        self._subagent_allowed_tools = {
+            "shell" if name == "bash" else name
+            for name in configured_tools
+        }
         self._depth = depth
+        self._agent_registry = agent_registry or AgentRegistry(workspace_root)
+        self._extra_tools = extra_tools or []
 
-    # 派生子 agent，前台时阻塞直到完成并返回结果，后台时立即返回 run_id
+        def describe_agent(agent: AgentDefinition) -> str:
+            tools = self._agent_registry.effective_tools(
+                agent, self._subagent_allowed_tools
+            )
+            tool_names = ", ".join(tools) or "none"
+            return f"- {agent.name}: {agent.description} (tools: {tool_names})"
+
+        listing = "\n".join(
+            describe_agent(agent) for agent in self._agent_registry.list_all()
+        )
+        self.description = (
+            "Launch an isolated subagent for a self-contained task. The subagent starts with only "
+            "the supplied prompt. Available agent types:\n"
+            f"{listing}\n"
+            "Omit subagent_type to use general-purpose. For independent work, set "
+            "run_in_background=true; it returns an output_file and completion arrives "
+            "automatically "
+            "as a task-notification. Do not poll, sleep, or repeatedly read the output file."
+        )
+        names = [agent.name for agent in self._agent_registry.list_all()]
+        self.input_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Short 3-5 word task description",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Complete task brief; the subagent cannot see parent history",
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run independently and receive an automatic completion notification"
+                    ),
+                },
+                "subagent_type": {
+                    "type": "string",
+                    "enum": names,
+                    "default": "general-purpose",
+                    "description": "Specialized agent type",
+                },
+            },
+            "required": ["description", "prompt"],
+        }
+
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = SpawnAgentParams.model_validate(params)
-
         if self._depth >= 2:
             return ToolResult(
                 content="Subagent nesting limit (2) reached; cannot spawn further subagents.",
@@ -138,43 +153,51 @@ class SpawnAgentTool(BaseTool):
                 error_type="runtime_error",
             )
 
-        profile: AgentProfile | None = None
-        if p.subagent_type:
-            profile = _profile_loader.load(p.subagent_type)
-            if profile is None:
+        definition = self._agent_registry.get(p.subagent_type)
+        if definition is None:
+            available = ", ".join(agent.name for agent in self._agent_registry.list_all())
+            return ToolResult(
+                content=f"Unknown subagent type: {p.subagent_type}. Available agents: {available}",
+                is_error=True,
+                error_type="schema_error",
+            )
+
+        provider = self._provider
+        if definition.model != "inherit":
+            if self._provider_factory is None:
                 return ToolResult(
-                    content=f"Unknown or invalid subagent profile: {p.subagent_type}",
+                    content=f"Agent model override is unavailable: {definition.model}",
                     is_error=True,
-                    error_type="schema_error",
+                    error_type="runtime_error",
                 )
+            provider = self._provider_factory(definition.model)
 
         child_run_id = new_run_id()
         child_context = ExecutionContext(
             run_id=child_run_id,
             goal=p.prompt,
-            max_steps=self._max_steps,
+            max_steps=min(self._max_steps, definition.max_turns or self._max_steps),
             agent_context=self._agent_context,
             workspace_root=self._workspace_root,
-            system_prompt_override=profile.system_prompt if profile else None,
+            system_prompt_override=definition.system_prompt,
         )
-
         child_bus = EventBus()
 
-        # 将子 bus 所有事件桥接到父 bus，TUI 据此渲染嵌套进度
         async def _bridge(event: BaseModel) -> None:
             await self._parent_bus.publish(event)
 
         child_bus.subscribe(_bridge)
-
-        child_registry = self._build_child_registry(child_bus, child_run_id, profile)
+        child_registry = self._build_child_registry(
+            child_bus, child_run_id, definition, provider
+        )
         child_loop = AgentLoop(
-            self._provider,
+            provider,
             child_registry,
             child_bus,
             permission_manager=self._permission_manager,
             session_id=self._session_id,
+            task_manager=self._task_manager,
         )
-
         await self._parent_bus.publish(
             SubagentStartedEvent(
                 run_id=child_run_id,
@@ -184,24 +207,32 @@ class SpawnAgentTool(BaseTool):
             )
         )
 
-        if p.run_in_background:
-            task: asyncio.Task[None] = asyncio.create_task(
+        if p.run_in_background or definition.background:
+            task = asyncio.create_task(
                 self._run_background(
-                    child_loop,
-                    child_context,
-                    child_bus,
-                    child_run_id,
-                    child_registry,
-                )
+                    child_loop, child_context, child_registry
+                ),
+                name=f"subagent-{child_run_id}",
             )
-            self._task_registry.register(child_run_id, task, child_context)
+            record = self._task_manager.register(
+                task_id=child_run_id,
+                task=task,
+                context=child_context,
+                session_id=self._session_id,
+                owner_run_id=self._parent_run_id,
+                agent_type=definition.name,
+                description=p.description,
+            )
             return ToolResult(
                 content=(
-                    f"Subagent started in background. run_id={child_run_id}. "
-                    f"Use agent_result(run_id='{child_run_id}') to retrieve result."
+                    "status: async_launched\n"
+                    f"task_id: {child_run_id}\n"
+                    f"output_file: {record.output_file}\n"
+                    "You will be notified automatically when it completes."
                 )
             )
 
+        await self._task_manager.activate_run(child_run_id)
         cancelled = False
         try:
             await child_loop.run(child_context)
@@ -210,185 +241,117 @@ class SpawnAgentTool(BaseTool):
             if not child_context.is_done():
                 child_context.mark_failed("cancelled")
         finally:
+            await self._task_manager.deactivate_run(child_run_id)
             await child_registry.aclose()
-
-        await self._parent_bus.publish(
-            SubagentFinishedEvent(
-                run_id=child_run_id,
-                parent_run_id=self._parent_run_id,
-                status=child_context.status,
-                ts=_now(),
-            )
-        )
-
+        await self._publish_finished(child_run_id, child_context.status)
         if cancelled:
             raise asyncio.CancelledError()
-
         if child_context.status == "success":
             return ToolResult(
                 content=child_context.result or "Subagent completed with no text output."
             )
         return ToolResult(
-            content=(
-                child_context.result
-                or f"Subagent failed (status={child_context.status}, reason={child_context.reason})"
+            content=child_context.result or (
+                f"Subagent failed (status={child_context.status}, reason={child_context.reason})"
             ),
             is_error=True,
             error_type="runtime_error",
         )
 
-    # 后台任务协程：写事件文件，运行 loop，发布完成事件
     async def _run_background(
         self,
         loop: AgentLoop,
         context: ExecutionContext,
-        bus: EventBus,
-        run_id: str,
         registry: ToolRegistry,
     ) -> None:
-        cancelled = False
+        await self._task_manager.activate_run(context.run_id)
+        status = "failed"
+        error = ""
         try:
             await loop.run(context)
+            status = "completed" if context.status == "success" else "failed"
+            error = (context.reason or "") if status == "failed" else ""
         except asyncio.CancelledError:
-            cancelled = True
+            status = "cancelled"
+            error = "cancelled"
             if not context.is_done():
                 context.mark_failed("cancelled")
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)
+            if not context.is_done():
+                context.mark_failed("runtime_error")
         finally:
+            await self._task_manager.deactivate_run(context.run_id)
             await registry.aclose()
+            try:
+                await self._publish_finished(context.run_id, context.status)
+            finally:
+                await self._task_manager.finish(
+                    context.run_id,
+                    status=status,
+                    result=context.result,
+                    error=error,
+                )
+
+    async def _publish_finished(self, run_id: str, status: str) -> None:
         await self._parent_bus.publish(
             SubagentFinishedEvent(
                 run_id=run_id,
                 parent_run_id=self._parent_run_id,
-                status=context.status,
+                status=status,
                 ts=_now(),
             )
         )
-        if cancelled:
-            raise asyncio.CancelledError()
 
-    # 构造子 registry；基于角色配置过滤工具，深度允许时注册嵌套 SpawnAgentTool
     def _build_child_registry(
         self,
         child_bus: EventBus,
         child_run_id: str,
-        profile: AgentProfile | None,
+        definition: AgentDefinition,
+        provider: LLMProvider,
     ) -> ToolRegistry:
-        profile_allowed: set[str] | None = (
-            set(profile.allowed_tools) if profile is not None else None
+        allowed: set[str] = set(
+            self._agent_registry.effective_tools(definition, self._subagent_allowed_tools)
         )
-
-        def _allowed(name: str) -> bool:
-            within_global_cap = name in self._subagent_allowed_tools
-            within_profile = profile_allowed is None or name in profile_allowed
-            return within_global_cap and within_profile
-
         registry = ToolRegistry()
-        _all_tools = [
+        tools: list[BaseTool] = [
             ReadFileTool(self._workspace_root),
             ShellTool(self._workspace_root),
             WriteFileTool(self._workspace_root),
             ListDirTool(self._workspace_root),
         ]
-        for t in _all_tools:
-            if _allowed(t.name):
-                registry.register(t)
-
+        if self._workspace_root is not None:
+            tools.append(CosilLocalizeTool(provider, child_bus, child_run_id, self._workspace_root))
         if self._web_config is not None and self._web_config.enabled:
-            for t in [WebSearchTool(self._web_config), WebFetchTool(self._web_config)]:
-                if _allowed(t.name):
-                    registry.register(t)
+            tools.extend([WebSearchTool(self._web_config), WebFetchTool(self._web_config)])
+        if "update_plan" in allowed:
+            tools.append(UpdatePlanTool(child_bus, child_run_id))
+        for tool in tools:
+            if tool.name in allowed:
+                registry.register(tool)
+        for tool in self._extra_tools:
+            if tool.name in allowed:
+                registry.register(tool)
 
-        if _allowed("update_plan"):
-            registry.register(UpdatePlanTool(child_bus, child_run_id))
-
-        if self._depth < 1:
-            nested = SpawnAgentTool(
-                provider=self._provider,
-                parent_bus=child_bus,
-                parent_run_id=child_run_id,
-                permission_manager=self._permission_manager,
-                max_steps=self._max_steps,
-                task_registry=self._task_registry,
-                session_id=self._session_id,
-                workspace_root=self._workspace_root,
-                agent_context=self._agent_context,
-                web_config=self._web_config,
-                subagent_allowed_tools=sorted(self._subagent_allowed_tools),
-                depth=self._depth + 1,
+        if self._depth < 1 and "spawn_agent" in allowed:
+            registry.register(
+                SpawnAgentTool(
+                    provider=provider,
+                    provider_factory=self._provider_factory,
+                    parent_bus=child_bus,
+                    parent_run_id=child_run_id,
+                    permission_manager=self._permission_manager,
+                    max_steps=self._max_steps,
+                    task_manager=self._task_manager,
+                    session_id=self._session_id,
+                    workspace_root=self._workspace_root,
+                    agent_context=self._agent_context,
+                    web_config=self._web_config,
+                    subagent_allowed_tools=sorted(self._subagent_allowed_tools),
+                    depth=self._depth + 1,
+                    agent_registry=self._agent_registry,
+                    extra_tools=self._extra_tools,
+                )
             )
-            if _allowed("spawn_agent"):
-                registry.register(nested)
-            if _allowed("agent_result"):
-                registry.register(AgentResultTool(self._task_registry))
-
         return registry
-
-
-class AgentResultParams(BaseModel):
-    run_id: str
-    timeout_seconds: float = Field(default=0, ge=0, le=60)
-
-
-# 查询后台 subagent 的执行状态和最终结果
-class AgentResultTool(BaseTool):
-    name = "agent_result"
-    description = (
-        "Retrieve the result of a background sub-agent previously started with spawn_agent. "
-        "Optionally wait for it to finish, returning immediately when it completes. "
-        "Returns 'still running' if the sub-agent has not completed before the timeout."
-    )
-    input_schema: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "run_id": {
-                "type": "string",
-                "description": "The run_id returned by spawn_agent(run_in_background=true)",
-            },
-            "timeout_seconds": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 60,
-                "default": 0,
-                "description": (
-                    "Maximum seconds to wait for completion. Returns immediately when the "
-                    "sub-agent finishes; 0 checks status without waiting."
-                ),
-            },
-        },
-        "required": ["run_id"],
-    }
-    params_model = AgentResultParams
-
-    # 初始化，持有共享的后台任务注册表
-    def __init__(self, task_registry: BackgroundTaskRegistry) -> None:
-        self._task_registry = task_registry
-
-    # 查询指定 run_id 的后台任务状态，返回结果或错误
-    async def invoke(self, params: dict[str, object]) -> ToolResult:
-        p = AgentResultParams.model_validate(params)
-        entry = self._task_registry.get(p.run_id)
-        if entry is None:
-            return ToolResult(
-                content=f"Unknown run_id: {p.run_id}. Only background subagents can be queried.",
-                is_error=True,
-                error_type="runtime_error",
-            )
-        task, context = entry
-        if not task.done():
-            if p.timeout_seconds == 0:
-                return ToolResult(content="still running")
-            done, _ = await asyncio.wait({task}, timeout=p.timeout_seconds)
-            if not done:
-                return ToolResult(content="still running")
-        if task.cancelled():
-            return ToolResult(
-                content="Subagent was cancelled.", is_error=True, error_type="runtime_error"
-            )
-        exc = task.exception()
-        if exc is not None:
-            return ToolResult(
-                content=f"Subagent raised an exception: {exc}",
-                is_error=True,
-                error_type="runtime_error",
-            )
-        return ToolResult(content=context.result or "Subagent completed with no text result.")

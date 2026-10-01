@@ -101,6 +101,12 @@ class LLMStreamBlock(Static):
         self._text += token
         self.update(self._text)
 
+    def reset_text(self) -> None:
+        if self._finalized:
+            return
+        self._text = ""
+        self.update("")
+
     # 将累积文本渲染为 Markdown，供流式块结束后显示
     def finalize_markdown(self) -> None:
         if self._finalized:
@@ -1864,6 +1870,10 @@ class AgentLiteTuiApp(App[None]):
 
         if t == "llm.token":
             run_id = str(event.get("run_id") or "")
+            if event.get("reset"):
+                if self._current_llm is not None:
+                    self._current_llm.reset_text()
+                return
             call = self._llm_calls.get(run_id)
             if call is not None and call[1] is None:
                 self._llm_calls[run_id] = (call[0], time.monotonic())

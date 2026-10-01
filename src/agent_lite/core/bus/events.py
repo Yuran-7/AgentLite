@@ -91,6 +91,7 @@ class LlmTokenEvent(BaseModel):
     type: Literal["llm.token"] = "llm.token"
     run_id: str
     token: str
+    reset: bool = False
     ts: str
 
 

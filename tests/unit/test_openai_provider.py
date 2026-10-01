@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
@@ -26,6 +27,14 @@ class FakeOpenAIStream:
             return next(self._chunks)
         except StopIteration as exc:
             raise StopAsyncIteration from exc
+
+
+class FakeDroppedOpenAIStream(FakeOpenAIStream):
+    async def __anext__(self) -> SimpleNamespace:
+        try:
+            return await super().__anext__()
+        except StopAsyncIteration as exc:
+            raise httpx.ReadError("stream disconnected") from exc
 
 
 # 构造只含文本增量的 Chat Completions chunk
@@ -112,6 +121,34 @@ async def test_openai_text_stream_and_usage_events() -> None:
         "llm.token",
         "llm.usage",
     ]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+async def test_retry_publishes_complete_response_without_stale_text(
+    monkeypatch: pytest.MonkeyPatch, partial: bool
+) -> None:
+    monkeypatch.setattr(
+        "agent_lite.core.llm.openai_provider._RETRY_BACKOFF_S", (0.0, 0.0, 0.0)
+    )
+    first_chunks = [_text_chunk("stale")] if partial else []
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(
+        side_effect=[
+            FakeDroppedOpenAIStream(first_chunks),
+            FakeOpenAIStream([_text_chunk("recovered", "stop")]),
+        ]
+    )
+    provider = OpenAICompatibleProvider("test-model", client=client)
+
+    result, events = await _chat(provider)
+
+    assert result.text == "recovered"
+    tokens = [event for event in events if event.type == "llm.token"]
+    expected = [("stale", False), ("", True), ("recovered", False)] if partial else [
+        ("recovered", False)
+    ]
+    assert [(event.token, event.reset) for event in tokens] == expected
+    assert client.chat.completions.create.await_count == 2
 
 
 # 功能：验证分片返回的 OpenAI function call 被合并为内部 ToolCallBlock

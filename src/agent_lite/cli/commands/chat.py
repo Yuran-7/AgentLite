@@ -31,6 +31,10 @@ class ChatPrinter:
     async def handle(self, event: dict[str, Any]) -> None:
         t = event.get("type", "")
         if t == "llm.token":
+            if event.get("reset"):
+                self._ensure_newline()
+                print("[retry] restarting response...")
+                return
             print(event.get("token", ""), end="", flush=True)
             self._inline = True
         elif t == "tool.call_started":

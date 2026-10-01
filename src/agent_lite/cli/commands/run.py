@@ -35,6 +35,10 @@ class StdoutPrinter:
             print(f"[step {event.get('step')}] planning...")
 
         elif t == "llm.token":
+            if event.get("reset"):
+                self._ensure_newline()
+                print("[retry] restarting response...")
+                return
             print(event.get("token", ""), end="", flush=True)
             self._inline = True
 

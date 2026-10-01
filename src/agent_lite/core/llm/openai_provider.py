@@ -185,12 +185,18 @@ class OpenAICompatibleProvider:
         tool_parts: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
         usage_obj: Any = None
+        published_text = False
 
         for attempt in range(1, _MAX_STREAM_RETRIES + 1):
             text_parts = []
             tool_parts = {}
             finish_reason = None
             usage_obj = None
+            if attempt > 1 and published_text:
+                await bus.publish(
+                    LlmTokenEvent(run_id=run_id, token="", reset=True, ts=_now())
+                )
+                published_text = False
             try:
                 stream = await self._client.chat.completions.create(**kwargs)
                 async for chunk in stream:
@@ -205,10 +211,10 @@ class OpenAICompatibleProvider:
                     delta = choice.delta
                     text = getattr(delta, "content", None)
                     if text:
-                        if attempt == 1:
-                            await bus.publish(
-                                LlmTokenEvent(run_id=run_id, token=text, ts=_now())
-                            )
+                        await bus.publish(
+                            LlmTokenEvent(run_id=run_id, token=text, ts=_now())
+                        )
+                        published_text = True
                         text_parts.append(text)
                     for tool_delta in getattr(delta, "tool_calls", None) or []:
                         index = int(getattr(tool_delta, "index", 0) or 0)

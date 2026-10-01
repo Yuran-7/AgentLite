@@ -365,6 +365,20 @@ def test_llm_tokens_accumulate_in_block() -> None:
     assert appended[0]._text == "Hello world"  # type: ignore[attr-defined]
 
 
+def test_llm_retry_replaces_partial_stream_in_block() -> None:
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
+    appended: list[Widget] = []
+    app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
+
+    app._handle_event({"type": "llm.token", "token": "stale", "run_id": "r"})
+    app._handle_event({"type": "llm.token", "token": "", "reset": True, "run_id": "r"})
+    app._handle_event({"type": "llm.token", "token": "recovered", "run_id": "r"})
+
+    assert len(appended) == 1
+    assert isinstance(appended[0], LLMStreamBlock)
+    assert appended[0]._text == "recovered"  # type: ignore[attr-defined]
+
+
 # 功能：验证 LLMStreamBlock 结束时会把累积文本渲染为 Rich Markdown
 # 设计：直接调用 finalize_markdown，断言 renderable 类型，覆盖 Markdown polish 的核心行为
 def test_llm_block_finalize_renders_markdown() -> None:

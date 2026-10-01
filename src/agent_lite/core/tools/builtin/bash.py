@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -122,6 +124,7 @@ class ShellTool(BaseTool):
                 cwd=self._working_directory,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
             try:
                 stdout_bytes, _ = await asyncio.wait_for(

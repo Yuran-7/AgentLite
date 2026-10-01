@@ -1,0 +1,55 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AgentLite: VS Code Demo",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/extensions/vscode", "${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/extensions/vscode/dist/**/*.js"],
+      "preLaunchTask": "AgentLite: Build VS Code extension"
+    },
+    {
+      "name": "AgentLite: Core",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_lite.core",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "AgentLite: CLI ping",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_lite.cli",
+      "args": ["ping"],
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "AgentLite: CLI run",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_lite.cli",
+      "args": ["run", "--goal", "检查项目状态"],
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "AgentLite: TUI",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_lite.tui",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

@@ -51,6 +51,7 @@ class SocketServer:
         port: int,
         broadcaster: IpcEventBroadcaster | None = None,
         trace: TraceWriter | None = None,
+        on_disconnect: Callable[[asyncio.StreamWriter], None] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -58,6 +59,7 @@ class SocketServer:
         self._server: asyncio.AbstractServer | None = None
         self._broadcaster = broadcaster
         self._trace = trace
+        self._on_disconnect = on_disconnect
         self._active_writers: set[asyncio.StreamWriter] = set()
 
     # 注册一个方法名对应的命令处理函数
@@ -75,7 +77,7 @@ class SocketServer:
             pass
 
         self._server = await asyncio.start_server(
-            self._handle_connection,  # 每当有新连接建立时，由事件循环调用此处理函数，生成一个新的协程，并将这个协程加入事件循环中执行
+            self._handle_connection,  # 每个新连接由独立协程处理
             host=self._host,
             port=self._port,
             limit=_MAX_LINE_BYTES,
@@ -118,6 +120,8 @@ class SocketServer:
                     raise
         finally:
             self._active_writers.discard(writer)
+            if self._on_disconnect is not None:
+                self._on_disconnect(writer)
             if self._broadcaster is not None:
                 self._broadcaster.unsubscribe(writer)
             try:

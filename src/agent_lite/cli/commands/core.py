@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import subprocess
 import sys
@@ -19,14 +20,14 @@ async def _ping_check(config: AgentLiteConfig) -> None:
     await w.wait_closed()
 
 
-# 通过 TCP IPC 请求 daemon 优雅退出，并等待 JSON-RPC 响应
-async def _shutdown_request(config: AgentLiteConfig) -> None:
+# 通过 TCP IPC 发送 core 管理命令并等待 JSON-RPC 响应
+async def _shutdown_request(config: AgentLiteConfig, method: str = "core.shutdown") -> None:
     client = SocketClient(config.host, config.port)
     await client.connect()
     event_loop = asyncio.create_task(client.run_event_loop())
     try:
         await asyncio.wait_for(
-            client.send_command("core.shutdown", {"type": "core.shutdown"}),
+            client.send_command(method, {"type": method}),
             timeout=2.0,
         )
     finally:
@@ -46,16 +47,18 @@ def cmd_core_status(config: AgentLiteConfig) -> None:
 # 在后台启动 daemon，若已在运行则提示并退出
 def cmd_core_start(config: AgentLiteConfig) -> None:
     try:
-        asyncio.run(_ping_check(config))
-        print(f"already running  ({config.host}:{config.port})")
+        asyncio.run(_shutdown_request(config, "core.keep_alive"))
+        print(f"already running (persistent)  ({config.host}:{config.port})")
         return
-    except (ConnectionRefusedError, OSError):
-        pass
+    except OSError as exc:
+        if not isinstance(exc, ConnectionRefusedError) and exc.errno != errno.ECONNREFUSED:
+            raise
 
     if os.name == "nt":
         proc = subprocess.Popen(
             [sys.executable, "-m", "agent_lite.core"],
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+            env={**os.environ, "AGENTLITE_FRONTEND_MANAGED": "0"},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -63,6 +66,7 @@ def cmd_core_start(config: AgentLiteConfig) -> None:
         proc = subprocess.Popen(
             [sys.executable, "-m", "agent_lite.core"],
             start_new_session=True,
+            env={**os.environ, "AGENTLITE_FRONTEND_MANAGED": "0"},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

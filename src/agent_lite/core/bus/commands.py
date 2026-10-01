@@ -27,6 +27,38 @@ class CoreShutdownResult(BaseModel):
     accepted: bool = True
 
 
+class CoreKeepAliveCommand(BaseModel):
+    type: Literal["core.keep_alive"] = "core.keep_alive"
+
+
+class CoreKeepAliveResult(BaseModel):
+    managed: bool = False
+
+
+class FrontendRegisterCommand(BaseModel):
+    type: Literal["frontend.register"] = "frontend.register"
+    client: Literal["tui", "vscode"]
+
+
+class FrontendHeartbeatCommand(BaseModel):
+    type: Literal["frontend.heartbeat"] = "frontend.heartbeat"
+
+
+class FrontendUnregisterCommand(BaseModel):
+    type: Literal["frontend.unregister"] = "frontend.unregister"
+
+
+class FrontendLeaseResult(BaseModel):
+    managed: bool
+    heartbeat_interval_s: float = 10.0
+    lease_timeout_s: float = 45.0
+    idle_timeout_s: float = 15.0
+
+
+class FrontendUnregisterResult(BaseModel):
+    accepted: bool = True
+
+
 class AgentRunCommand(BaseModel):
     type: Literal["agent.run"] = "agent.run"
     goal: str
@@ -230,6 +262,10 @@ class MemoryDeleteResult(BaseModel):
 Command = Annotated[
     PingCommand
     | CoreShutdownCommand
+    | CoreKeepAliveCommand
+    | FrontendRegisterCommand
+    | FrontendHeartbeatCommand
+    | FrontendUnregisterCommand
     | AgentRunCommand
     | EventSubscribeCommand
     | SessionCreateCommand

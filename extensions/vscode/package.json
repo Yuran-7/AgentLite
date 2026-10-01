@@ -1,0 +1,107 @@
+{
+  "name": "agentlite-vscode",
+  "displayName": "AgentLite",
+  "description": "AgentLite core 的 VS Code 侧边栏客户端",
+  "version": "0.0.7",
+  "icon": "media/icon.png",
+  "publisher": "agentlite-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
+  "activationEvents": [
+    "onView:agentLite.chat"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "agentLite",
+          "title": "AgentLite",
+          "icon": "media/agentlite.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentLite": [
+        {
+          "type": "webview",
+          "id": "agentLite.chat",
+          "name": "聊天"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentLite.open",
+        "title": "AgentLite: 打开聊天"
+      }
+    ],
+    "configuration": {
+      "title": "AgentLite",
+      "properties": {
+        "agentLite.coreDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "core 运行和配置目录，与聊天工作区独立。留空时自动使用 AgentLite 源码目录；普通安装使用 ~/.agentlite。"
+        },
+        "agentLite.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "已安装 AgentLite 的 Python 3.12 可执行文件。留空时优先使用工作区 .venv，再使用 PATH 中的 python。"
+        },
+        "agentLite.corePort": {
+          "type": "integer",
+          "default": 7437,
+          "minimum": 1,
+          "maximum": 65535,
+          "scope": "machine",
+          "description": "127.0.0.1 上共享 core 的 TCP 端口。修改后点击重试。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/render-logo.mjs && node esbuild.mjs",
+    "check": "tsc --noEmit",
+    "pretest": "npm run build",
+    "test": "tsx --test tests/*.test.ts",
+    "test:vscode": "npm run build && node scripts/vscode-smoke.mjs",
+    "test:live": "tsx --test tests/live-model.ts",
+    "vscode:prepublish": "npm run check && npm run build",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "dependencies": {
+    "dompurify": "^3.3.0",
+    "marked": "^16.4.0",
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/vscode": "^1.94.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

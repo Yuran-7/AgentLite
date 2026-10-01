@@ -19,10 +19,17 @@ import agent_lite
 from agent_lite.core.bus.commands import (
     AgentRunCommand,
     AgentRunResult,
+    CoreKeepAliveCommand,
+    CoreKeepAliveResult,
     CoreShutdownCommand,
     CoreShutdownResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    FrontendHeartbeatCommand,
+    FrontendLeaseResult,
+    FrontendRegisterCommand,
+    FrontendUnregisterCommand,
+    FrontendUnregisterResult,
     MemoryDeleteCommand,
     MemoryDeleteResult,
     MemoryListCommand,
@@ -59,6 +66,7 @@ from agent_lite.core.bus.commands import (
 from agent_lite.core.bus.envelope import JsonRpcNotification
 from agent_lite.core.config import AgentLiteConfig, get_config
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.lifecycle import FrontendLifecycle
 from agent_lite.core.llm.factory import create_llm_provider
 from agent_lite.core.logging_setup import setup_logging
 from agent_lite.core.mcp.server import McpServerManager
@@ -102,6 +110,35 @@ class CoreApp:
         self._sessions_root: Path | None = None
         self._memory_store: MemoryStore | None = None
         self._task_manager: SubagentTaskManager | None = None
+        self._lifecycle: FrontendLifecycle | None = None
+
+    # 将前端租约绑定到当前 TCP 连接并返回续约规则
+    async def _frontend_register(self, params: dict[str, Any]) -> FrontendLeaseResult:
+        FrontendRegisterCommand.model_validate(params)
+        assert self._lifecycle is not None
+        self._lifecycle.register(get_connection_writer())
+        return FrontendLeaseResult(managed=self._lifecycle.managed)
+
+    # 续约当前连接，其他连接不能代替失效前端保持存活
+    async def _frontend_heartbeat(self, params: dict[str, Any]) -> FrontendLeaseResult:
+        FrontendHeartbeatCommand.model_validate(params)
+        assert self._lifecycle is not None
+        self._lifecycle.heartbeat(get_connection_writer())
+        return FrontendLeaseResult(managed=self._lifecycle.managed)
+
+    # 前端退出时主动注销，异常退出则由连接关闭或心跳超时兜底
+    async def _frontend_unregister(self, params: dict[str, Any]) -> FrontendUnregisterResult:
+        FrontendUnregisterCommand.model_validate(params)
+        assert self._lifecycle is not None
+        self._lifecycle.unregister(get_connection_writer())
+        return FrontendUnregisterResult()
+
+    # 显式手动启动时保留现有 core，将其提升为常驻模式
+    async def _keep_alive_handler(self, params: dict[str, Any]) -> CoreKeepAliveResult:
+        CoreKeepAliveCommand.model_validate(params)
+        assert self._lifecycle is not None
+        self._lifecycle.keep_alive()
+        return CoreKeepAliveResult()
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -117,6 +154,8 @@ class CoreApp:
     async def _shutdown_handler(self, params: dict[str, Any]) -> CoreShutdownResult:
         CoreShutdownCommand.model_validate(params)
         assert self._shutdown is not None
+        if self._lifecycle is not None:
+            self._lifecycle.close()
         asyncio.get_running_loop().call_later(0.05, self._shutdown.set)
         return CoreShutdownResult()
 
@@ -497,15 +536,25 @@ class CoreApp:
             task_manager=self._task_manager,
         )
 
+        shutdown = asyncio.Event()
+        self._shutdown = shutdown
+        self._lifecycle = FrontendLifecycle(
+            shutdown.set, managed=os.environ.get("AGENTLITE_FRONTEND_MANAGED") == "1"
+        )
         server = SocketServer(
             self._config.host,
             self._config.port,
             self._broadcaster,
             trace=self._trace,
+            on_disconnect=self._lifecycle.unregister,
         )
         # 将 RPC 方法名注册到对应的异步处理函数
         server.register("core.ping", self._ping_handler)
         server.register("core.shutdown", self._shutdown_handler)
+        server.register("core.keep_alive", self._keep_alive_handler)
+        server.register("frontend.register", self._frontend_register)
+        server.register("frontend.heartbeat", self._frontend_heartbeat)
+        server.register("frontend.unregister", self._frontend_unregister)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
         server.register("session.create", self._session_create_handler)
@@ -524,9 +573,8 @@ class CoreApp:
         server.register("memory.list", self._memory_list_handler)
         server.register("memory.delete", self._memory_delete_handler)
 
-        shutdown = asyncio.Event()
-        self._shutdown = shutdown
         addr = await server.start()  # 启动监听；新连接由 SocketServer 的回调处理
+        self._lifecycle.start()
         logger.info("agentlite-core %s listening addr=%s", agent_lite.__version__, addr)
         logger.info("config: %s", self._config)
 
@@ -547,18 +595,22 @@ class CoreApp:
                 signal.signal(sig, previous)
 
             logger.info("shutting down pid=%d", os.getpid())
+            self._lifecycle.close()
+            await server.stop()
             run_tasks = [running.task for running in self._running_runs.values()]
             for run_task in run_tasks:
                 run_task.cancel()
             if self._running_runs:
                 await asyncio.gather(*run_tasks, return_exceptions=True)
             if self._sessions is not None:
-                await self._sessions.wait_for_memory_tasks()
+                try:
+                    await asyncio.wait_for(self._sessions.wait_for_memory_tasks(), timeout=10)
+                except TimeoutError:
+                    logger.warning("memory cleanup timed out during shutdown")
             if self._task_manager is not None:
                 await self._task_manager.cancel_all()
             if self._mcp_manager is not None:
                 await self._mcp_manager.stop_all()
-            await server.stop()
             if self._trace is not None:
                 await self._trace.stop()
 

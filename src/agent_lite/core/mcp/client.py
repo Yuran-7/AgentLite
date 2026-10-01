@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +56,7 @@ class McpClient:
             stderr=asyncio.subprocess.PIPE,
             env=merged_env,
             limit=self._STREAM_LIMIT,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         self._reader = self._proc.stdout
         self._writer_proc = self._proc.stdin
@@ -64,7 +67,9 @@ class McpClient:
 
     # 通过 TCP 连接到 MCP server 并完成 initialize 握手
     async def connect_tcp(self, host: str, port: int) -> None:
-        self._reader, tcp_writer = await asyncio.open_connection(host, port, limit=self._STREAM_LIMIT)
+        self._reader, tcp_writer = await asyncio.open_connection(
+            host, port, limit=self._STREAM_LIMIT
+        )
         self._tcp_writer = tcp_writer
         self._transport = "tcp"
         await self._initialize()
@@ -90,7 +95,7 @@ class McpClient:
             ))
         return tools
 
-    # 调用 MCP server 上的工具，返回所有 text 内容拼接；连接异常抛 McpServerUnavailableError，工具错误抛 McpToolError
+    # 调用工具并拼接文本，分别报告连接异常与工具错误
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         response = await self._call("tools/call", {"name": name, "arguments": arguments})
         parts: list[str] = []

@@ -1,0 +1,12 @@
+.vscode/**
+node_modules/**
+src/**
+webview/**
+tests/**
+scripts/**
+*.vsix
+*.mjs
+tsconfig.json
+package-lock.json
+dist/*.map
+dist/vscode-smoke.js

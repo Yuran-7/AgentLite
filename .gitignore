@@ -10,7 +10,9 @@ build/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
 uv.lock
 .idea/
 .DS_Store

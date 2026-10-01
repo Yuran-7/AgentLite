@@ -35,7 +35,7 @@ async def running_daemon(
     proc = subprocess.Popen([sys.executable, "-m", "agent_lite.core"], env=env)
 
     # Windows 首次导入 Textual/Anthropic 依赖较慢，预留足够时间并尽早报告子进程退出
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         await asyncio.sleep(0.05)
         if proc.poll() is not None:
@@ -50,7 +50,7 @@ async def running_daemon(
     else:
         proc.terminate()
         proc.wait()
-        pytest.fail("Daemon did not start within 10 seconds")
+        pytest.fail("Daemon did not start within 30 seconds")
 
     yield proc
 

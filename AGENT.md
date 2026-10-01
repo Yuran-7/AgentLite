@@ -37,24 +37,24 @@ uv run lite --version
 
 ## Architecture
 
-This is a **dual-process** local AI agent system. `lite-core` is a persistent daemon; `lite` and `lite-tui` are clients that connect to it over a Unix domain socket.
+This is a **multi-client** local AI agent system. `lite-core` runs in the background; CLI, TUI, and the VS Code extension connect to it over loopback TCP. TUI and VS Code auto-start it in frontend-managed mode: connection-bound registration and heartbeats keep it alive, and it shuts down 15 seconds after the last frontend leaves. Manual `lite core start` starts or promotes it to persistent mode; direct `lite-core` defaults to persistent. See `core/lifecycle.py` and the generated lifecycle RPC models.
 
 ```
 lite-core (daemon)
   └─ listens on 127.0.0.1:7437 (TCP)
        ↑ JSON-RPC 2.0 NDJSON
-lite (CLI)   lite-tui (TUI, S2+)
+lite (CLI)   lite-tui (TUI)   VS Code extension (GUI demo)
 ```
 
-**`lite-tui` is the primary frontend.** All user-facing work on task management, observability, and interaction should be designed for and validated in the TUI first. The `lite` CLI exists only for quick scripted testing and debugging — it is not a product surface. When implementing features that touch the user interface, invest in the TUI layout, event rendering, and keyboard interactions. Do not shortcut TUI work by pointing to the CLI as an alternative.
+**TUI and VS Code are parallel frontends.** The extension lives in `extensions/vscode` and reuses the existing core protocol without importing TUI code. Validate changes in the affected frontend and retain compatibility with other clients. The `lite` CLI is for scripted testing and debugging. See `extensions/vscode/README.md` for F5 debugging, tests, packaging, and shared-core lifecycle behavior.
 
 ### Protocol layer (`src/agent_lite/core/bus/`)
 
 All IPC messages are typed pydantic v2 models with a **discriminated union on the `type` field**. This is the contract boundary — adding a new command or event means adding a new model class to `commands.py` or `events.py` and extending the `Command`/`Event` union.
 
 - `envelope.py` — `JsonRpcRequest`, `JsonRpcSuccess`, `JsonRpcError`, error code constants, `make_error()`
-- `commands.py` — `Command` union; currently only `PingCommand` + `PongResult`
-- `events.py` — `Event` union; currently only `CoreStartedEvent`
+- `commands.py` — typed commands and results for core, sessions, permissions, memory, and subscriptions
+- `events.py` — typed run, token, tool, permission, plan, session, and subagent events
 
 `WIRE_PROTOCOL.md` is **generated** from these models by `scripts/gen_protocol_doc.py`. Always regenerate and commit it after changing bus models.
 

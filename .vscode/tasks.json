@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AgentLite: Build VS Code extension",
+      "type": "shell",
+      "command": "npm",
+      "windows": { "command": "npm.cmd" },
+      "args": ["run", "vscode:prepublish"],
+      "options": { "cwd": "${workspaceFolder}/extensions/vscode" },
+      "problemMatcher": ["$tsc"]
+    }
+  ]
+}

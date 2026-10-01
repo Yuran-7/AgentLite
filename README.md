@@ -1,5 +1,18 @@
 # 环境初始化
 
+## VS Code 插件 Demo
+
+新增侧边栏聊天客户端，复用现有 core，支持流式回复、多轮对话、工具卡片、权限确认、执行计划与取消。
+TUI 和 VS Code 打开时都会自动连接或启动后台 core，无需手动启动。多个前端共享同一个 core；最后一个前端退出后等待 15 秒，再保存会话、清理任务并自动停止。隐藏聊天面板不算退出前端。
+
+需要后台常驻时运行 `uv run lite core start`；已有自动 core 会转为常驻模式。手动启动 `lite-core` 默认也常驻。使用 `uv run lite core stop` 主动停止，`uv run lite core status` 查看状态。
+
+先在仓库运行 `uv sync`，再在 `extensions/vscode` 运行 `npm install`。
+在 VS Code 调试面板选择 **AgentLite: VS Code Demo** 并按 F5；开发窗口中点击右侧辅助侧边栏的 AgentLite 标签。
+也可以构建 VSIX 后使用“从 VSIX 安装”。具体配置、测试和打包步骤见 [插件说明](extensions/vscode/README.md)。
+
+插件支持在其他项目中使用：core 从 AgentLite 安装位置读取运行配置，聊天会话绑定当前项目；必要时使用用户设置 `agentLite.pythonPath` 和 `agentLite.coreDirectory` 指定共享运行环境与配置目录。
+
 ## 安装到项目根目录（.venv）
 项目开始时只有 `.python-version` 和 `pyproject.toml`：前者指定 Python 版本，后者声明项目信息与依赖。执行：
 

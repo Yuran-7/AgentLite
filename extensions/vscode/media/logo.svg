@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>AgentLite</title>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#172B35"/>
+      <stop offset="1" stop-color="#0B151E"/>
+    </linearGradient>
+    <linearGradient id="letter" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#BDFCE5"/>
+      <stop offset="1" stop-color="#47D7B5"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#background)"/>
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="53.25" fill="none" stroke="#FFFFFF" stroke-opacity=".09" stroke-width="1.5"/>
+  <path fill="url(#letter)" fill-rule="evenodd" d="M56 195 101 67H135L180 195H149L139 163H97L87 195ZM106 137H130L118 98Z"/>
+  <path fill="#F8D88C" d="m189 48-24 36h17l-9 26 36-43h-20l10-19Z"/>
+</svg>

@@ -22,6 +22,7 @@ from textual.widgets import Label, Static, TextArea
 from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.skills.loader import SkillLoader
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
+from agent_lite.tui.core_connection import connect_frontend, frontend_heartbeat
 
 log = logging.getLogger(__name__)
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -1023,9 +1024,12 @@ class AgentLiteTuiApp(App[None]):
     async def action_quit(self) -> None:
         if self._client is not None and self._session_id is not None:
             try:
-                await self._persist_session_stats(self._session_id)
-                await self._client.send_command("session.close", {"session_id": self._session_id})
-            except (IpcError, RuntimeError, OSError):
+                await asyncio.wait_for(self._persist_session_stats(self._session_id), timeout=2)
+                await asyncio.wait_for(
+                    self._client.send_command("session.close", {"session_id": self._session_id}),
+                    timeout=2,
+                )
+            except (IpcError, RuntimeError, OSError, TimeoutError):
                 self._append(Static("[yellow]warning: failed to close session[/yellow]"))
         self.exit()
 
@@ -1765,10 +1769,9 @@ class AgentLiteTuiApp(App[None]):
         header = self.query_one("#header", Label)
 
         while True:
-            client = SocketClient(self._host, self._port)
             self._client = None
             try:
-                await client.connect()
+                client = await connect_frontend(self._host, self._port, self._workspace_root)
             except (ConnectionRefusedError, OSError):
                 log.warning("connection refused %s:%s, retrying", self._host, self._port)
                 self._update_header("disconnected")
@@ -1779,6 +1782,7 @@ class AgentLiteTuiApp(App[None]):
             self._client = client
             self._update_header("connecting")
             loop_task = asyncio.create_task(client.run_event_loop())
+            heartbeat_task: asyncio.Task[None] | None = None
 
             async def on_event(event: dict[str, Any]) -> None:
                 self._handle_event(event)
@@ -1786,6 +1790,12 @@ class AgentLiteTuiApp(App[None]):
             client.on_event(on_event)
 
             try:
+                lease = await asyncio.wait_for(
+                    client.send_command("frontend.register", {"client": "tui"}), timeout=5
+                )
+                heartbeat_task = asyncio.create_task(
+                    frontend_heartbeat(client, float(lease.get("heartbeat_interval_s", 10)))
+                )
                 loop_task.add_done_callback(
                     lambda t: log.error("loop_task failed: %s", t.exception())
                     if not t.cancelled() and t.exception() is not None
@@ -1819,9 +1829,22 @@ class AgentLiteTuiApp(App[None]):
                     prompt.focus()
                 self._update_header("ready")
                 await loop_task
-            except IpcError as e:
-                header.update(f"[bold]AgentLite[/bold]  [red]subscribe error: {e}[/red]")
+            except (IpcError, OSError, RuntimeError) as e:
+                header.update(f"[bold]AgentLite[/bold]  [red]core error: {escape(str(e))}[/red]")
+            except asyncio.CancelledError:
+                if not loop_task.done():
+                    raise
             finally:
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    await asyncio.gather(heartbeat_task, return_exceptions=True)
+                if not loop_task.done():
+                    try:
+                        await asyncio.wait_for(
+                            client.send_command("frontend.unregister", {}), timeout=1
+                        )
+                    except (OSError, RuntimeError, TimeoutError):
+                        pass
                 if not loop_task.done():
                     loop_task.cancel()
                 self._client = None
@@ -1833,6 +1856,7 @@ class AgentLiteTuiApp(App[None]):
                     prompt.border_title = "disconnected, retrying..."
                 self._break_llm()
                 await client.close()
+                await asyncio.gather(loop_task, return_exceptions=True)
 
             self._update_header("disconnected")
             await asyncio.sleep(2)

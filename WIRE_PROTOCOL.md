@@ -142,6 +142,176 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "type": "object"
 }
 ```
+### CoreKeepAliveCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "core.keep_alive",
+      "default": "core.keep_alive",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "CoreKeepAliveCommand",
+  "type": "object"
+}
+```
+### CoreKeepAliveResult
+
+| Field | Type | Required |
+|---|---|---|
+| `managed` | `boolean` | no |
+
+```json
+{
+  "properties": {
+    "managed": {
+      "default": false,
+      "title": "Managed",
+      "type": "boolean"
+    }
+  },
+  "title": "CoreKeepAliveResult",
+  "type": "object"
+}
+```
+
+### FrontendRegisterCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `client` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "frontend.register",
+      "default": "frontend.register",
+      "title": "Type",
+      "type": "string"
+    },
+    "client": {
+      "enum": [
+        "tui",
+        "vscode"
+      ],
+      "title": "Client",
+      "type": "string"
+    }
+  },
+  "required": [
+    "client"
+  ],
+  "title": "FrontendRegisterCommand",
+  "type": "object"
+}
+```
+### FrontendHeartbeatCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "frontend.heartbeat",
+      "default": "frontend.heartbeat",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "FrontendHeartbeatCommand",
+  "type": "object"
+}
+```
+### FrontendUnregisterCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "frontend.unregister",
+      "default": "frontend.unregister",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "title": "FrontendUnregisterCommand",
+  "type": "object"
+}
+```
+### FrontendLeaseResult
+
+| Field | Type | Required |
+|---|---|---|
+| `managed` | `boolean` | yes |
+| `heartbeat_interval_s` | `number` | no |
+| `lease_timeout_s` | `number` | no |
+| `idle_timeout_s` | `number` | no |
+
+```json
+{
+  "properties": {
+    "managed": {
+      "title": "Managed",
+      "type": "boolean"
+    },
+    "heartbeat_interval_s": {
+      "default": 10.0,
+      "title": "Heartbeat Interval S",
+      "type": "number"
+    },
+    "lease_timeout_s": {
+      "default": 45.0,
+      "title": "Lease Timeout S",
+      "type": "number"
+    },
+    "idle_timeout_s": {
+      "default": 15.0,
+      "title": "Idle Timeout S",
+      "type": "number"
+    }
+  },
+  "required": [
+    "managed"
+  ],
+  "title": "FrontendLeaseResult",
+  "type": "object"
+}
+```
+### FrontendUnregisterResult
+
+| Field | Type | Required |
+|---|---|---|
+| `accepted` | `boolean` | no |
+
+```json
+{
+  "properties": {
+    "accepted": {
+      "default": true,
+      "title": "Accepted",
+      "type": "boolean"
+    }
+  },
+  "title": "FrontendUnregisterResult",
+  "type": "object"
+}
+```
 
 ### AgentRunCommand
 
@@ -2437,6 +2607,7 @@ Session events are appended to `sessions/.../<session_id>/events.jsonl`; standal
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `token` | `string` | yes |
+| `reset` | `boolean` | no |
 | `ts` | `string` | yes |
 
 ```json
@@ -2455,6 +2626,11 @@ Session events are appended to `sessions/.../<session_id>/events.jsonl`; standal
     "token": {
       "title": "Token",
       "type": "string"
+    },
+    "reset": {
+      "default": false,
+      "title": "Reset",
+      "type": "boolean"
     },
     "ts": {
       "title": "Ts",

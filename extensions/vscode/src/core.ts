@@ -157,7 +157,18 @@ async function ensureCoreLocked(options: CoreOptions, dependencies: Runtime, sta
       try { process.kill(launched.pid, 0); } catch (error) { alive = (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
       if (!alive) {
         let detail = '';
-        try { detail = readFileSync(logfile).subarray(logOffset).toString('utf8').match(/\b[A-Z][A-Z0-9_]*_API_KEY not set\b/)?.[0] || ''; } catch { /* 日志入口仍可用于诊断。 */ }
+        try {
+          const attemptLog = readFileSync(logfile).subarray(logOffset).toString('utf8');
+          const bind = attemptLog.match(/CORE_BIND_FAILED port=(\d+) reason=(ACCESS_DENIED|ADDRESS_IN_USE)\b/);
+          // Older cores lack the marker. Never copy arbitrary log text into the UI.
+          const denied = bind?.[2] === 'ACCESS_DENIED' || /\bwinerror\s*10013\b/i.test(attemptLog);
+          const occupied = bind?.[2] === 'ADDRESS_IN_USE' || /\bwinerror\s*10048\b/i.test(attemptLog);
+          if (denied || occupied) {
+            detail = `本地端口 ${options.port} ${denied ? '被 Windows 拒绝绑定（10013）' : '已被占用'}。请稍后重新连接；持续失败时在设置中修改 agentLite.corePort。`;
+          } else {
+            detail = attemptLog.match(/\b[A-Z][A-Z0-9_]*_API_KEY not set\b/)?.[0] || '';
+          }
+        } catch { /* 日志入口仍可用于诊断。 */ }
         throw new Error(`core 启动后退出。配置目录：${coreDirectory}。${detail || '请查看启动日志。'}`);
       }
     }

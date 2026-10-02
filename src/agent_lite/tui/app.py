@@ -1192,7 +1192,7 @@ class AgentLiteTuiApp(App[None]):
         self._memory_generate_enabled = msg.generate_enabled
         self._memory_use_enabled = msg.use_enabled
         msg.widget.remove()
-        self._restore_prompt_after_memory_select()
+        self._restore_prompt()
         generate = "on" if self._memory_generate_enabled else "off"
         use = "on" if self._memory_use_enabled else "off"
         self._append(Static(
@@ -1211,7 +1211,7 @@ class AgentLiteTuiApp(App[None]):
     # 取消 /memories 选择，不改变之前的开关状态
     def on_memory_select_cancelled(self, msg: MemorySelect.Cancelled) -> None:
         msg.widget.remove()
-        self._restore_prompt_after_memory_select()
+        self._restore_prompt()
 
     # 接收历史 session 选择结果并启动恢复流程
     def on_resume_select_confirmed(self, msg: ResumeSelect.Confirmed) -> None:
@@ -1227,12 +1227,12 @@ class AgentLiteTuiApp(App[None]):
     # 取消历史 session 选择并恢复输入框
     def on_resume_select_cancelled(self, msg: ResumeSelect.Cancelled) -> None:
         msg.widget.remove()
-        self._restore_prompt_after_resume()
+        self._restore_prompt()
 
     # 从 core 加载全部历史 session 并挂载选择器
     async def _do_open_resume(self) -> None:
         if self._client is None:
-            self._restore_prompt_after_resume()
+            self._restore_prompt()
             return
         try:
             result = await self._client.send_command("session.list", {})
@@ -1245,7 +1245,7 @@ class AgentLiteTuiApp(App[None]):
                 self._append(
                     Static("[dim]no previous sessions found[/dim]", classes="log-line")
                 )
-                self._restore_prompt_after_resume()
+                self._restore_prompt()
                 return
             self.mount(
                 ResumeSelect(sessions, self._workspace_root),
@@ -1253,7 +1253,7 @@ class AgentLiteTuiApp(App[None]):
             )
         except (IpcError, RuntimeError, OSError, KeyError, TypeError) as exc:
             self._append(Static(f"[red]resume list error: {exc}[/red]", classes="log-line"))
-            self._restore_prompt_after_resume()
+            self._restore_prompt()
 
     # 恢复选中的 session、历史消息、事件订阅和 session 级设置
     async def _do_resume_session(
@@ -1261,7 +1261,7 @@ class AgentLiteTuiApp(App[None]):
     ) -> None:
         if self._client is None:
             self._busy = False
-            self._restore_prompt_after_resume()
+            self._restore_prompt()
             return
         old_session_id = self._session_id
         if old_session_id is not None:
@@ -1299,11 +1299,11 @@ class AgentLiteTuiApp(App[None]):
                 history.get("messages", []),
             )
             self._busy = False
-            self._restore_prompt_after_resume()
+            self._restore_prompt()
             self._update_header("ready")
         except (IpcError, RuntimeError, OSError, KeyError, TypeError) as exc:
             self._busy = False
-            self._restore_prompt_after_resume()
+            self._restore_prompt()
             self._update_header("ready")
             self._append(Static(f"[red]resume error: {exc}[/red]", classes="log-line"))
 
@@ -1364,17 +1364,8 @@ class AgentLiteTuiApp(App[None]):
                 parts.append(f"[tool: {block.get('name', 'unknown')}]")
         return "\n\n".join(parts)
 
-    # 恢复或取消后重新启用消息输入框
-    def _restore_prompt_after_resume(self) -> None:
-        prompt = self._prompt()
-        if prompt is not None:
-            prompt.disabled = False
-            prompt.read_only = False
-            prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-            prompt.focus()
-
-    # /memories 选择完成或取消后恢复输入框
-    def _restore_prompt_after_memory_select(self) -> None:
+    # 会话就绪或选择完成、取消后重新启用消息输入框
+    def _restore_prompt(self) -> None:
         prompt = self._prompt()
         if prompt is not None:
             prompt.disabled = False
@@ -1488,14 +1479,7 @@ class AgentLiteTuiApp(App[None]):
             await log_view.mount(Static(self._BANNER, id="banner"))
             self._update_context_status()
             self._busy = False
-            prompt = self._prompt()
-            if prompt is not None:
-                prompt.disabled = False
-                prompt.read_only = False
-                prompt.border_title = (
-                    "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                )
-                prompt.focus()
+            self._restore_prompt()
             self._update_header("ready")
         except (IpcError, RuntimeError, OSError, KeyError) as exc:
             self._session_id = old_session_id
@@ -1821,12 +1805,7 @@ class AgentLiteTuiApp(App[None]):
                     else None
                 )
                 log.info("session created session_id=%s", self._session_id)
-                prompt = self._prompt()
-                if prompt is not None:
-                    prompt.disabled = False
-                    prompt.read_only = False
-                    prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                    prompt.focus()
+                self._restore_prompt()
                 self._update_header("ready")
                 await loop_task
             except (IpcError, OSError, RuntimeError) as e:
@@ -1947,12 +1926,7 @@ class AgentLiteTuiApp(App[None]):
                     self.query_one(PermissionSelect).remove()
                 except Exception:
                     pass
-            prompt = self._prompt()
-            if prompt is not None:
-                prompt.disabled = False
-                prompt.read_only = False
-                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                prompt.focus()
+            self._restore_prompt()
             self._update_context_status()
             self._update_header("ready")
 
@@ -2147,8 +2121,11 @@ class AgentLiteTuiApp(App[None]):
             input_tokens = int(event.get("input_tokens") or 0)
             cache_read_tokens = int(event.get("cache_read_input_tokens") or 0)
             cache_creation_tokens = int(event.get("cache_creation_input_tokens") or 0)
-            total_input_tokens = input_tokens
-            if self._llm_protocol == "anthropic":
+            normalized_input = event.get("total_input_tokens")
+            total_input_tokens = (
+                int(normalized_input) if normalized_input is not None else input_tokens
+            )
+            if normalized_input is None and self._llm_protocol == "anthropic":
                 total_input_tokens += cache_read_tokens + cache_creation_tokens
             self._last_usage = (
                 total_input_tokens,

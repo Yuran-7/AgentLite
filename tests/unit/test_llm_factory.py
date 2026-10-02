@@ -18,6 +18,7 @@ def test_factory_selects_openai_protocol(monkeypatch: pytest.MonkeyPatch) -> Non
         protocol="openai",
         default_model="deepseek-v3",
         base_url="https://openai.example.com/v1",
+        context_window=128_000,
     )
 
     result = factory.create_llm_provider(config)
@@ -27,6 +28,7 @@ def test_factory_selects_openai_protocol(monkeypatch: pytest.MonkeyPatch) -> Non
         "deepseek-v3",
         api_key="test-key",
         base_url="https://openai.example.com/v1",
+        context_window=128_000,
     )
 
 
@@ -45,6 +47,7 @@ def test_factory_selects_anthropic_protocol(monkeypatch: pytest.MonkeyPatch) -> 
         "deepseek-chat",
         api_key=None,
         base_url=None,
+        context_window=None,
     )
 
 

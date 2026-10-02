@@ -36,12 +36,14 @@ def create_llm_provider(config: LlmConfig) -> LLMProvider:
             config.default_model,
             api_key=generic_api_key,
             base_url=base_url,
+            context_window=config.context_window,
         )
     if protocol == "openai":
         return OpenAICompatibleProvider(
             config.default_model,
             api_key=generic_api_key,
             base_url=base_url,
+            context_window=config.context_window,
         )
     raise SystemExit(
         "Config error: llm.protocol must be 'anthropic' or 'openai',"

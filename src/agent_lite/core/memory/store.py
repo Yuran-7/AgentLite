@@ -130,27 +130,12 @@ class MemoryStore:
     # 将数据库行转换为长期记忆模型。
     @staticmethod
     def _record_from_row(row: sqlite3.Row) -> MemoryRecord:
-        return MemoryRecord(
-            id=row["id"],
-            scope=row["scope"],
-            profile_id=row["profile_id"],
-            workspace_id=row["workspace_id"],
-            session_id=row["session_id"],
-            type=row["type"],
-            key=row["key"],
-            content=row["content"],
-            status=row["status"],
-            confidence=float(row["confidence"]),
-            importance=float(row["importance"]),
-            source=json.loads(row["source_json"]),
-            tags=json.loads(row["tags_json"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            expires_at=row["expires_at"],
-            supersedes=row["supersedes"],
-            deleted_at=row["deleted_at"],
-            reason=row["reason"],
-        )
+        data = {key: row[key] for key in MemoryRecord.model_fields if key not in ("source", "tags")}
+        for key in ("confidence", "importance"):
+            data[key] = float(data[key])
+        for key in ("source", "tags"):
+            data[key] = json.loads(row[f"{key}_json"])
+        return MemoryRecord.model_validate(data)
 
     # 返回指定 Session 的稳定 rollout summary 路径。
     def rollout_summary_path(self, session_id: str) -> Path:

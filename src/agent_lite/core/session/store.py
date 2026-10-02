@@ -173,8 +173,21 @@ class SessionStore:
             messages.append({"role": role, "content": row.get("content", "")})
 
         messages = self._trim_orphan_tool_use(messages)
-        from agent_lite.core.compact.budget import truncate_tool_results
-        return truncate_tool_results(messages)
+        from agent_lite.core.tools.result_storage import ToolResultStore
+        result_store = ToolResultStore(self.session_dir(sid))
+        # 旧历史的大结果按相同规则生成文件预览，新历史直接复用已保存的模型内容
+        for message in messages:
+            content = message.get("content")
+            if message["role"] == "user" and isinstance(content, list):
+                for block in content:
+                    if block.get("type") == "tool_result" and isinstance(block.get("content"), str):
+                        text = block["content"]
+                        if text.startswith("<persisted-output>\n"):
+                            continue
+                        block["content"] = result_store.prepare(
+                            text, "legacy", str(block.get("tool_use_id", "")),
+                        ).content
+        return messages
 
     # 恢复展示历史并保留运行标识与日志中的真实耗时，不影响模型上下文。
     def read_history_messages(self, sid: str) -> list[dict[str, Any]]:

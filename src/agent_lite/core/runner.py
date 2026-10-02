@@ -40,6 +40,7 @@ from agent_lite.core.tools.builtin import (
     WriteFileTool,
 )
 from agent_lite.core.tools.registry import ToolRegistry
+from agent_lite.core.tools.result_storage import ToolResultStore
 from agent_lite.core.trace.provider import TracingProvider
 from agent_lite.core.trace.writer import TraceWriter
 
@@ -162,6 +163,15 @@ class AgentRunner:
                         agent_registry=AgentRegistry(workspace_root),
                         provider_factory=lambda model: self._create_provider(model, session),
                         extra_tools=extra_tools,
+                        result_store=ToolResultStore(
+                            store.session_dir(session.id)
+                            if session is not None and store is not None
+                            else self._events_file.parent,
+                            limit_chars=self._config.compaction.tool_result_limit,
+                            keep_chars=self._config.compaction.tool_result_keep,
+                            token_limit=self._config.compaction.tool_result_token_limit,
+                            batch_token_limit=self._config.compaction.tool_result_batch_token_limit,
+                        ),
                     )
                 )
         if self._mcp_manager is not None:
@@ -277,6 +287,13 @@ class AgentRunner:
                     compact_threshold=self._config.compaction.auto_threshold,
                     session_id=session_id_str,
                     task_manager=self._task_manager,
+                    result_store=ToolResultStore(
+                        session_dir,
+                        limit_chars=self._config.compaction.tool_result_limit,
+                        keep_chars=self._config.compaction.tool_result_keep,
+                        token_limit=self._config.compaction.tool_result_token_limit,
+                        batch_token_limit=self._config.compaction.tool_result_batch_token_limit,
+                    ),
                 )
                 await self._task_manager.activate_run(run_id)
                 try:

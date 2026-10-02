@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import type { CoreEvent, Decision } from './protocol';
+import type { CoreEvent, Decision, ImageAttachment } from './protocol';
 import type { Bookmark } from './bookmarks';
 
 export type Card = {
   id: string; kind: 'user' | 'assistant' | 'tool' | 'permission' | 'plan' | 'notice' | 'subagent';
   runId?: string; text: string; title?: string; status?: string; params?: unknown;
   output?: string; elapsedMs?: number; toolUseId?: string; createdAt?: string; workMs?: number; completed?: boolean;
+  images?: ImageAttachment[];
   plan?: { step: string; status: string }[];
 };
 export type ChatState = {
+  mcpServers?: McpServer[]; mcpLoading?: boolean; mcpBusy?: boolean; mcpError?: string;
+  mcpConfigError?: string; mcpSettingsPath?: string; mcpNeedsReload?: boolean;
   archivedSessionIds?: string[];
   bookmarks?: Bookmark[]; bookmarkCardIds?: Record<string, string>;
   title?: string; history?: SessionSummary[]; models?: ModelProfile[]; selectedModel?: string;
@@ -23,6 +26,11 @@ export type ChatState = {
 };
 export type SessionSummary = { session_id: string; title: string; updated_at: string; workspace_root?: string };
 export type ModelProfile = { id: string; name?: string; model: string; protocol: string };
+export type McpServer = {
+  name: string; transport: 'stdio' | 'http' | 'tcp'; enabled: boolean;
+  status: 'connected' | 'disabled' | 'error'; command?: string; url?: string; host?: string; port?: number; error?: string;
+  tools: { name: string; description: string; inputSchema: Record<string, unknown> }[];
+};
 export interface SessionClient {
   request(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>>;
   on(name: 'event', listener: (event: CoreEvent) => void): unknown;
@@ -174,6 +182,43 @@ export class ChatSession {
     }
   }
 
+  private applyMcp(result: Record<string, unknown>): void {
+    this.state.mcpServers = Array.isArray(result.servers) ? result.servers as McpServer[] : [];
+    this.state.mcpSettingsPath = String(result.settingsPath ?? '');
+    this.state.mcpConfigError = String(result.configError ?? '');
+  }
+
+  async refreshMcp(): Promise<void> {
+    if (!this.client || this.state.connection !== 'ready' || this.state.mcpLoading || this.state.mcpBusy) return;
+    this.state.mcpLoading = true; this.publish();
+    try {
+      this.applyMcp(await this.client.request('mcp.list', {})); this.state.mcpError = undefined;
+    } catch (error) { this.state.mcpError = this.mcpErrorText(error); }
+    finally { this.state.mcpLoading = false; this.publish(); }
+  }
+
+  private mcpErrorText(error: unknown): string {
+    const text = this.errorText(error);
+    return text.includes('Method not found')
+      ? '当前 core 尚不支持 MCP 管理。请在任务结束后重启 core，再点击重连。' : text;
+  }
+
+  async manageMcp(action: 'reload' | 'reconnect' | 'set_enabled' | 'add' | 'configure',
+    params: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
+    if (!this.client || this.state.connection !== 'ready' || this.state.mcpBusy ||
+        (action !== 'configure' && (this.state.busy || this.state.sending))) return;
+    this.state.mcpBusy = true; this.state.mcpError = undefined; this.publish();
+    try {
+      const result = await this.client.request('mcp.manage', { action, ...params }, 0);
+      this.applyMcp(result);
+      if (action !== 'configure') this.state.mcpNeedsReload = false;
+      return result;
+    } catch (error) { this.state.mcpError = this.mcpErrorText(error); }
+    finally { this.state.mcpBusy = false; this.publish(); }
+  }
+
+  mcpSettingsSaved(): void { this.state.mcpNeedsReload = true; this.publish(); }
+
   async selectModel(modelId: string): Promise<void> {
     if (!this.client || this.state.connection !== 'ready' || this.state.busy || this.state.sending) return;
     this.state.sending = true; this.publish();
@@ -219,14 +264,14 @@ export class ChatSession {
   }
 
   // 发送任务时锁定输入，等待整轮 RPC 响应但让事件立即驱动显示。
-  async send(content: string): Promise<void> {
-    if (!this.client || this.state.connection !== 'ready' || this.state.busy || this.state.sending || !content.trim()) return;
+  async send(content: string, images: ImageAttachment[] = []): Promise<void> {
+    if (!this.client || this.state.connection !== 'ready' || this.state.busy || this.state.sending || this.state.mcpBusy || (!content.trim() && !images.length)) return;
     const epoch = this.epoch;
     this.state.busy = true; this.state.sending = true; this.state.error = undefined;
     this.state.workStartedAt = Date.now();
-    this.add('user', content); this.publish();
+    this.add('user', content).images = images; this.publish();
     try {
-      await this.client.request('session.send_message', { session_id: this.state.sessionId, content }, 0);
+      await this.client.request('session.send_message', { session_id: this.state.sessionId, content, ...(images.length ? { images } : {}) }, 0);
       // core 的响应晚于 run.finished；绝不从响应重新激活已结束的 run。
     } catch (error) {
       if (epoch === this.epoch && !this.disposed) {
@@ -352,7 +397,10 @@ export class ChatSession {
     } else if (type === 'llm.model_selected' && !this.children.has(runId)) {
       this.state.model = String(event.model ?? '');
     } else if (type === 'llm.usage' && !this.children.has(runId)) {
-      this.state.usage = `输入 ${event.input_tokens ?? 0} · 输出 ${event.output_tokens ?? 0} · 缓存 ${event.cache_read_input_tokens ?? 0} · 上下文 ${Number(event.context_pct ?? 0).toFixed(1)}%`;
+      const input = event.total_input_tokens ?? event.input_tokens ?? 0;
+      const pct = (Number(event.context_pct ?? 0) * 100).toFixed(1);
+      const estimated = event.context_window_estimated ? '≈' : '';
+      this.state.usage = `输入 ${input} · 输出 ${event.output_tokens ?? 0} · 缓存 ${event.cache_read_input_tokens ?? 0} · 上下文 ${estimated}${pct}%`;
     } else if (type === 'subagent.finished') {
       const card = this.state.cards.findLast(item => item.kind === 'subagent' && item.runId === runId);
       if (card) card.status = String(event.status);
@@ -413,7 +461,7 @@ export function historyCards(messages: unknown[]): Card[] {
     const message = value as Record<string, unknown>;
     const kind = message.role === 'assistant' ? 'assistant' : 'user';
     const content = message.content;
-    const prompt = kind === 'user' && (typeof content === 'string' || (Array.isArray(content) && content.some(block => block?.type === 'text')));
+    const prompt = kind === 'user' && (typeof content === 'string' || (Array.isArray(content) && content.some(block => ['text', 'image'].includes(block?.type))));
     if (prompt) group = randomUUID();
     const runId = typeof message.run_id === 'string' ? message.run_id : group;
     const metadata = { runId, createdAt: typeof message.created_at === 'string' ? message.created_at : undefined,
@@ -422,6 +470,12 @@ export function historyCards(messages: unknown[]): Card[] {
       result.push({ id: randomUUID(), kind, text: message.content, ...metadata }); continue;
     }
     if (!Array.isArray(message.content)) continue;
+    if (kind === 'user' && message.content.some(block => block?.type === 'image')) {
+      const images: ImageAttachment[] = message.content.filter(block => block?.type === 'image' && block.source?.type === 'base64')
+        .map(block => ({ name: 'image', media_type: block.source.media_type, data: block.source.data }));
+      const text = message.content.filter(block => block?.type === 'text').map(block => String(block.text ?? '')).join('');
+      result.push({ id: randomUUID(), kind, text, images, ...metadata }); continue;
+    }
     for (const block of message.content) {
       if (!block || typeof block !== 'object') continue;
       if (block.type === 'text') result.push({ id: randomUUID(), kind, text: String(block.text ?? ''), ...metadata });

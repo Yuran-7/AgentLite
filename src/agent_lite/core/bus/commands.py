@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Discriminator, Field
 
+from agent_lite.core.llm.images import ImageAttachment
 from agent_lite.core.memory.model import MemoryRecord, MemoryScope
 from agent_lite.core.session.model import SessionMode, SessionStatus
 
@@ -163,6 +164,7 @@ class SessionSendMessageCommand(BaseModel):
     type: Literal["session.send_message"] = "session.send_message"
     session_id: str
     content: str
+    images: list[ImageAttachment] = Field(default_factory=list, max_length=4)
 
 
 class SessionSendMessageResult(BaseModel):
@@ -242,6 +244,18 @@ class SessionSetStatsResult(BaseModel):
     stats: dict[str, Any]
 
 
+class McpListCommand(BaseModel):
+    type: Literal["mcp.list"] = "mcp.list"
+
+
+class McpManageCommand(BaseModel):
+    type: Literal["mcp.manage"] = "mcp.manage"
+    action: Literal["reload", "reconnect", "set_enabled", "add", "configure"]
+    name: str = ""
+    enabled: bool = True
+    server: dict[str, Any] | None = None
+
+
 class MemorySearchCommand(BaseModel):
     type: Literal["memory.search"] = "memory.search"
     query: str = ""
@@ -293,6 +307,8 @@ Command = Annotated[
     | SessionRenameCommand
     | SessionSetModelCommand
     | ModelListCommand
+    | McpListCommand
+    | McpManageCommand
     | SessionSetWorkspaceCommand
     | SessionSendMessageCommand
     | SessionCancelCommand

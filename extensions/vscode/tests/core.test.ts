@@ -147,3 +147,26 @@ test('early startup exit surfaces missing credentials without leaking logs', asy
     }, 2000), error => String(error).includes('ANTHROPIC_API_KEY not set') && !String(error).includes('private-test-value'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('early bind failure reports the configured port without leaking current or old logs', async () => {
+  for (const diagnostic of ['CORE_BIND_FAILED port=7437 reason=ACCESS_DENIED', '[winerror10013]', 'CORE_BIND_FAILED port=7437 reason=ADDRESS_IN_USE']) {
+    const root = mkdtempSync(join(tmpdir(), 'agentlite-bind-'));
+    const port = await freePort();
+    writeFileSync(join(root, 'core-launch.log'), 'OLD_API_KEY not set\n');
+    try {
+      await assert.rejects(ensureCore({ ...options(port), storageDir: root }, {
+        preflight: async () => {},
+        launch: async () => {
+          const child = spawn(process.execPath, ['-e', ''], { windowsHide: true, stdio: 'ignore' });
+          const pid = child.pid!; await new Promise(resolve => child.once('exit', resolve));
+          writeFileSync(join(root, 'core-launch.log'), `OLD_API_KEY not set\nprivate-test-value\n${diagnostic}\n`);
+          return { pid };
+        }
+      }, 2000), error => {
+        const text = String(error);
+        return text.includes(`本地端口 ${port}`) && text.includes('agentLite.corePort') &&
+          !text.includes('private-test-value') && !text.includes('OLD_API_KEY');
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});

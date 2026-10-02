@@ -25,6 +25,7 @@ from agent_lite.core.tools.builtin.web_fetch import WebFetchTool
 from agent_lite.core.tools.builtin.web_search import WebSearchTool
 from agent_lite.core.tools.builtin.write_file import WriteFileTool
 from agent_lite.core.tools.registry import ToolRegistry
+from agent_lite.core.tools.result_storage import ToolResultStore
 
 if TYPE_CHECKING:
     from agent_lite.core.config import WebConfig
@@ -65,6 +66,7 @@ class SpawnAgentTool(BaseTool):
         agent_registry: AgentRegistry | None = None,
         provider_factory: Callable[[str], LLMProvider] | None = None,
         extra_tools: list[BaseTool] | None = None,
+        result_store: ToolResultStore | None = None,
     ) -> None:
         self._provider = provider
         self._provider_factory = provider_factory
@@ -96,6 +98,7 @@ class SpawnAgentTool(BaseTool):
         self._depth = depth
         self._agent_registry = agent_registry or AgentRegistry(workspace_root)
         self._extra_tools = extra_tools or []
+        self._result_store = result_store
 
         def describe_agent(agent: AgentDefinition) -> str:
             tools = self._agent_registry.effective_tools(
@@ -183,10 +186,7 @@ class SpawnAgentTool(BaseTool):
         )
         child_bus = EventBus()
 
-        async def _bridge(event: BaseModel) -> None:
-            await self._parent_bus.publish(event)
-
-        child_bus.subscribe(_bridge)
+        child_bus.subscribe(self._parent_bus.publish)
         child_registry = self._build_child_registry(
             child_bus, child_run_id, definition, provider
         )
@@ -197,6 +197,7 @@ class SpawnAgentTool(BaseTool):
             permission_manager=self._permission_manager,
             session_id=self._session_id,
             task_manager=self._task_manager,
+            result_store=self._result_store,
         )
         await self._parent_bus.publish(
             SubagentStartedEvent(
@@ -352,6 +353,7 @@ class SpawnAgentTool(BaseTool):
                     depth=self._depth + 1,
                     agent_registry=self._agent_registry,
                     extra_tools=self._extra_tools,
+                    result_store=self._result_store,
                 )
             )
         return registry

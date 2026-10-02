@@ -571,6 +571,23 @@ def test_subagent_usage_does_not_change_context_status() -> None:
     assert app._last_usage == (100, 20, 80)  # type: ignore[attr-defined]
 
 
+# 功能：验证 TUI 优先使用 provider 归一化输入，不按当前协议重复添加缓存
+# 设计：刻意配置 Anthropic 前端并发送两次含归一化总量的事件，区分水位和累计用量
+def test_normalized_usage_avoids_protocol_dependent_double_counting() -> None:
+    app = AgentLiteTuiApp("127.0.0.1", 9999)
+    app._llm_protocol = "anthropic"
+    for total, pct in [(21_024, 0.10723), (3_000, 0.016)]:
+        app._handle_event({
+            "type": "llm.usage", "run_id": "root", "input_tokens": 1_000,
+            "total_input_tokens": total, "output_tokens": 200,
+            "cache_read_input_tokens": 1_500, "cache_creation_input_tokens": 500,
+            "context_pct": pct, "ts": "t",
+        })
+    assert app._last_usage == (3_000, 200, 1_500)
+    assert app._total_input_tokens == 24_024
+    assert app._last_context_pct == 0.016
+
+
 # 功能：验证 tool.call_started 追加 ToolCallBlock，call_finished 更新其结果
 # 设计：直接调用 _handle_event 两次，通过 _pending_tool_blocks 验证状态流转
 def test_tool_call_started_and_finished() -> None:

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_lite.core.mcp.client import McpClient, McpServerUnavailableError, McpToolDef, McpToolError
+from agent_lite.core.mcp.client import (
+    McpClient,
+    McpServerUnavailableError,
+    McpToolDef,
+    McpToolError,
+)
 from agent_lite.core.tools.base import BaseTool, ToolResult
 
 
@@ -20,6 +25,10 @@ class McpTool(BaseTool):
         self.input_schema: dict[str, Any] = (
             tool_def.input_schema or {"type": "object", "properties": {}}
         )
+
+    @property
+    def server_name(self) -> str:
+        return self._server_name
 
     # 调用 MCP server 上的工具，连接不可用或工具执行失败时返回 is_error=True
     async def invoke(self, params: dict[str, object]) -> ToolResult:

@@ -31,6 +31,7 @@ async def running_daemon(
     env["AGENTLITE_LOG_LEVEL"] = "WARNING"
     env["AGENTLITE_SESSIONS_DIR"] = str(tmp_path / "sessions")
     env["AGENTLITE_MEMORY_DIR"] = str(tmp_path / "memory.db")
+    env["AGENTLITE_MCP_SETTINGS"] = str(tmp_path / "mcp.json")
 
     proc = subprocess.Popen([sys.executable, "-m", "agent_lite.core"], env=env)
 

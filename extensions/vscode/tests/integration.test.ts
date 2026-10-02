@@ -33,6 +33,22 @@ test('real Python core: multi-turn tools, approval, timeout, cancel, shared life
       catch { await new Promise(resolve => setTimeout(resolve, 100)); }
     }
     assert(client, diagnostics); await session.attach(client, 'started');
+    await session.refreshMcp(); assert.equal(session.state.mcpServers?.length, 0);
+    await session.manageMcp('add', { server: { name: 'echo', command: python, args: [resolve('tests/fixtures/mcp_echo.py')] } });
+    assert.equal(session.state.mcpServers?.[0].status, 'connected', session.state.mcpError);
+    assert.equal(session.state.mcpServers?.[0].tools[0].name, 'echo__echo');
+    assert(existsSync(join(root, 'mcp.json')));
+    const mcpRun = session.send('mcp echo');
+    await waitFor(() => !session.state.busy || session.state.cards.some(card => card.kind === 'permission' && card.status === 'pending'));
+    const mcpPermission = session.state.cards.find(card => card.kind === 'permission' && card.status === 'pending');
+    if (mcpPermission) await session.permission(mcpPermission.toolUseId!, 'allow_once');
+    await mcpRun;
+    assert(session.state.cards.some(card => card.kind === 'tool' && card.output?.includes('MCP roundtrip 8127')), JSON.stringify(session.state.cards));
+    await session.manageMcp('reconnect', { name: 'echo' }); assert.equal(session.state.mcpServers?.[0].tools.length, 1);
+    await session.manageMcp('set_enabled', { name: 'echo', enabled: false });
+    assert.equal(session.state.mcpServers?.[0].status, 'disabled');
+    assert.equal(JSON.parse(readFileSync(join(root, 'mcp.json'), 'utf8')).servers[0].enabled, false);
+    await session.newSession();
     await session.send('read sample');
     assert(session.state.cards.some(card => card.kind === 'tool' && card.output?.includes('7391')));
     await session.send('follow up');
@@ -46,6 +62,8 @@ test('real Python core: multi-turn tools, approval, timeout, cancel, shared life
     assert.equal(session.state.cards.findLast(card => card.kind === 'permission')?.status, 'timeout');
     const cancelled = session.send('cancel long task');
     await waitFor(() => session.state.cards.some(card => card.kind === 'assistant' && card.text === '等待取消'));
+    await assert.rejects(client.request('mcp.manage', { action: 'reload' }), /任务正在运行/);
+    assert((await client.request('mcp.list', {})).servers);
     await session.cancel(); await cancelled;
     assert(!session.state.busy); assert(session.state.cards.some(card => card.text === '已停止'));
     await session.send('after cancellation');
@@ -78,7 +96,7 @@ test('real auto-start survives launcher exit and stops after all frontends leave
     `[session]\ndir = ${pathValue(join(root, 'sessions'))}\n[memory]\ndir = ${pathValue(join(root, 'memory.db'))}\ngenerate_enabled = false\n`);
   const launcher = spawn(process.execPath, ['--import', 'tsx', resolve('tests/fixtures/launch_core.ts'), foreignWorkspace, python, String(port), root, root], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, AGENTLITE_CONFIG: configPath, LLM_API_KEY: 'local-test-only' }
+    env: { ...process.env, AGENTLITE_CONFIG: configPath, AGENTLITE_MCP_SETTINGS: join(root, 'mcp.json'), LLM_API_KEY: 'local-test-only' }
   });
   let output = ''; let error = '';
   launcher.stdout.on('data', chunk => { output += chunk.toString(); });
@@ -86,7 +104,7 @@ test('real auto-start survives launcher exit and stops after all frontends leave
   const competitors = [0, 1].map(() => {
     const child = spawn(process.execPath, ['--import', 'tsx', resolve('tests/fixtures/launch_core.ts'), foreignWorkspace, python, String(port), root, root], {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, AGENTLITE_CONFIG: configPath, LLM_API_KEY: 'local-test-only' }
+      env: { ...process.env, AGENTLITE_CONFIG: configPath, AGENTLITE_MCP_SETTINGS: join(root, 'mcp.json'), LLM_API_KEY: 'local-test-only' }
     });
     const result = { child, output: '', error: '' };
     child.stdout.on('data', chunk => { result.output += chunk.toString(); });

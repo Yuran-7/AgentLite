@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from agent_lite.core.mcp.http import McpHttpTransport
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +42,24 @@ class McpClient:
         self._transport = ""
         self._lock = asyncio.Lock()
         self._stderr_task: asyncio.Task[None] | None = None
+        self._http: McpHttpTransport | None = None
+
+    @property
+    def is_connected(self) -> bool:
+        if self._http is not None:
+            return self._http.connected
+        if self._transport == "stdio":
+            return self._proc is not None and self._proc.returncode is None
+        if self._transport == "tcp":
+            writer = getattr(self, "_tcp_writer", None)
+            return (self._reader is not None and not self._reader.at_eof()
+                    and writer is not None and not writer.is_closing())
+        return False
+
+    async def connect_http(self, url: str, bearer_token_env: str = "") -> None:
+        self._http = McpHttpTransport(url, bearer_token_env)
+        self._transport = "http"
+        await self._initialize()
 
     _STREAM_LIMIT = 64 * 1024 * 1024  # 64 MB，防止大响应触发 LimitOverrunError
 
@@ -49,8 +72,45 @@ class McpClient:
     ) -> None:
         import os
         merged_env = {**os.environ, **(env or {})}
+        # Windows npm 的 .cmd 包装器不能直接交给 CreateProcess；使用同目录的 Node CLI。
+        executable = shutil.which(command, path=merged_env.get("PATH")) or command
+        if sys.platform == "win32" and Path(executable).suffix.lower() in (".cmd", ".bat"):
+            wrapper = Path(executable)
+            stem = wrapper.stem.lower()
+            cli = wrapper.parent / "node_modules/npm/bin" / f"{stem}-cli.js"
+            node_args: list[str] = []
+            if stem not in ("npx", "npm") or not cli.is_file():
+                # npm installs one .cmd shim per package bin, including scoped packages.
+                # Extract only the literal Node invocation; never interpret batch syntax.
+                try:
+                    shim = wrapper.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    shim = ""
+                invocation = re.search(
+                    r'"%_prog%"((?: --[A-Za-z0-9_=.-]+)*) '
+                    r'"%dp0%[\\/]node_modules[\\/]([^"%\r\n]+)" %\*', shim,
+                )
+                if invocation:
+                    candidate = wrapper.parent / "node_modules" / invocation[2].replace("\\", "/")
+                    if (candidate.suffix.lower() in (".js", ".cjs", ".mjs")
+                            and candidate.resolve().is_relative_to(
+                                (wrapper.parent / "node_modules").resolve()
+                            ) and candidate.is_file()):
+                        cli = candidate
+                        node_args = invocation[1].split()
+                    else:
+                        invocation = None
+                if not invocation:
+                    raise ValueError(
+                        "Windows MCP 请使用可执行文件、Node/Python 脚本或标准 npm 启动器"
+                    )
+            node = wrapper.parent / "node.exe"
+            executable = str(node) if node.is_file() else (
+                shutil.which("node", path=merged_env.get("PATH")) or "node"
+            )
+            args = [*node_args, str(cli), *args]
         self._proc = await asyncio.create_subprocess_exec(
-            command, *args,
+            executable, *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -76,28 +136,40 @@ class McpClient:
 
     # 发送 initialize 请求完成 MCP 握手
     async def _initialize(self) -> None:
-        await self._call("initialize", {
-            "protocolVersion": "2024-11-05",
+        result = await self._call("initialize", {
+            "protocolVersion": "2025-03-26" if self._http else "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "agentlite", "version": "0.1"},
         })
+        if self._http:
+            self._http.initialized(str(result.get("protocolVersion", "2025-03-26")))
         await self._notify("notifications/initialized", {})
 
     # 列出 MCP server 提供的工具定义
     async def list_tools(self) -> list[McpToolDef]:
-        response = await self._call("tools/list", {})
-        tools = []
-        for t in response.get("tools", []):
-            tools.append(McpToolDef(
-                name=t.get("name", ""),
-                description=t.get("description", ""),
-                input_schema=t.get("inputSchema", {}),
-            ))
-        return tools
+        tools: list[McpToolDef] = []
+        params: dict[str, Any] = {}
+        seen: set[str] = set()
+        while True:
+            response = await self._call("tools/list", params)
+            for t in response.get("tools", []):
+                tools.append(McpToolDef(
+                    name=t.get("name", ""), description=t.get("description", ""),
+                    input_schema=t.get("inputSchema", {}),
+                ))
+            cursor = response.get("nextCursor")
+            if not cursor:
+                return tools
+            if not isinstance(cursor, str) or cursor in seen:
+                raise McpToolError("MCP tools/list returned an invalid cursor")
+            seen.add(cursor)
+            params = {"cursor": cursor}
 
     # 调用工具并拼接文本，分别报告连接异常与工具错误
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         response = await self._call("tools/call", {"name": name, "arguments": arguments})
+        if response.get("isError"):
+            raise McpToolError("MCP 工具执行失败")
         parts: list[str] = []
         for item in response.get("content", []):
             if item.get("type") == "text":
@@ -123,6 +195,9 @@ class McpClient:
 
     # 关闭连接并终止 stdio 子进程
     async def close(self) -> None:
+        if self._http is not None:
+            await self._http.close()
+            self._http = None
         # 先取消 stderr 读取任务
         if self._stderr_task is not None:
             self._stderr_task.cancel()
@@ -138,6 +213,7 @@ class McpClient:
             except Exception:
                 try:
                     self._proc.kill()
+                    await self._proc.wait()
                 except Exception:
                     pass
         elif self._transport == "tcp":
@@ -156,6 +232,11 @@ class McpClient:
         req_id_str = str(req_id)
         request = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         async with self._lock:
+            if self._http is not None:
+                try:
+                    return await self._http.post(request)
+                except ValueError as exc:
+                    raise McpServerUnavailableError(str(exc)) from exc
             await self._write_line(json.dumps(request))
             while True:
                 line = await self._read_line()
@@ -181,6 +262,9 @@ class McpClient:
     # 发送 JSON-RPC 通知（无响应）
     async def _notify(self, method: str, params: dict[str, Any]) -> None:
         notification = {"jsonrpc": "2.0", "method": method, "params": params}
+        if self._http is not None:
+            await self._http.post(notification)
+            return
         await self._write_line(json.dumps(notification))
 
     # 向 MCP server 写入一行 JSON

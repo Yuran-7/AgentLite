@@ -240,3 +240,27 @@ def test_project_secret_is_not_used(tmp_path, monkeypatch):
         (tmp_path / ".env").write_text("TEST_MODEL_SECRET=project-secret\n", encoding="utf-8")
         with pytest.raises(ValueError, match=r"~/\.agentlite/\.env"):
             resolve_model(LlmConfig(), None, str(tmp_path))
+
+
+# 功能：验证模型配置支持显式窗口并传递给运行时配置
+# 设计：独立临时用户目录和环境密钥，覆盖两个 profile 切换后的窗口独立性
+@pytest.mark.parametrize("window", [128_000, 1_000_000])
+def test_profile_context_window(tmp_path, monkeypatch, window):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("WINDOW_TEST_KEY", "test")
+    write_settings(tmp_path, {"models": [{"id": "custom", "model": "custom",
+        "protocol": "openai", "apiKeyEnv": "WINDOW_TEST_KEY", "contextWindow": window}]})
+    from agent_lite.core.config import LlmConfig
+    from agent_lite.core.llm.settings import resolve_model
+    assert resolve_model(LlmConfig(), "custom", None).context_window == window
+
+
+# 功能：拒绝零值、负数、布尔值和非整数窗口配置
+# 设计：布尔值是 Python int 子类，必须单独拒绝以保证容量单位正确
+@pytest.mark.parametrize("window", [0, -1, True, 12.5, "128000", None])
+def test_reject_invalid_profile_context_window(tmp_path, monkeypatch, window):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    write_settings(tmp_path, {"models": [{"id": "custom", "model": "custom",
+        "protocol": "openai", "contextWindow": window}]})
+    with pytest.raises(ValueError, match="contextWindow"):
+        model_settings()

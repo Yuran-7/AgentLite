@@ -21,8 +21,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand('agentLite.open', () =>
     vscode.commands.executeCommand('workbench.view.extension.agentLite')));
   context.subscriptions.push(vscode.commands.registerCommand('agentLite.configureModels', () => provider?.openSettings()));
+  context.subscriptions.push(vscode.commands.registerCommand('agentLite.configureMcp', () => provider?.openMcpSettings()));
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(document => {
     if (document.uri.fsPath.endsWith('settings.json')) void provider?.refreshModels();
+    provider?.mcpSettingsSaved(document.uri.fsPath);
   }));
 }
 
@@ -30,6 +32,9 @@ export function activate(context: vscode.ExtensionContext): void {
 export async function deactivate(): Promise<void> { await provider?.shutdown(); provider = undefined; }
 
 class ChatProvider implements vscode.WebviewViewProvider {
+  mcpSettingsSaved(path: string): void {
+    if (path === this.session?.state.mcpSettingsPath) this.session.mcpSettingsSaved();
+  }
   async refreshModels(): Promise<void> { await this.session?.refreshModels(); }
   private view?: vscode.WebviewView;
   private session?: ChatSession;
@@ -139,12 +144,18 @@ class ChatProvider implements vscode.WebviewViewProvider {
         if (!this.session?.state.busy && !this.session?.state.sending) await this.connect();
       } else if (message.type === 'newSession') {
         if (this.session?.state.connection === 'ready') await this.session.newSession();
-      } else if (message.type === 'send') await this.session?.send(message.content);
+      } else if (message.type === 'send') await this.session?.send(message.content, message.images);
       else if (message.type === 'refreshHistory') await this.session?.refreshHistory();
       else if (message.type === 'refreshModels') await this.session?.refreshModels();
       else if (message.type === 'resumeSession') await this.session?.resumeSession(message.sessionId);
       else if (message.type === 'selectModel') await this.session?.selectModel(message.modelId);
       else if (message.type === 'openSettings') await this.openSettings();
+      else if (message.type === 'refreshMcp') await this.session?.refreshMcp();
+      else if (message.type === 'reloadMcp') await this.session?.manageMcp('reload');
+      else if (message.type === 'reconnectMcp') await this.session?.manageMcp('reconnect', { name: message.name });
+      else if (message.type === 'setMcpEnabled') await this.session?.manageMcp('set_enabled', { name: message.name, enabled: message.enabled });
+      else if (message.type === 'openMcpSettings') await this.openMcpSettings();
+      else if (message.type === 'addMcpServer') await this.addMcpServer();
       else if (message.type === 'renameSession') {
         const state = this.session?.state;
         const item = state?.history?.find(entry => entry.session_id === message.sessionId)
@@ -171,6 +182,65 @@ class ChatProvider implements vscode.WebviewViewProvider {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
     await vscode.window.showTextDocument(document, { preview: false });
+  }
+
+  async openMcpSettings(): Promise<void> {
+    if (!this.session && this.supported()) await this.connect();
+    const result = await this.session?.manageMcp('configure');
+    if (!result || typeof result.settingsPath !== 'string' || !result.settingsPath) return;
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(result.settingsPath));
+    await vscode.window.showTextDocument(document, { preview: false });
+  }
+
+  private async addMcpServer(): Promise<void> {
+    const session = this.session;
+    if (!session || session.state.busy || session.state.sending || session.state.mcpBusy) return;
+    const name = await vscode.window.showInputBox({ title: '添加 MCP 服务器', prompt: '服务器名称',
+      validateInput: value => !/^[A-Za-z0-9_-]{1,64}$/.test(value) ? '使用 1–64 位字母、数字、下划线或连字符'
+        : session.state.mcpServers?.some(server => server.name === value) ? '名称已存在' : undefined });
+    if (name === undefined) return;
+    const transport = await vscode.window.showQuickPick([
+      { label: 'STDIO', description: '启动本地 MCP 进程', value: 'stdio' },
+      { label: 'Streamable HTTP', description: '连接 MCP URL', value: 'http' },
+      { label: 'TCP', description: '兼容已有 AgentLite TCP 服务器', value: 'tcp' },
+    ], { title: '添加 MCP 服务器', placeHolder: '选择连接方式' });
+    if (!transport) return;
+    const server: Record<string, unknown> = { name, transport: transport.value, enabled: true };
+    if (transport.value === 'stdio') {
+      const command = await vscode.window.showInputBox({ title: 'STDIO MCP', prompt: '可执行命令或完整路径',
+        placeHolder: '例如 npx 或 python', validateInput: value => !value.trim() ? '命令不能为空' : undefined });
+      if (command === undefined) return;
+      const args = await vscode.window.showInputBox({ title: 'STDIO MCP', prompt: '命令参数（JSON 字符串数组）',
+        value: '[]', placeHolder: '["-y", "@upstash/context7-mcp"]', validateInput: value => {
+          try { const parsed = JSON.parse(value); if (Array.isArray(parsed) && parsed.every(arg => typeof arg === 'string')) return; }
+          catch { /* 输入未完成时显示校验提示。 */ }
+          return '请填写 JSON 字符串数组，如 ["server.py"]';
+        } });
+      if (args === undefined) return;
+      server.command = command.trim(); server.args = JSON.parse(args);
+    } else if (transport.value === 'http') {
+      const url = await vscode.window.showInputBox({ title: 'HTTP MCP', prompt: 'MCP 服务器 URL',
+        placeHolder: 'https://example.com/mcp', validateInput: value => {
+          try { const url = new URL(value); if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) return; }
+          catch { /* 不接受不完整 URL。 */ }
+          return '请填写有效的 http(s) URL';
+        } });
+      if (url === undefined) return;
+      const token = await vscode.window.showInputBox({ title: 'HTTP MCP', prompt: 'Token 的环境变量名（可留空；在 ~/.agentlite/.env 中设置）',
+        placeHolder: 'MY_MCP_TOKEN', validateInput: value => value && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)
+          ? '填写环境变量名，不要填写 Token 本身' : undefined });
+      if (token === undefined) return;
+      server.url = url.trim(); server.bearer_token_env = token;
+    } else {
+      const host = await vscode.window.showInputBox({ title: 'TCP MCP', prompt: '服务器主机', value: 'localhost',
+        validateInput: value => !value.trim() ? '主机不能为空' : undefined });
+      if (host === undefined) return;
+      const port = await vscode.window.showInputBox({ title: 'TCP MCP', prompt: '端口', value: '3000',
+        validateInput: value => !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535 ? '端口应为 1–65535' : undefined });
+      if (port === undefined) return;
+      server.host = host.trim(); server.port = Number(port);
+    }
+    if (session === this.session) await session.manageMcp('add', { server });
   }
 
   // 将重连与首次启动串行化，确保一个窗口只管理一个会话。

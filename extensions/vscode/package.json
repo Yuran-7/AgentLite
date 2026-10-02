@@ -2,7 +2,7 @@
   "name": "agentlite-vscode",
   "displayName": "AgentLite",
   "description": "AgentLite core 的 VS Code 侧边栏客户端",
-  "version": "0.0.36",
+  "version": "0.0.46",
   "icon": "media/icon.png",
   "publisher": "agentlite-local",
   "license": "MIT",
@@ -23,9 +23,6 @@
     },
     "virtualWorkspaces": false
   },
-  "activationEvents": [
-    "onView:agentLite.chat"
-  ],
   "contributes": {
     "viewsContainers": {
       "secondarySidebar": [
@@ -41,11 +38,16 @@
         {
           "type": "webview",
           "id": "agentLite.chat",
+          "icon": "media/agentlite.svg",
           "name": "聊天"
         }
       ]
     },
     "commands": [
+      {
+        "command": "agentLite.configureMcp",
+        "title": "AgentLite: MCP 服务器配置"
+      },
       {
         "command": "agentLite.open",
         "title": "AgentLite: 打开聊天"
@@ -81,6 +83,10 @@
       }
     },
     "jsonValidation": [
+      {
+        "fileMatch": "**/.agentlite/mcp.json",
+        "url": "./media/mcp-settings.schema.json"
+      },
       {
         "fileMatch": "**/.agentlite/settings.json",
         "url": "./media/model-settings.schema.json"

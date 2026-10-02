@@ -53,6 +53,10 @@ class SubagentTaskManager:
         self._delivered_handler: NotificationDeliveredHandler | None = None
         self._lock = asyncio.Lock()
 
+    @property
+    def has_running_tasks(self) -> bool:
+        return any(not task.done() for task in self._tasks.values())
+
     def set_notification_handler(self, handler: NotificationHandler) -> None:
         self._handler = handler
 

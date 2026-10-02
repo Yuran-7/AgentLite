@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentLite MCP 服务器",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["servers"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "servers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "transport": { "enum": ["stdio", "http", "tcp"], "default": "stdio" },
+          "enabled": { "type": "boolean", "default": true },
+          "command": { "type": "string", "description": "STDIO 可执行命令或路径" },
+          "args": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "env": { "type": "object", "additionalProperties": { "type": "string" } },
+          "url": { "type": "string", "pattern": "^https?://", "description": "Streamable HTTP MCP URL" },
+          "bearer_token_env": { "type": "string", "pattern": "^$|^[A-Za-z_][A-Za-z0-9_]*$", "description": "Token 环境变量名，值放在 ~/.agentlite/.env" },
+          "host": { "type": "string", "default": "localhost" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 3000 },
+          "startup_timeout": { "type": "number", "minimum": 1, "maximum": 120, "default": 10 }
+        },
+        "allOf": [
+          { "if": { "properties": { "transport": { "const": "stdio" } } }, "then": { "required": ["command"] } },
+          { "if": { "required": ["transport"], "properties": { "transport": { "const": "http" } } }, "then": { "required": ["url"] } }
+        ]
+      }
+    }
+  }
+}

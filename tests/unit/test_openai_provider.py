@@ -115,12 +115,34 @@ async def test_openai_text_stream_and_usage_events() -> None:
     assert result.usage.input_tokens == 120
     assert result.usage.output_tokens == 8
     assert result.usage.cache_read_input_tokens == 20
+    assert result.usage.total_input_tokens == 120
+    assert result.usage.context_tokens == 128
+    assert result.usage.context_pct == pytest.approx(128 / 200_000)
+    assert result.usage.context_window_estimated is True
     assert [event.type for event in events] == [  # type: ignore[attr-defined]
         "llm.model_selected",
         "llm.token",
         "llm.token",
         "llm.usage",
     ]
+
+
+# 功能：验证截图中的输入和缓存不会重复计数，且窗口可按模型配置
+# 设计：让缓存接近输入总量，用 128K 显式窗口检查响应和事件占用一致
+async def test_custom_window_does_not_double_count_cached_prompt() -> None:
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=FakeOpenAIStream([
+        _usage_chunk(21_024, 422, 19_968),
+    ]))
+    provider = OpenAICompatibleProvider("custom", client=client, context_window=128_000)
+    result, events = await _chat(provider)
+    assert result.usage is not None
+    assert result.usage.total_input_tokens == 21_024
+    assert result.usage.context_tokens == 21_446
+    assert result.usage.context_pct == pytest.approx(21_446 / 128_000)
+    event = next(e for e in events if e.type == "llm.usage")
+    assert event.context_pct == result.usage.context_pct
+    assert event.context_window_estimated is False
 
 
 @pytest.mark.parametrize("partial", [False, True])

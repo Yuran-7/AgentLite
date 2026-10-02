@@ -71,6 +71,9 @@ class ToolCallFinishedEvent(BaseModel):
     tool_name: str
     elapsed_ms: int
     output: str = ""  # tool result content, for TUI display
+    output_path: str | None = None  # 大结果正文文件；output 与模型实际收到的预览一致
+    original_chars: int = 0
+    truncated: bool = False
     ts: str
 
 
@@ -82,6 +85,9 @@ class ToolCallFailedEvent(BaseModel):
     # "runtime_error" | "timeout" | "schema_error" | "permission_denied" | "rate_limited"
     error_class: str
     error_message: str
+    output_path: str | None = None
+    original_chars: int = 0
+    truncated: bool = False
     elapsed_ms: int
     attempt: int = 1  # 1=first attempt, 2=first retry, 3=second retry
     ts: str
@@ -102,7 +108,11 @@ class LlmUsageEvent(BaseModel):
     output_tokens: int
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
-    context_pct: float = 0.0
+    context_pct: float = 0.0  # 最近一次输入加输出的占用比例，展示时乘 100
+    total_input_tokens: int | None = None
+    context_tokens: int = 0
+    context_window: int = 0
+    context_window_estimated: bool = False
     ts: str
 
 
@@ -258,7 +268,7 @@ class SkillInvokedEvent(BaseModel):
 # 根据 type 字段决定事件类型的判别联合
 # Annotated语法，Annotated[原始类型, 元数据1, 元数据2, ...]
 # 当前原始类型是一个union，元数据pydantic提供的Discriminator("type")
-# 它的核心目的是告诉 Pydantic：“别傻乎乎地逐个尝试所有类型，直接看数据里的 type 字段，它叫什么名字，就把它解析成哪个类。”
+# 它告诉 Pydantic 直接看数据里的 type 字段，根据字段值选择对应模型。
 # 数据可以是JSON字符串，也可以是Python字典
 Event = Annotated[
     CoreStartedEvent

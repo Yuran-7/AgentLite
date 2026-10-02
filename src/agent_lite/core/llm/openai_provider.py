@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -96,6 +97,7 @@ def _convert_messages(
             continue
 
         text_parts = []
+        image_parts: list[dict[str, object]] = []
         for raw_block in content:
             if not isinstance(raw_block, dict):
                 continue
@@ -110,7 +112,18 @@ def _convert_messages(
                 )
             elif block.get("type") == "text":
                 text_parts.append(str(block.get("text", "")))
-        if text_parts:
+            elif block.get("type") == "image":
+                source = block.get("source")
+                if isinstance(source, dict) and source.get("type") == "base64":
+                    image_parts.append({"type": "image_url", "image_url": {
+                        "url": f"data:{source['media_type']};base64,{source['data']}",
+                    }})
+        if image_parts:
+            parts: list[dict[str, object]] = []
+            if text_parts:
+                parts.append({"type": "text", "text": "".join(text_parts)})
+            converted.append({"role": role, "content": parts + image_parts})
+        elif text_parts:
             converted.append({"role": role, "content": "".join(text_parts)})
     return converted
 
@@ -135,6 +148,7 @@ class OpenAICompatibleProvider:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        context_window: int | None = None,
     ) -> None:
         if client is None:
             resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -154,6 +168,10 @@ class OpenAICompatibleProvider:
         else:
             self._client = client
         self._model = model
+        if context_window is not None and (type(context_window) is not int or context_window <= 0):
+            raise ValueError("context_window must be a positive integer")
+        self._context_window = context_window or _DEFAULT_CONTEXT_WINDOW
+        self._context_window_estimated = context_window is None
 
     # 流式调用 OpenAI-compatible Chat Completions 并转换为内部统一响应
     async def chat(
@@ -277,19 +295,13 @@ class OpenAICompatibleProvider:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cache_read_input_tokens=cache_read,
-                context_pct=input_tokens / _DEFAULT_CONTEXT_WINDOW,
+                context_pct=(input_tokens + output_tokens) / self._context_window,
+                total_input_tokens=input_tokens,
+                context_tokens=input_tokens + output_tokens,
+                context_window=self._context_window,
+                context_window_estimated=self._context_window_estimated,
             )
-            await bus.publish(
-                LlmUsageEvent(
-                    run_id=run_id,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_input_tokens=cache_read,
-                    cache_creation_input_tokens=0,
-                    context_pct=usage.context_pct,
-                    ts=_now(),
-                )
-            )
+            await bus.publish(LlmUsageEvent(run_id=run_id, ts=_now(), **asdict(usage)))
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
         if finish_reason == "length":

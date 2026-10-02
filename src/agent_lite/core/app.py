@@ -30,6 +30,8 @@ from agent_lite.core.bus.commands import (
     FrontendRegisterCommand,
     FrontendUnregisterCommand,
     FrontendUnregisterResult,
+    McpListCommand,
+    McpManageCommand,
     MemoryDeleteCommand,
     MemoryDeleteResult,
     MemoryListCommand,
@@ -71,9 +73,11 @@ from agent_lite.core.config import AgentLiteConfig, get_config
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.lifecycle import FrontendLifecycle
 from agent_lite.core.llm.factory import DeferredProvider, create_llm_provider
+from agent_lite.core.llm.images import ImageAttachment
 from agent_lite.core.llm.settings import model_settings, resolve_model
 from agent_lite.core.logging_setup import setup_logging
 from agent_lite.core.mcp.server import McpServerManager
+from agent_lite.core.mcp.settings import parse_server
 from agent_lite.core.memory import MemoryStore
 from agent_lite.core.permissions.manager import PermissionManager
 from agent_lite.core.permissions.storage import load_policy_file
@@ -115,6 +119,9 @@ class CoreApp:
         self._memory_store: MemoryStore | None = None
         self._task_manager: SubagentTaskManager | None = None
         self._lifecycle: FrontendLifecycle | None = None
+        self._mcp_lock = asyncio.Lock()
+        self._mcp_changing = False
+        self._server: SocketServer | None = None
 
     # 将前端租约绑定到当前 TCP 连接并返回续约规则
     async def _frontend_register(self, params: dict[str, Any]) -> FrontendLeaseResult:
@@ -201,10 +208,15 @@ class CoreApp:
         session_id: str,
         content: str,
         run_id: str,
+        images: list[ImageAttachment] | None = None,
     ) -> asyncio.Task[str]:
+        if self._mcp_changing:
+            raise HandlerError(INVALID_PARAMS, "MCP 正在更新，请稍后发送任务")
         assert self._sessions is not None
         task = asyncio.create_task(
-            self._sessions.send_message(session_id, content, run_id=run_id),
+            self._sessions.send_message(
+                session_id, content, run_id=run_id, **({"images": images} if images else {}),
+            ),
             name=f"agent-run-{run_id}",
         )
         self._running_runs[run_id] = _RunningRun(session_id=session_id, task=task)
@@ -287,6 +299,38 @@ class CoreApp:
         except ValueError as exc:
             raise HandlerError(INVALID_PARAMS, str(exc)) from exc
 
+    async def _mcp_list_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        McpListCommand.model_validate(params)
+        assert self._mcp_manager is not None
+        return self._mcp_manager.snapshot()
+
+    async def _mcp_manage_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        cmd = McpManageCommand.model_validate(params)
+        assert self._mcp_manager is not None
+        async with self._mcp_lock:
+            if cmd.action != "configure" and (
+                any(not run.task.done() for run in self._running_runs.values())
+                or self._task_manager is not None and self._task_manager.has_running_tasks
+            ):
+                raise HandlerError(INVALID_PARAMS, "有任务正在运行，请结束任务后管理 MCP")
+            self._mcp_changing = cmd.action != "configure"
+            try:
+                if cmd.action == "reload":
+                    await self._mcp_manager.reload()
+                elif cmd.action == "reconnect":
+                    await self._mcp_manager.reconnect(cmd.name)
+                elif cmd.action == "set_enabled":
+                    await self._mcp_manager.set_enabled(cmd.name, cmd.enabled)
+                elif cmd.action == "add":
+                    await self._mcp_manager.add(parse_server(cmd.server))
+                elif cmd.action == "configure":
+                    self._mcp_manager.prepare_settings()
+                return self._mcp_manager.snapshot()
+            except (ValueError, OSError) as exc:
+                raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+            finally:
+                self._mcp_changing = False
+
     async def _session_rename_handler(self, params: dict[str, Any]) -> dict[str, Any]:
         assert self._sessions is not None
         cmd = SessionRenameCommand.model_validate(params)
@@ -324,7 +368,7 @@ class CoreApp:
         assert self._sessions is not None
         cmd = SessionSendMessageCommand.model_validate(params)
         run_id = new_run_id()
-        task = self._start_session_run(cmd.session_id, cmd.content, run_id)
+        task = self._start_session_run(cmd.session_id, cmd.content, run_id, cmd.images)
         try:
             await task
         except asyncio.CancelledError:
@@ -523,6 +567,35 @@ class CoreApp:
 
     # 启动常驻 core 进程：加载配置、初始化日志、启动 trace 和 TCP 服务，并等待退出信号
     async def run(self) -> None:
+        try:
+            await self._serve()
+        finally:
+            await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        logger.info("shutting down pid=%d", os.getpid())
+        if self._lifecycle is not None:
+            self._lifecycle.close()
+        if self._server is not None:
+            await self._server.stop()
+        run_tasks = [running.task for running in self._running_runs.values()]
+        for run_task in run_tasks:
+            run_task.cancel()
+        if self._running_runs:
+            await asyncio.gather(*run_tasks, return_exceptions=True)
+        if self._sessions is not None:
+            try:
+                await asyncio.wait_for(self._sessions.wait_for_memory_tasks(), timeout=10)
+            except TimeoutError:
+                logger.warning("memory cleanup timed out during shutdown")
+        if self._task_manager is not None:
+            await self._task_manager.cancel_all()
+        if self._mcp_manager is not None:
+            await self._mcp_manager.stop_all()
+        if self._trace is not None:
+            await self._trace.stop()
+
+    async def _serve(self) -> None:
         self._start_time = time.monotonic()
         self._config = get_config()
         setup_logging(self._config)
@@ -559,9 +632,7 @@ class CoreApp:
         )
 
         self._mcp_manager = McpServerManager()
-        if self._config.mcp.servers:
-            logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
-            await self._mcp_manager.start_all(self._config.mcp.servers)
+        await self._mcp_manager.start_all(self._config.mcp.servers)
 
         self._sessions = SessionManager(
             store,
@@ -599,6 +670,7 @@ class CoreApp:
             on_disconnect=self._lifecycle.unregister,
         )
         # 将 RPC 方法名注册到对应的异步处理函数
+        self._server = server
         server.register("core.ping", self._ping_handler)
         server.register("core.shutdown", self._shutdown_handler)
         server.register("core.keep_alive", self._keep_alive_handler)
@@ -612,6 +684,8 @@ class CoreApp:
         server.register("session.rename", self._session_rename_handler)
         server.register("session.set_model", self._session_model_handler)
         server.register("model.list", self._model_list_handler)
+        server.register("mcp.list", self._mcp_list_handler)
+        server.register("mcp.manage", self._mcp_manage_handler)
         server.register("session.resume", self._session_resume_handler)
         server.register("session.set_workspace", self._session_set_workspace_handler)
         server.register("session.send_message", self._session_send_handler)
@@ -647,25 +721,7 @@ class CoreApp:
             for sig, previous in previous_signal_handlers.items():
                 signal.signal(sig, previous)
 
-            logger.info("shutting down pid=%d", os.getpid())
-            self._lifecycle.close()
-            await server.stop()
-            run_tasks = [running.task for running in self._running_runs.values()]
-            for run_task in run_tasks:
-                run_task.cancel()
-            if self._running_runs:
-                await asyncio.gather(*run_tasks, return_exceptions=True)
-            if self._sessions is not None:
-                try:
-                    await asyncio.wait_for(self._sessions.wait_for_memory_tasks(), timeout=10)
-                except TimeoutError:
-                    logger.warning("memory cleanup timed out during shutdown")
-            if self._task_manager is not None:
-                await self._task_manager.cancel_all()
-            if self._mcp_manager is not None:
-                await self._mcp_manager.stop_all()
-            if self._trace is not None:
-                await self._trace.stop()
+
 
 
 # 同步入口：启动 CoreApp 事件循环

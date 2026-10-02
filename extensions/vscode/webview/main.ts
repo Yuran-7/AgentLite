@@ -4,6 +4,9 @@ import { decisions } from '../src/protocol';
 import { markdown } from './markdown';
 import { decorateCodeBlocks } from './code-blocks';
 import { installTooltips } from './tooltips';
+import { installSlashCommands } from './slash-commands';
+import { installImages } from './images';
+import { installMcpPanel } from './mcp-panel';
 
 declare function acquireVsCodeApi(): { postMessage(message: PageMessage): void };
 const api = acquireVsCodeApi();
@@ -26,6 +29,27 @@ const attachmentMenu = document.getElementById('attachment-menu')!;
 const attach = document.getElementById('attach') as HTMLButtonElement;
 const connectionToggle = document.getElementById('connection-toggle') as HTMLButtonElement;
 const connectionMenu = document.getElementById('connection-menu')!;
+const imageInput = installImages(input, () => { send.disabled = input.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length); });
+const mcpPanel = installMcpPanel(input, post);
+const slash = installSlashCommands(input, id => {
+  closeMenus();
+  if (id === 'new') fresh.click();
+  else if (id === 'history') {
+    if (historyPanel.hidden) historyToggle.click();
+    else historySearch.focus();
+  } else if (id === 'model') {
+    modelToggle.click();
+    (modelMenu.querySelector('[aria-selected="true"]') as HTMLElement ?? modelMenu.querySelector('button'))?.focus();
+  } else if (id === 'settings') post({ type: 'openSettings' });
+  else if (id === 'mcp') mcpPanel.open();
+  else if (id === 'logs') post({ type: 'openLogs' });
+  else if (id === 'status') slash.showDetail('当前状态', [
+    `会话：${latest?.title || '新会话'}`, `会话 ID：${latest?.sessionId || '尚未创建'}`,
+    `模型：${document.getElementById('model-label')!.textContent || '尚未选择'}`,
+    `连接：${document.getElementById('connection')!.textContent}`, `工作区：${latest?.workspace || '未知'}`,
+    latest?.usage || '暂无用量统计',
+  ].join('\n'));
+});
 const copyShape = '<rect x="4" y="8" width="12" height="13" rx="2"/><path d="M8 8V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-2"/>';
 const bookmarkShape = '<path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16l-6-4z"/>';
 const bookmarkToggle = document.getElementById('bookmark') as HTMLButtonElement;
@@ -46,14 +70,17 @@ const labels: Record<string, string> = { running: '运行中', pending: '等待�
 function post(message: PageMessage): void { api.postMessage(message); }
 // 在宿主可接受新任务时发送输入。
 function submit(): void {
-  if (send.disabled || !input.value.trim()) return;
-  post({ type: 'send', content: input.value }); input.value = ''; resizeInput(); send.disabled = true;
+  if (send.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length)) return;
+  if (slash.submit()) return;
+  slash.close();
+  post({ type: 'send', content: input.value, ...(imageInput.get().length ? { images: imageInput.get() } : {}) }); imageInput.clear(); input.value = ''; resizeInput(); send.disabled = true;
 }
-send.addEventListener('click', submit);
+send.addEventListener('click', event => { event.stopPropagation(); submit(); });
 input.addEventListener('keydown', event => {
+  if (slash.handleKey(event)) return;
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
 });
-input.addEventListener('input', () => { send.disabled = input.disabled || !input.value.trim(); resizeInput(); });
+input.addEventListener('input', () => { send.disabled = input.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length); resizeInput(); });
 stop.addEventListener('click', () => post({ type: 'cancel' }));
 fresh.addEventListener('click', () => post({ type: 'newSession' }));
 sessionTitle.addEventListener('click', () => {
@@ -148,7 +175,8 @@ if (typeof ResizeObserver !== 'undefined') {
 }
 
 // 同一时刻只打开一个菜单，保留按钮的无障碍展开状态。
-function closeMenus(preserveConnection = false): void {
+function closeMenus(preserveConnection = false, preserveSlash = false): void {
+  if (!preserveSlash) slash.close();
   modelMenu.hidden = true; attachmentMenu.hidden = true;
   modelToggle.setAttribute('aria-expanded', 'false'); attach.setAttribute('aria-expanded', 'false');
   if (!preserveConnection) { connectionMenu.hidden = true; connectionToggle.setAttribute('aria-expanded', 'false'); }
@@ -167,12 +195,17 @@ connectionToggle.addEventListener('click', () => {
   connectionMenu.hidden = !open; connectionToggle.setAttribute('aria-expanded', String(open));
 });
 document.addEventListener('click', event => {
-  if (!(event.target as Element).closest('.model-control, .attachment-control, .connection-control')) closeMenus();
+  if (!(event.target as Element).closest('.model-control, .attachment-control, .connection-control')) closeMenus(false, event.target === input);
+  if (!historyPanel.hidden && !historyPanel.contains(event.target as Node) && !historyToggle.contains(event.target as Node)) {
+    historyPanel.hidden = true; historyToggle.setAttribute('aria-expanded', 'false');
+  }
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && (!modelMenu.hidden || !attachmentMenu.hidden || !connectionMenu.hidden)) {
     const target = !modelMenu.hidden ? modelToggle : !attachmentMenu.hidden ? attach : connectionToggle;
     closeMenus(); target.focus();
+  } else if (event.key === 'Escape' && !historyPanel.hidden) {
+    historyPanel.hidden = true; historyToggle.setAttribute('aria-expanded', 'false'); historyToggle.focus();
   }
 });
 modelToggle.addEventListener('keydown', event => {
@@ -198,13 +231,15 @@ function duration(ms: number): string {
   const hours = Math.floor(seconds / 3600); const minutes = Math.floor(seconds / 60) % 60;
   return hours ? `${hours}h ${minutes}m ${seconds % 60}s` : minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
 }
-// 更新运行指示，不为历史或未知耗时伪造时间。
+// 首段内容出现前显示 Thinking，之后仅保留当前聊天中的运行状态与耗时。
 function updateWorking(): void {
-  document.getElementById('run-status')!.hidden = !latest?.busy;
+  const hasRunSummary = !!latest?.runId && latest.cards.some(card => card.kind === 'assistant' && card.runId === latest?.runId);
+  document.getElementById('run-status')!.hidden = !latest?.busy || hasRunSummary;
   document.getElementById('run-label')!.textContent = latest?.cancelling ? 'Stopping…'
-    : `Working${latest?.workStartedAt ? ` · ${duration(Date.now() - latest.workStartedAt)}` : '…'}`;
+    : 'Thinking…';
   for (const summary of document.querySelectorAll<HTMLElement>('[data-working-summary]')) {
-    summary.textContent = latest?.workStartedAt ? `Working for ${duration(Date.now() - latest.workStartedAt)}` : 'Working…';
+    summary.textContent = latest?.cancelling ? 'Stopping…'
+      : latest?.workStartedAt ? `Working for ${duration(Date.now() - latest.workStartedAt)}` : 'Working…';
   }
 }
 window.setInterval(updateWorking, 1000);
@@ -264,29 +299,26 @@ function renderHistory(state: ChatState): void {
   const archiveToggle = document.getElementById('history-archives')!;
   archiveToggle.textContent = showArchivedHistory ? '返回历史' : '已归档';
   archiveToggle.setAttribute('aria-pressed', String(showArchivedHistory));
-  archiveToggle.dataset.tooltip = showArchivedHistory ? '返回历史聊天' : '查看已归档会话';
+  archiveToggle.setAttribute('aria-label', showArchivedHistory ? '返回历史聊天' : '查看已归档会话');
   if (!entries.length) list.append(element('div', query ? '没有匹配的会话' : showArchivedHistory
     ? '还没有归档的聊天。' : '还没有历史聊天。发送第一条消息后会自动保存。', 'history-empty'));
   for (const item of entries) {
     const row = element('div', '', `history-row${item.session_id === state.sessionId ? ' active' : ''}`);
     const open = document.createElement('button'); open.className = 'history-open';
     open.append(element('span', item.title || '未命名会话', 'history-name'));
-    open.dataset.tooltip = item.title || '未命名会话';
     open.disabled = state.connection !== 'ready' || state.busy || state.sending;
     if (item.session_id === state.sessionId) open.setAttribute('aria-current', 'true');
     open.addEventListener('click', () => { post({ type: 'resumeSession', sessionId: item.session_id }); historyPanel.hidden = true; historyToggle.setAttribute('aria-expanded', 'false'); });
     const rename = document.createElement('button'); rename.className = 'history-rename'; rename.textContent = '改名';
-    rename.dataset.tooltip = `重命名：${item.title}`; rename.disabled = open.disabled;
+    rename.disabled = open.disabled;
     rename.addEventListener('click', () => post({ type: 'renameSession', sessionId: item.session_id }));
     rename.setAttribute('aria-label', `改名：${item.title}`);
     const archive = document.createElement('button'); archive.className = 'history-archive';
     archive.textContent = showArchivedHistory ? '恢复' : '归档'; archive.disabled = open.disabled;
-    archive.dataset.tooltip = `${archive.textContent}：${item.title}`;
-    archive.setAttribute('aria-label', archive.dataset.tooltip);
+    archive.setAttribute('aria-label', `${archive.textContent}：${item.title}`);
     archive.addEventListener('click', () => post({ type: showArchivedHistory ? 'restoreSession' : 'archiveSession', sessionId: item.session_id }));
     const date = element('span', historyTime(item.updated_at), 'history-date');
     date.dataset.updatedAt = item.updated_at;
-    if (Number.isFinite(Date.parse(item.updated_at))) date.dataset.tooltip = new Date(item.updated_at).toLocaleString('zh-CN');
     const actions = element('div', '', 'history-actions'); actions.append(archive, rename);
     const trailing = element('div', '', 'history-trailing'); trailing.append(date, actions);
     row.append(open, trailing); list.append(row);
@@ -325,12 +357,9 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     const runCards = latest?.cards.filter(item => item.runId === card.runId) ?? [];
     const finalAnswer = completed && (!card.runId || runCards.findLastIndex(item => item.kind === 'assistant') >
       runCards.findLastIndex(item => item.kind === 'tool'));
-    if (!activityOnly && card.runId) {
+    if (!activityOnly && card.runId && completed) {
       const work = document.createElement('details'); work.className = 'work-summary'; work.open = wasOpen;
-      const summary = element('summary', completed
-        ? workMs === undefined ? 'Worked for · 耗时未记录' : `Worked for ${duration(workMs)}`
-        : latest?.workStartedAt ? `Working for ${duration(Date.now() - latest.workStartedAt)}` : 'Working…');
-      if (!completed) summary.dataset.workingSummary = 'true';
+      const summary = element('summary', workMs === undefined ? 'Worked for · 耗时未记录' : `Worked for ${duration(workMs)}`);
       work.append(summary);
       const activity = element('div', '', 'work-activity');
       for (const item of latest?.cards.filter(item => item.runId === card.runId && item.kind !== 'user' &&
@@ -339,8 +368,12 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       }
       if (!activity.childElementCount) activity.append(element('div', '推理与生成已完成'));
       work.append(activity); container.append(work);
+    } else if (!activityOnly && card.runId && answers[0]?.id === card.id) {
+      const progress = element('div', '', 'work-progress');
+      progress.dataset.workingSummary = 'true';
+      container.append(progress);
     }
-    if (activityOnly || finalAnswer) {
+    if (activityOnly || !completed || finalAnswer) {
       const body = element('div', '', 'markdown'); body.innerHTML = markdown(card.text); container.append(body);
       decorateCodeBlocks(body, (blockIndex, type) => post({ type, cardId: card.id, blockIndex }));
     }
@@ -367,7 +400,16 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     }
   } else if (card.kind === 'user') {
     container.setAttribute('aria-label', '用户消息');
-    container.append(element('div', card.text, 'plain user-bubble'));
+    if (card.images?.length) {
+      const gallery = element('div', '', 'image-attachments');
+      for (const image of card.images) {
+        if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.media_type)) continue;
+        const img = document.createElement('img'); img.src = `data:${image.media_type};base64,${image.data}`;
+        img.alt = image.name; img.title = image.name; gallery.append(img);
+      }
+      container.append(gallery);
+    }
+    if (card.text) container.append(element('div', card.text, 'plain user-bubble'));
     const actions = element('div', '', 'user-actions');
     if (card.createdAt && !Number.isNaN(Date.parse(card.createdAt))) {
       const time = document.createElement('time'); time.dateTime = card.createdAt;
@@ -378,7 +420,7 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     copy.dataset.copy = 'true';
     const edit = iconButton('编辑并再次提问', '<path d="m14 5 5 5M4 20l5-1L20 8a2 2 0 0 0-5-5L4 14z"/>', () => {
       if (input.disabled) return;
-      input.value = card.text; resizeInput(); send.disabled = !input.value.trim(); input.focus();
+      input.value = card.text; imageInput.restore(card.images ?? []); resizeInput(); send.disabled = !input.value.trim() && !imageInput.get().length; input.focus();
     });
     edit.dataset.edit = 'true'; edit.disabled = input.disabled;
     actions.append(copy, edit); container.append(actions);
@@ -429,8 +471,9 @@ function orderedCards(source: Card[]): Card[] {
 
 // 恢复完整宿主快照，普通状态更新只重绘发生变化的卡片。
 function render(state: ChatState): void {
+  if (latest?.sessionId !== state.sessionId) imageInput.clear();
   latest = state;
-  updateWorking();
+  mcpPanel.render(state);
   sessionTitle.textContent = state.title || '新会话';
   sessionTitle.dataset.tooltip = `${state.title || '新会话'} · 点击重命名`;
   document.getElementById('workspace')!.textContent = state.workspace;
@@ -443,7 +486,7 @@ function render(state: ChatState): void {
     : '连接数量暂不可用';
   document.getElementById('stats')!.textContent = state.usage;
   error.hidden = !state.error; error.textContent = state.error ?? '';
-  const locked = state.connection !== 'ready' || state.busy || state.sending;
+  const locked = state.connection !== 'ready' || state.busy || state.sending || !!state.mcpBusy;
   sessionTitle.disabled = locked || !state.sessionId;
   const nextModelSignature = JSON.stringify([state.models, state.selectedModel, state.fallbackModel, state.model]);
   if (nextModelSignature !== modelSignature) {
@@ -490,7 +533,7 @@ function render(state: ChatState): void {
   if (locked) closeMenus(true);
   const nextHistorySignature = JSON.stringify([state.history, state.archivedSessionIds, state.sessionId, locked]);
   if (historySignature !== nextHistorySignature) { renderHistory(state); historySignature = nextHistorySignature; }
-  input.disabled = locked; send.disabled = locked || !input.value.trim();
+  input.disabled = locked; imageInput.render(); send.disabled = locked || imageInput.loading() || (!input.value.trim() && !imageInput.get().length);
   for (const record of rendered.values()) {
     const edit = record.element.querySelector<HTMLButtonElement>('[data-edit]'); if (edit) edit.disabled = locked;
   }
@@ -519,11 +562,13 @@ function render(state: ChatState): void {
     const signature = JSON.stringify([card, runCards, state.bookmarkCardIds?.[card.id], state.busy, state.sending]);
     const answers = card.runId ? state.cards.filter(answer => answer.kind === 'assistant' && answer.runId === card.runId) : [];
     const completed = answers.some(answer => answer.completed || answer.workMs !== undefined);
-    const visibleAnswer = completed ? answers.at(-1) : answers[0];
+    const visibleAnswer = completed ? answers.at(-1) : undefined;
     if (signature !== record.signature) { renderCard(card, record.element, card.kind === 'assistant' && !!visibleAnswer && card.id !== visibleAnswer.id); record.signature = signature; }
     record.element.hidden = !!visibleAnswer && card.kind !== 'user' &&
       (card.kind === 'assistant' ? card.id !== visibleAnswer.id : !(card.kind === 'permission' && card.status === 'pending'));
   }
+  cards.append(document.getElementById('run-status')!);
+  updateWorking();
   if (atBottom) cards.scrollTop = cards.scrollHeight;
   jump.hidden = atBottom || !state.cards.length;
   const savedSignature = JSON.stringify([state.sessionId, state.bookmarks, state.bookmarkCardIds]);
@@ -556,6 +601,7 @@ window.addEventListener('message', event => {
     }
   }
   else if (message?.type === 'unavailable') {
+    if (latest) mcpPanel.render({ ...latest, connection: 'error', mcpBusy: false, mcpLoading: false });
     error.hidden = false; error.textContent = message.message;
     input.disabled = true; send.disabled = true; fresh.disabled = true; stop.disabled = true; retry.disabled = false;
     sessionTitle.disabled = true;

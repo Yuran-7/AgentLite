@@ -239,3 +239,38 @@ def test_project_dotenv_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("AGENTLITE_PORT", raising=False)
     monkeypatch.delenv("LLM_PROTOCOL", raising=False)
     assert get_config().port == 9999
+
+
+# 功能：验证 TOML 中模型窗口的正整数校验和加载
+# 设计：临时配置文件覆盖合法值及布尔值等易误收边界
+@pytest.mark.parametrize("value", ["128000", "0", "-1", "true", '"128000"'])
+def test_context_window_config(tmp_path, monkeypatch, value):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[llm]\ncontext_window = " + value + "\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTLITE_CONFIG", str(config_file))
+    monkeypatch.chdir(tmp_path)
+    if value == "128000":
+        assert get_config().llm.context_window == 128000
+    else:
+        with pytest.raises(SystemExit, match="context_window"):
+            get_config()
+
+
+# 功能：验证工具单条与批量 token 预算可配置并拒绝布尔值和零值
+# 设计：使用隔离 TOML 覆盖两个新键，确保运行时不会静默忽略预算配置
+@pytest.mark.parametrize("value", ["2000", "0", "true"])
+def test_tool_result_token_budgets(tmp_path, monkeypatch, value):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[compaction]\ntool_result_token_limit = " + value
+        + "\ntool_result_batch_token_limit = 6000\n", encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENTLITE_CONFIG", str(config_file))
+    monkeypatch.chdir(tmp_path)
+    if value == "2000":
+        config = get_config()
+        assert config.compaction.tool_result_token_limit == 2000
+        assert config.compaction.tool_result_batch_token_limit == 6000
+    else:
+        with pytest.raises(SystemExit, match="tool_result_token_limit"):
+            get_config()

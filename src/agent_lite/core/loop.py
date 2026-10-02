@@ -9,8 +9,8 @@ from agent_lite.core.bus.events import StepFinishedEvent, StepStartedEvent
 from agent_lite.core.context import ExecutionContext
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.base import LLMProvider
-from agent_lite.core.tools.invocation import invoke_tool
 from agent_lite.core.tools.registry import ToolRegistry
+from agent_lite.core.tools.result_storage import ToolResultStore
 
 if TYPE_CHECKING:
     from agent_lite.core.compact.compactor import Compactor
@@ -38,6 +38,7 @@ class AgentLoop:
         compact_threshold: float = 0.80,
         session_id: str = "",
         task_manager: SubagentTaskManager | None = None,
+        result_store: ToolResultStore | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -47,9 +48,12 @@ class AgentLoop:
         self._compact_threshold = compact_threshold
         self._session_id = session_id
         self._task_manager = task_manager
+        self._result_store = result_store or ToolResultStore(None)
 
     # 驱动 plan→act→observe 循环直到上下文终止；CancelledError 向上传播
     async def run(self, context: ExecutionContext) -> None:
+        from agent_lite.core.tools.invocation import invoke_tool
+
         while not context.is_done():
             if self._task_manager is not None:
                 notifications = await self._task_manager.drain_run_notifications(
@@ -107,11 +111,16 @@ class AgentLoop:
 
             # [act] execute each requested tool; errors become tool results so loop continues
             if response.stop_reason == "tool_use":
+                budget = max(
+                    1, self._result_store.batch_token_limit // max(1, len(response.tool_calls)),
+                )
                 for tc in response.tool_calls:
                     result = await invoke_tool(
                         self._registry, tc, self._bus, context.run_id,
                         permission_manager=self._permission_manager,
                         session_id=self._session_id,
+                        result_store=self._result_store,
+                        token_budget=budget,
                     )
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
             elif response.stop_reason == "max_tokens" and response.tool_calls:

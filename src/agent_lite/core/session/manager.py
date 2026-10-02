@@ -21,6 +21,7 @@ from agent_lite.core.bus.events import (
     TaskNotificationQueuedEvent,
 )
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.images import ImageAttachment
 from agent_lite.core.memory.pipeline import MemoryPipeline, sanitize_transcript, transcript_hash
 from agent_lite.core.memory.store import MemoryStore
 from agent_lite.core.runs import new_run_id
@@ -375,7 +376,10 @@ class SessionManager:
             return normalized_workspace
 
     # 处理用户消息，追加 thread 并启动一次 agent run
-    async def send_message(self, sid: str, content: str, *, run_id: str | None = None) -> str:
+    async def send_message(
+        self, sid: str, content: str, *, run_id: str | None = None,
+        images: list[ImageAttachment] | None = None,
+    ) -> str:
         session = self._get_session(sid)
         lock = self._locks[sid]
         if lock.locked():
@@ -392,7 +396,13 @@ class SessionManager:
             if session.status == "waiting_for_input":
                 await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
 
-            self._store.append_message(sid, "user", content)
+            message_content: Any = content
+            if images:
+                message_content = []
+                if content.strip():
+                    message_content.append({"type": "text", "text": content})
+                message_content.extend(image.block() for image in images)
+            self._store.append_message(sid, "user", message_content)
             await self._bus.publish(
                 SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
             )
@@ -401,14 +411,14 @@ class SessionManager:
                 self._schedule_memory_scan(exclude_session_id=sid)
 
             if not session.title:
-                session.title = content[:40]
+                session.title = content[:40] or "图片提问"
 
             run_id = run_id or new_run_id()
             session.run_ids.append(run_id)
             self._persist_started_session(session)
 
             # Skill 解析：检测 "/" 前缀，展开为系统提示覆盖和工具白名单
-            goal = content
+            goal = content or "请分析上传的图片。"
             system_prompt_override: str | None = None
             tool_whitelist: list[str] | None = None
             if content.startswith("/"):

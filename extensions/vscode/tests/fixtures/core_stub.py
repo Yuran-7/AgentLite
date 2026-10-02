@@ -37,6 +37,14 @@ class ScriptedProvider:
         if goal.startswith("cancel"):
             await bus.publish(LlmTokenEvent(run_id=run_id, token="等待取消", ts=ts))
             await asyncio.Event().wait()
+        if step == 1 and goal == "mcp echo":
+            return LlmResponse(
+                stop_reason="tool_use",
+                tool_calls=[ToolCallBlock(
+                    uuid.uuid4().hex, "echo__echo", {"text": "MCP roundtrip 8127"}
+                )],
+                usage=UsageStats(12, 3),
+            )
         if step == 1 and ("read" in goal or "permission" in goal):
             tool = "write_file" if "permission" in goal else "read_file"
             params: dict[str, object] = (
@@ -63,6 +71,7 @@ def config_factory() -> AgentLiteConfig:
     config = AgentLiteConfig()
     config.port = int(os.environ["AGENTLITE_PORT"])
     root = Path(os.environ["AGENTLITE_TEST_DIR"])
+    os.environ["AGENTLITE_MCP_SETTINGS"] = str(root / "mcp.json")
     config.logging.file = str(root / "core.log")
     config.session.dir = str(root / "sessions")
     config.memory.dir = str(root / "memory.db")

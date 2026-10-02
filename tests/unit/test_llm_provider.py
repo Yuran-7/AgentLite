@@ -103,6 +103,37 @@ async def _chat(
 # --- tests -------------------------------------------------------------------
 
 
+# 功能：验证缓存读写与输出都占上下文，原始费用字段保持独立
+# 设计：用缓存占多数的响应和显式窗口，验证事件与返回值使用同一口径
+async def test_context_includes_cached_input_and_output() -> None:
+    final = _make_final(input_tokens=10_000, output_tokens=422, cache_read=160_000)
+    final.usage.cache_creation_input_tokens = 5_000
+    client = MagicMock()
+    client.messages.stream.return_value = FakeStream([], final)
+    provider = AnthropicProvider("test-model", client=client, context_window=200_000)
+    result, events = await _chat(provider)
+    assert result.usage is not None
+    assert result.usage.input_tokens == 10_000
+    assert result.usage.total_input_tokens == 175_000
+    assert result.usage.context_tokens == 175_422
+    assert result.usage.context_pct == pytest.approx(175_422 / 200_000)
+    event = next(e for e in events if e.type == "llm.usage")
+    assert event.total_input_tokens == result.usage.total_input_tokens
+    assert event.context_pct == result.usage.context_pct
+    assert event.context_window == 200_000
+    assert event.context_window_estimated is False
+
+
+# 功能：验证未配置窗口时明确标记回退值为估算
+# 设计：使用未知模型避免把兼容端点名称误认为可靠的模型容量
+async def test_context_window_fallback_is_estimated() -> None:
+    provider, _ = _make_provider()
+    result, _ = await _chat(provider)
+    assert result.usage is not None
+    assert result.usage.context_window == 200_000
+    assert result.usage.context_window_estimated is True
+
+
 # 功能：验证每次 chat 调用都发布携带模型名和路由策略的 llm.model_selected 事件
 # 设计：检查事件数量为 1 且字段精确匹配，因为 S6 路由报告依赖此事件统计模型使用分布
 async def test_model_selected_event_published() -> None:

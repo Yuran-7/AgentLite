@@ -19,6 +19,34 @@ class Client extends EventEmitter {
   close(): void { this.calls.push('client.close'); }
 }
 
+test('MCP state stays separate from chat errors, serializes changes and reports old cores', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {});
+  t.after(() => session.dispose()); await session.attach(client, 'reused');
+  let mutationFinished: (() => void) | undefined;
+  const messages: { method: string; params: Record<string, unknown> }[] = [];
+  client.request = async (method: string, params?: Record<string, unknown>) => {
+    messages.push({ method, params: params ?? {} });
+    if (method === 'mcp.manage') await new Promise<void>(resolve => { mutationFinished = resolve; });
+    return { servers: [{ name: 'demo', status: 'connected', enabled: true, transport: 'stdio', tools: [] }], settingsPath: 'mcp.json' };
+  };
+  await session.refreshMcp(); assert.equal(session.state.mcpServers?.[0].name, 'demo');
+  const pending = session.manageMcp('set_enabled', { name: 'demo', enabled: false });
+  assert(session.state.mcpBusy);
+  await session.manageMcp('reconnect', { name: 'demo' }); await session.send('should wait');
+  assert.equal(messages.filter(message => message.method === 'mcp.manage').length, 1);
+  assert(!messages.some(message => message.method === 'session.send_message'));
+  mutationFinished!(); await pending; assert(!session.state.mcpBusy);
+  assert.deepEqual(messages.at(-1)?.params, { action: 'set_enabled', name: 'demo', enabled: false });
+  session.state.busy = true;
+  const count = messages.length; await session.manageMcp('reload'); assert.equal(messages.length, count);
+  await session.refreshMcp(); assert.equal(messages.length, count + 1);
+  session.state.busy = false;
+  client.request = async () => { throw new Error('Method not found: mcp.list'); };
+  await session.refreshMcp(); assert(session.state.mcpError?.includes('重启 core')); assert.equal(session.state.error, undefined);
+  assert(!session.state.mcpLoading);
+  await session.manageMcp('reload'); assert(!session.state.mcpBusy);
+});
+
 // 功能：真实连接等待被计入耗时，成功后心跳和新会话不会改变结果，重连重新计时。
 // 设计：控制宿主时钟和订阅响应，明确覆盖 core 就绪前等待与错误终止的边界。
 test('connection timing includes startup and freezes at session readiness', async t => {
@@ -276,4 +304,24 @@ test('webview message allowlist', () => {
   assert.equal(parsePageMessage({ type: 'permission', toolUseId: 'x', decision: 'allow_everything' }), undefined);
   assert.equal(parsePageMessage({ type: 'send', content: 'x'.repeat(1_000_001) }), undefined);
   assert.deepEqual(parsePageMessage({ type: 'send', content: ' hello ' }), { type: 'send', content: 'hello' });
+});
+
+// 功能：usage 比例显示为百分数，读取归一化输入，子任务不会改写主水位。
+// 设计：重放截图数值、缓存独立字段与多次请求，避免累计或重复加缓存。
+test('usage displays normalized input and percentage of latest main request', async () => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {});
+  await session.attach(client, 'reused');
+  client.emit('event', { type: 'run.started', run_id: 'main' });
+  client.emit('event', { type: 'llm.usage', run_id: 'main', input_tokens: 21024,
+    total_input_tokens: 21024, output_tokens: 422, cache_read_input_tokens: 19968,
+    context_pct: 21446 / 200000 });
+  assert.equal(session.state.usage, '输入 21024 · 输出 422 · 缓存 19968 · 上下文 10.7%');
+  client.emit('event', { type: 'llm.usage', run_id: 'main', input_tokens: 1000,
+    total_input_tokens: 3000, output_tokens: 200, cache_read_input_tokens: 1500,
+    cache_creation_input_tokens: 500, context_pct: 0.016, context_window_estimated: true });
+  assert.equal(session.state.usage, '输入 3000 · 输出 200 · 缓存 1500 · 上下文 ≈1.6%');
+  client.emit('event', { type: 'subagent.started', run_id: 'child', parent_run_id: 'main', description: 'child' });
+  client.emit('event', { type: 'llm.usage', run_id: 'child', input_tokens: 100000, context_pct: 0.9 });
+  assert.equal(session.state.usage, '输入 3000 · 输出 200 · 缓存 1500 · 上下文 ≈1.6%');
+  await session.dispose();
 });

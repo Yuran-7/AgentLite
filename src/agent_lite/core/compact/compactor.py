@@ -110,11 +110,8 @@ class Compactor:
     ) -> CompactionResult | None:
         from agent_lite.core.events.bus import EventBus as _Bus
 
-        original_estimate = sum(
-            len(str(m.get("content", ""))) for m in messages
-        ) // 4  # 粗略 token 估算（字符数 / 4）
-
         history_text = _messages_to_text(messages)
+        original_estimate = len(history_text) // 4  # 图片编码不作为文本 token 估算
         prompt = _COMPACT_PROMPT
         if focus.strip():
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
@@ -174,6 +171,8 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
                 btype = block.get("type", "")
                 if btype == "text":
                     blocks.append(block.get("text", ""))
+                elif btype == "image":
+                    blocks.append("[用户上传的图片]")
                 elif btype == "tool_use":
                     blocks.append(
                         f"<tool_call name={block.get('name')} id={block.get('id')}>\n"

@@ -1,64 +1,205 @@
-# 环境初始化
+<p align="center">
+  <img src="extensions/vscode/media/icon.png" alt="AgentLite VS Code 插件图标" width="96" height="96">
+</p>
 
-## VS Code 插件 Demo
+# AgentLite
 
-新增侧边栏聊天客户端，复用现有 core，支持流式回复、多轮对话、工具卡片、权限确认、执行计划与取消。
-TUI 和 VS Code 打开时都会自动连接或启动后台 core，无需手动启动。多个前端共享同一个 core；最后一个前端退出后等待 15 秒，再保存会话、清理任务并自动停止。隐藏聊天面板不算退出前端。
+AgentLite 是一个本地运行的 AI Agent 项目。它通过大模型理解任务，循环调用工具读取代码、修改文件、执行命令，并将结果返回给你。支持 VS Code 聊天插件、终端界面（TUI）和命令行（CLI），三个入口共用一个 Python 后台服务 `lite-core`。
 
-需要后台常驻时运行 `uv run lite core start`；已有自动 core 会转为常驻模式。手动启动 `lite-core` 默认也常驻。使用 `uv run lite core stop` 主动停止，`uv run lite core status` 查看状态。
+可以用它理解代码库、定位问题、实现功能或执行开发任务。模型通过 Anthropic 或 OpenAI-compatible API 调用；会话与工具记录保存在本机。
 
-先在仓库运行 `uv sync`，再在 `extensions/vscode` 运行 `npm install`。
-在 VS Code 调试面板选择 **AgentLite: VS Code Demo** 并按 F5；开发窗口中点击右侧辅助侧边栏的 AgentLite 标签。
-也可以构建 VSIX 后使用“从 VSIX 安装”。具体配置、测试和打包步骤见 [插件说明](extensions/vscode/README.md)。
+## 主要功能
 
-插件支持在其他项目中使用：core 从 AgentLite 安装位置读取运行配置，聊天会话绑定当前项目；必要时使用用户设置 `agentLite.pythonPath` 和 `agentLite.coreDirectory` 指定共享运行环境与配置目录。
+- **多轮对话**：流式回复、历史会话恢复、会话改名和模型切换。
+- **工具执行**：读取与写入文件、执行 shell 命令、网页搜索与抓取、执行计划。
+- **权限确认**：支持允许一次、始终允许、拒绝一次、始终拒绝。
+- **子 Agent**：支持任务分工、后台执行与完成通知。
+- **MCP 扩展**：接入 STDIO、Streamable HTTP 和 TCP 工具服务器。
+- **上下文管理**：查看模型用量、压缩上下文；大工具结果独立保存，模型接收有限预览并可按需读取。
+- **VS Code 聊天**：工具过程、任务取消、回答收藏，以及图片上传、粘贴和拖入（需要视觉模型）。
 
-## 安装到项目根目录（.venv）
-项目开始时只有 `.python-version` 和 `pyproject.toml`：前者指定 Python 版本，后者声明项目信息与依赖。执行：
+## 环境要求
 
-```bash
+| 用途 | 要求 |
+| --- | --- |
+| Python 后端与终端入口 | Python 3.12，建议使用 uv 管理环境 |
+| VS Code 插件 | 本地桌面 VS Code 1.106 或更新版本 |
+| 从源码构建插件 | Node.js 22.12 或更新版本、npm |
+| 调用模型 | 服务商的 API key，以及可访问的模型端点 |
+
+当前插件面向受信任的本地文件夹；尚不支持 Remote、WSL 和虚拟工作区。
+
+## 快速开始
+
+### 1. 安装 Python 后端
+
+在 AgentLite 仓库根目录执行：
+
+```powershell
 uv sync
 ```
 
-uv 会根据 `.python-version` 选择 Python：本机存在兼容版本时直接使用；不存在时，默认自动下载对应版本，再用它创建 `.venv/`。虚拟环境中的解释器位于 Windows 的 `.venv/Scripts/python.exe` 或 macOS/Linux 的 `.venv/bin/python`。
+这会创建 `.venv` 并安装项目和开发依赖。下面的 `uv run` 命令均在仓库根目录执行，无需手动激活虚拟环境。
 
-随后 uv 会解析并锁定 `pyproject.toml` 中的依赖，将依赖同步到 `.venv/`，并生成 `uv.lock`。因此项目会从最初的 `.python-version` 和 `pyproject.toml`，增加 `.venv/` 与 `uv.lock`；前者存放隔离环境，后者记录确定的依赖版本。
+使用已有 Python 3.12 环境时，也可以执行 `python -m pip install -e .`；安装后直接使用 `lite`、`lite-core` 和 `lite-tui`。
 
-## 为什么 VS Code 终端会自动进入虚拟环境
+### 2. 配置模型与密钥
 
-在 VS Code 中打开本项目时，Python 扩展会识别或选中项目的 `.venv/` 作为 Python 环境。默认设置下，新建集成终端时，扩展会自动激活所选环境，让终端中的 `python`、`pip` 等命令使用项目的解释器。Windows PowerShell 中可能会看到 VS Code 自动执行 `.venv\Scripts\Activate.ps1`；这是扩展执行的激活命令，不是 PowerShell 因为进入项目目录而自动执行的。因此，在同一目录手动打开独立的 PowerShell，通常不会自动进入虚拟环境。
+模型配置放在用户目录，所有项目共用。`~` 表示用户主目录；Windows 对应 `C:\Users\<用户名>`。如果目录不存在，先创建 `.agentlite` 文件夹。
 
-这个行为由 VS Code 设置 `python-envs.terminal.autoActivationType` 控制：`command`（默认）在终端打开后执行并显示激活命令；`shellStartup` 在 shell 启动过程中激活；`off` 关闭自动激活。修改设置后，需要新建终端才能生效。若想确认终端实际使用的解释器，可运行 `python -c "import sys; print(sys.executable)"`。
+在 `~/.agentlite/settings.json` 写入：
 
-虚拟环境创建时，创建工具会把提示符名称记录在 `.venv/pyvenv.cfg` 的 `prompt` 项中，并把名称写入 `activate.ps1` 等激活脚本。激活时，PowerShell 执行的是脚本，不会重新读取 `pyvenv.cfg` 的 `prompt` 来更新提示符。因此，创建环境后若只修改 `pyvenv.cfg`，两处名称就可能不一致：本项目的配置文件写着 `prompt = AgentLite`，但 `activate.ps1` 中仍是 `kamaclaude`，终端便显示 `(kamaclaude)`。这只是显示名称不一致，不代表使用了另一个 Python 环境。要修改 PowerShell 中显示的名称，需要相应修改或重新生成激活脚本，然后新建终端。
-
-## 安装到本地 Python 环境
-
-如果不使用项目虚拟环境，而要安装到本机 Python 3.12，先退出已激活的虚拟环境，再执行：
-
-使用 uv：
-
-```bash
-deactivate
-uv pip install --system --python 3.12 -e .
+```json
+{
+  "defaultModel": "my-model",
+  "models": [
+    {
+      "id": "my-model",
+      "name": "我的模型",
+      "protocol": "openai",
+      "model": "替换为服务商的模型名称",
+      "baseUrl": "https://your-provider.example/v1",
+      "apiKeyEnv": "MY_MODEL_API_KEY"
+    }
+  ]
+}
 ```
 
-`--system` 会忽略项目中的 `.venv/`，`--python 3.12` 指定本地解释器，`-e` 表示源码修改后立即生效。安装完成后可执行 `lite`、`lite-core` 或 `lite-tui`；卸载使用：
+将 `model` 和 `baseUrl` 替换为服务商提供的实际值。在同一目录的 `.env` 文件中填写密钥：
 
-```bash
-uv pip uninstall --system --python 3.12 AgentLite
+```dotenv
+MY_MODEL_API_KEY=替换为自己的密钥
 ```
 
-不使用 uv 时，先用 `python --version` 确认当前是 Python 3.12，再使用 pip：
+`protocol` 支持 `openai` 和 `anthropic`。使用 Anthropic 官方接口时，设置为 `anthropic`，填写对应模型名称并省略 `baseUrl`。模型窗口可以通过可选字段 `contextWindow` 指定，单位为 token。
 
-```bash
-deactivate
-python --version
-python -m pip install -e .
+也可以先打开 VS Code 插件，点击输入框的“模型配置”齿轮创建并编辑 `settings.json`。后端可在没有密钥时启动，发送消息时才检查凭证。
+
+JSON 保存模型信息，密钥放在 `.env` 或进程环境变量中。系统环境变量优先于用户 `.env`；项目目录的 `.env` 不会被读取。修改模型 JSON 后下一次请求生效，修改已加载的密钥需要重启 core。
+
+### 3. 选择使用入口
+
+#### VS Code 插件
+
+先安装插件构建依赖：
+
+```powershell
+cd extensions/vscode
+npm install
 ```
 
-对应的卸载命令为：
+回到 VS Code 的 AgentLite 仓库窗口，在“运行和调试”中选择 **AgentLite: VS Code Demo**，按 **F5** 打开扩展开发窗口。执行命令 **AgentLite: 打开聊天**，或点击右侧辅助侧边栏的 AgentLite 标签。
 
-```bash
-python -m pip uninstall AgentLite
+要安装到日常使用的 VS Code，在 `extensions/vscode` 中执行：
+
+```powershell
+npm run package
 ```
+
+然后在扩展面板菜单选择 **从 VSIX 安装**，选中生成的 `.vsix` 文件。当前插件通过本地 VSIX 安装。
+
+在其他项目使用插件时，在 VS Code 用户设置中指定已安装 AgentLite 的解释器。例如 Windows：
+
+```json
+{
+  "agentLite.pythonPath": "C:\\path\\to\\AgentLite\\.venv\\Scripts\\python.exe"
+}
+```
+
+macOS/Linux 对应 `.venv/bin/python`。聊天会话使用当前打开的项目作为工作区，Python 后端和模型配置可以共用，无需每个项目都安装一份。
+
+打开聊天后直接输入任务，例如“解释这个项目的启动流程”。**Enter** 发送，**Shift+Enter** 换行；工具执行过程中可确认权限或取消任务。顶部可新建、恢复会话或查看收藏，输入框底部可选择模型。
+
+在输入框开头输入 `/` 可查看快捷命令，已支持 `/new`、`/history`、`/model`、`/settings`、`/status`、`/logs` 和 `/mcp`。通过 `/mcp` 可查看、添加和管理工具服务器。
+
+插件安装图标为 [icon.png](extensions/vscode/media/icon.png)，矢量源为 [logo.svg](extensions/vscode/media/logo.svg)，侧边栏使用 [agentlite.svg](extensions/vscode/media/agentlite.svg)。构建时自动生成 PNG 图标。更多设置和开发说明见 [VS Code 插件文档](extensions/vscode/README.md)。
+
+#### 终端界面（TUI）
+
+在仓库根目录执行：
+
+```powershell
+uv run lite-tui
+```
+
+TUI 会自动连接或启动后台 core，提供多轮聊天、工具结果、权限确认和会话恢复。可在输入框输入 `/` 查看可用命令。
+
+#### 命令行（CLI）
+
+先启动后台服务，再开始交互聊天：
+
+```powershell
+uv run lite core start
+uv run lite chat
+```
+
+或执行单次任务：
+
+```powershell
+uv run lite run --goal "检查当前项目的目录结构并解释主要模块"
+```
+
+CLI 将运行命令时的当前目录作为任务工作区。已安装到 Python 环境后，可以在目标项目中直接运行 `lite chat` 或 `lite run --goal "..."`。
+
+## 后台服务与重启
+
+VS Code 和 TUI 默认自动启动并共享 core。最后一个前端退出后，core 等待 15 秒再自动停止；仅隐藏聊天面板不算退出。
+
+| 命令（仓库根目录执行） | 用途 |
+| --- | --- |
+| `uv run lite core status` | 查看后台状态 |
+| `uv run lite core start` | 启动常驻服务，或将已有自动服务转为常驻 |
+| `uv run lite core stop` | 停止共享后台服务 |
+| `uv run lite ping` | 检查连接 |
+| `uv run lite-core` | 在当前终端前台运行服务，方便调试 |
+| `uv run lite trace` | 查看运行跟踪记录 |
+
+修改 Python 后端代码或已加载的密钥后，等待任务结束，执行 `uv run lite core stop`，再重连 VS Code 或重新打开 TUI。原会话可以继续使用。更新插件后执行 VS Code 的 **开发人员: 重新加载窗口**。
+
+## 配置与本地数据
+
+| 路径 | 内容 |
+| --- | --- |
+| `~/.agentlite/settings.json` | 模型列表与默认模型 |
+| `~/.agentlite/.env` | API key 与环境配置 |
+| `~/.agentlite/config.toml` | core、工具、权限、上下文等配置 |
+| `~/.agentlite/mcp.json` | MCP 服务器配置 |
+| `~/.agentlite/sessions/` | 会话消息、事件和独立工具结果文件 |
+| `~/.agentlite/logs/` | 默认日志目录 |
+
+core 的 TOML 配置按“内建默认值 → 用户配置 → 启动目录的 `.agentlite/config.toml` → 环境变量”覆盖。设置 `AGENTLITE_CONFIG` 后只读取指定的 TOML 文件。模型 JSON 始终从用户目录读取。
+
+大工具结果的保存、预览预算与按需读取方式见 [工具结果存储说明](docs/tool-result-storage.md)。
+
+## 常见问题
+
+**插件提示找不到 Python 或 AgentLite**：先在仓库执行 `uv sync`，然后将 `agentLite.pythonPath` 设置为仓库 `.venv` 中的 Python 3.12 解释器。
+
+**修改后仍表现为旧版本**：后台进程不会自动重新加载代码；任务结束后停止 core 并重连。插件更新还需要重新加载 VS Code 窗口。
+
+**无法连接模型**：确认 `model`、协议和 API 地址与服务商一致，`apiKeyEnv` 指向实际存在的密钥变量。密钥配置在用户 `.env`，不是当前项目 `.env`。
+
+**AgentLite 标签出现在左侧**：右键视图标题，将它移动到“辅助侧边栏”。VS Code 会保留之前的位置设置。
+
+## 项目结构与开发
+
+```text
+src/agent_lite/
+  core/             后台服务、Agent 循环、模型接口、工具与会话
+  cli/              命令行入口
+  tui/              终端聊天界面
+extensions/vscode/  VS Code 插件与聊天页面
+tests/              Python 单元测试与集成测试
+docs/               设计与实现说明
+```
+
+Python 检查在仓库根目录执行：
+
+```powershell
+uv run pytest tests/unit -q
+uv run pytest tests/integration -m "not integration" -q
+uv run ruff check src tests scripts
+uv run mypy src
+```
+
+插件检查在 `extensions/vscode` 执行 `npm run check` 和 `npm test`。真实模型测试单独运行，会产生 API 请求；具体步骤见 [插件文档](extensions/vscode/README.md)。

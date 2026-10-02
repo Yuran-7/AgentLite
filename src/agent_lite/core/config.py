@@ -70,6 +70,7 @@ class LlmConfig:
     api_key: str | None = field(default=None, repr=False)
     protocol: str = _DEFAULT_LLM_PROTOCOL  # "anthropic" | "openai"
     default_model: str = _DEFAULT_MODEL
+    context_window: int | None = None  # 显式窗口大小；未配置时使用兼容回退
     base_url: str = ""  # 留空时由对应 SDK 的标准环境变量决定
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
 
@@ -91,18 +92,24 @@ class CompactionConfig:
     # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
     auto_threshold: float = 0.0
     tool_result_limit: int = 8_000  # tool_result 截断触发字符数
-    tool_result_keep: int = 4_000   # 截断后保留的前缀字符数
+    tool_result_keep: int = 4_000   # 头尾预览的 UTF-8 字节预算
+    tool_result_token_limit: int = 4_000  # 单条模型结果估算 token 预算
+    tool_result_batch_token_limit: int = 12_000  # 同一步工具结果合计估算 token 预算
 
 
 @dataclass
 class McpServerConfig:
     name: str
-    transport: str = "stdio"       # "stdio" | "tcp"
+    transport: str = "stdio"       # "stdio" | "http" | "tcp"
     command: str = ""              # stdio 专用：可执行文件路径
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     host: str = "localhost"        # tcp 专用
     port: int = 3000               # tcp 专用
+    enabled: bool = True
+    url: str = ""                  # Streamable HTTP
+    bearer_token_env: str = ""     # HTTP token 的环境变量名
+    startup_timeout: float = 10.0
 
 
 @dataclass
@@ -171,6 +178,19 @@ def get_config() -> AgentLiteConfig:
     return config
 
 
+# 校验配置小节的表类型与允许字段，保留各小节原有错误提示
+def _config_section(
+    data: dict[str, Any], name: str, allowed: set[str],
+) -> dict[str, Any]:
+    section = data[name]
+    if not isinstance(section, dict):
+        raise SystemExit(f"Config error: [{name}] must be a table")
+    unknown = set(section) - allowed
+    if unknown:
+        raise SystemExit(f"Unknown [{name}] keys: {', '.join(sorted(unknown))}")
+    return section
+
+
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
     known_sections = {
@@ -182,12 +202,7 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
     if "core" in data:
-        core = data["core"]
-        if not isinstance(core, dict):
-            raise SystemExit("Config error: [core] must be a table")
-        unknown_core: set[str] = set(core.keys()) - {"host", "port"}
-        if unknown_core:
-            raise SystemExit(f"Unknown [core] keys: {', '.join(sorted(unknown_core))}")
+        core = _config_section(data, "core", {"host", "port"})
         if "host" in core:
             val = core["host"]
             if not isinstance(val, str):
@@ -200,12 +215,7 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             config.port = val
 
     if "logging" in data:
-        log = data["logging"]
-        if not isinstance(log, dict):
-            raise SystemExit("Config error: [logging] must be a table")
-        unknown_log: set[str] = set(log.keys()) - {"level", "file", "format"}
-        if unknown_log:
-            raise SystemExit(f"Unknown [logging] keys: {', '.join(sorted(unknown_log))}")
+        log = _config_section(data, "logging", {"level", "file", "format"})
         for key in ("level", "file", "format"):
             if key in log:
                 val = log[key]
@@ -214,14 +224,9 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
                 setattr(config.logging, key, val)
 
     if "agent" in data:
-        agent = data["agent"]
-        if not isinstance(agent, dict):
-            raise SystemExit("Config error: [agent] must be a table")
-        unknown_agent: set[str] = set(agent.keys()) - {
+        agent = _config_section(data, "agent", {
             "max_steps", "subagent_allowed_tools",
-        }
-        if unknown_agent:
-            raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
+        })
         if "max_steps" in agent:
             val = agent["max_steps"]
             if not isinstance(val, int) or val <= 0:
@@ -236,10 +241,7 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             config.agent.subagent_allowed_tools = _normalize_tool_names(val)
 
     if "web" in data:
-        web = data["web"]
-        if not isinstance(web, dict):
-            raise SystemExit("Config error: [web] must be a table")
-        allowed_web_keys = {
+        web = _config_section(data, "web", {
             "enabled",
             "search_provider",
             "search_base_url",
@@ -249,10 +251,7 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             "fetch_max_bytes",
             "fetch_max_redirects",
             "user_agent",
-        }
-        unknown_web: set[str] = set(web.keys()) - allowed_web_keys
-        if unknown_web:
-            raise SystemExit(f"Unknown [web] keys: {', '.join(sorted(unknown_web))}")
+        })
         if "enabled" in web:
             val = web["enabled"]
             if not isinstance(val, bool):
@@ -289,14 +288,9 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             config.web.timeout_s = float(val)
 
     if "llm" in data:
-        llm = data["llm"]
-        if not isinstance(llm, dict):
-            raise SystemExit("Config error: [llm] must be a table")
-        unknown_llm: set[str] = set(llm.keys()) - {
-            "protocol", "default_model", "base_url", "router",
-        }
-        if unknown_llm:
-            raise SystemExit(f"Unknown [llm] keys: {', '.join(sorted(unknown_llm))}")
+        llm = _config_section(data, "llm", {
+            "protocol", "default_model", "base_url", "router", "context_window",
+        })
         if "protocol" in llm:
             val = llm["protocol"]
             if not isinstance(val, str) or val.lower() not in ("anthropic", "openai"):
@@ -304,52 +298,38 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
                     "Config error: llm.protocol must be 'anthropic' or 'openai'"
                 )
             config.llm.protocol = val.lower()
+        if "context_window" in llm:
+            val = llm["context_window"]
+            if type(val) is not int or val <= 0:
+                raise SystemExit("Config error: llm.context_window must be a positive integer")
+            config.llm.context_window = val
         if "default_model" in llm:
             val = llm["default_model"]
             if not isinstance(val, str) or not val.strip():
                 raise SystemExit("Config error: llm.default_model must be a non-empty string")
             config.llm.default_model = val
-        if "base_url" in llm:
-            val = llm["base_url"]
-            if not isinstance(val, str):
-                raise SystemExit("Config error: llm.base_url must be a string")
-            config.llm.base_url = val
-        if "router" in llm:
-            val = llm["router"]
-            if not isinstance(val, str):
-                raise SystemExit("Config error: llm.router must be a string")
-            config.llm.router = val
+        for key in ("base_url", "router"):
+            if key in llm:
+                val = llm[key]
+                if not isinstance(val, str):
+                    raise SystemExit(f"Config error: llm.{key} must be a string")
+                setattr(config.llm, key, val)
 
     if "trace" in data:
-        trace = data["trace"]
-        if not isinstance(trace, dict):
-            raise SystemExit("Config error: [trace] must be a table")
-        unknown_trace: set[str] = set(trace.keys()) - {"enabled", "file", "include_llm_payload"}
-        if unknown_trace:
-            raise SystemExit(f"Unknown [trace] keys: {', '.join(sorted(unknown_trace))}")
-        if "enabled" in trace:
-            val = trace["enabled"]
-            if not isinstance(val, bool):
-                raise SystemExit("Config error: trace.enabled must be a boolean")
-            config.trace.enabled = val
-        if "file" in trace:
-            val = trace["file"]
-            if not isinstance(val, str):
-                raise SystemExit("Config error: trace.file must be a string")
-            config.trace.file = val
-        if "include_llm_payload" in trace:
-            val = trace["include_llm_payload"]
-            if not isinstance(val, bool):
-                raise SystemExit("Config error: trace.include_llm_payload must be a boolean")
-            config.trace.include_llm_payload = val
+        trace = _config_section(data, "trace", {"enabled", "file", "include_llm_payload"})
+        for key, expected, label in (
+            ("enabled", bool, "boolean"),
+            ("file", str, "string"),
+            ("include_llm_payload", bool, "boolean"),
+        ):
+            if key in trace:
+                val = trace[key]
+                if not isinstance(val, expected):
+                    raise SystemExit(f"Config error: trace.{key} must be a {label}")
+                setattr(config.trace, key, val)
 
     if "permission" in data:
-        perm = data["permission"]
-        if not isinstance(perm, dict):
-            raise SystemExit("Config error: [permission] must be a table")
-        unknown_perm: set[str] = set(perm.keys()) - {"timeout_s"}
-        if unknown_perm:
-            raise SystemExit(f"Unknown [permission] keys: {', '.join(sorted(unknown_perm))}")
+        perm = _config_section(data, "permission", {"timeout_s"})
         if "timeout_s" in perm:
             val = perm["timeout_s"]
             if not isinstance(val, (int, float)) or val < 0:
@@ -357,14 +337,7 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             config.permission.timeout_s = float(val)
 
     if "session" in data:
-        session = data["session"]
-        if not isinstance(session, dict):
-            raise SystemExit("Config error: [session] must be a table")
-        unknown_session: set[str] = set(session.keys()) - {"dir"}
-        if unknown_session:
-            raise SystemExit(
-                f"Unknown [session] keys: {', '.join(sorted(unknown_session))}"
-            )
+        session = _config_section(data, "session", {"dir"})
         if "dir" in session:
             val = session["dir"]
             if not isinstance(val, str) or not val.strip():
@@ -372,18 +345,13 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             config.session.dir = val
 
     if "memory" in data:
-        memory = data["memory"]
-        if not isinstance(memory, dict):
-            raise SystemExit("Config error: [memory] must be a table")
-        unknown_memory = set(memory.keys()) - {
+        memory = _config_section(data, "memory", {
             "dir",
             "use_enabled",
             "generate_enabled",
             "min_rollout_idle_hours",
             "max_rollout_age_days",
-        }
-        if unknown_memory:
-            raise SystemExit(f"Unknown [memory] keys: {', '.join(sorted(unknown_memory))}")
+        })
         if "dir" in memory:
             val = memory["dir"]
             if not isinstance(val, str) or not val.strip():
@@ -406,41 +374,30 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
                 setattr(config.memory, key, val)
 
     if "compaction" in data:
-        comp = data["compaction"]
-        if not isinstance(comp, dict):
-            raise SystemExit("Config error: [compaction] must be a table")
-        unknown_comp: set[str] = set(comp.keys()) - {
+        comp = _config_section(data, "compaction", {
             "auto_threshold", "tool_result_limit", "tool_result_keep",
-        }
-        if unknown_comp:
-            raise SystemExit(f"Unknown [compaction] keys: {', '.join(sorted(unknown_comp))}")
+            "tool_result_token_limit", "tool_result_batch_token_limit",
+        })
         if "auto_threshold" in comp:
             val = comp["auto_threshold"]
             if not isinstance(val, (int, float)) or not (0.0 <= val <= 1.0):
                 raise SystemExit("Config error: compaction.auto_threshold must be between 0 and 1")
             config.compaction.auto_threshold = float(val)
-        if "tool_result_limit" in comp:
-            val = comp["tool_result_limit"]
-            if not isinstance(val, int) or val <= 0:
-                raise SystemExit(
-                    "Config error: compaction.tool_result_limit must be a positive integer"
-                )
-            config.compaction.tool_result_limit = val
-        if "tool_result_keep" in comp:
-            val = comp["tool_result_keep"]
-            if not isinstance(val, int) or val <= 0:
-                raise SystemExit(
-                    "Config error: compaction.tool_result_keep must be a positive integer"
-                )
-            config.compaction.tool_result_keep = val
+        for key in ("tool_result_token_limit", "tool_result_batch_token_limit"):
+            if key in comp:
+                val = comp[key]
+                if type(val) is not int or val <= 0:
+                    raise SystemExit(f"Config error: compaction.{key} must be a positive integer")
+                setattr(config.compaction, key, val)
+        for key in ("tool_result_limit", "tool_result_keep"):
+            if key in comp:
+                val = comp[key]
+                if not isinstance(val, int) or val <= 0:
+                    raise SystemExit(f"Config error: compaction.{key} must be a positive integer")
+                setattr(config.compaction, key, val)
 
     if "mcp" in data:
-        mcp = data["mcp"]
-        if not isinstance(mcp, dict):
-            raise SystemExit("Config error: [mcp] must be a table")
-        unknown_mcp: set[str] = set(mcp.keys()) - {"servers"}
-        if unknown_mcp:
-            raise SystemExit(f"Unknown [mcp] keys: {', '.join(sorted(unknown_mcp))}")
+        mcp = _config_section(data, "mcp", {"servers"})
         servers_raw = mcp.get("servers", [])
         if not isinstance(servers_raw, list):
             raise SystemExit("Config error: mcp.servers must be an array of tables")
@@ -451,11 +408,25 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
             if not isinstance(name, str) or not name:
                 raise SystemExit(f"Config error: mcp.servers[{i}].name must be a non-empty string")
             transport = srv.get("transport", "stdio")
-            if transport not in ("stdio", "tcp"):
+            if transport not in ("stdio", "tcp", "http"):
                 raise SystemExit(
-                    f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'"
+                    f"Config error: mcp.servers[{i}].transport must be 'stdio', 'http' or 'tcp'"
                 )
             s = McpServerConfig(name=name, transport=transport)
+            for key in ("url", "bearer_token_env"):
+                if key in srv:
+                    if not isinstance(srv[key], str):
+                        raise SystemExit(f"Config error: mcp.servers[{i}].{key} must be a string")
+                    setattr(s, key, srv[key])
+            if "enabled" in srv:
+                if type(srv["enabled"]) is not bool:
+                    raise SystemExit(f"Config error: mcp.servers[{i}].enabled must be a boolean")
+                s.enabled = srv["enabled"]
+            if "startup_timeout" in srv:
+                val = srv["startup_timeout"]
+                if type(val) not in (int, float) or not 1 <= val <= 120:
+                    raise SystemExit("Config error: MCP startup_timeout must be between 1 and 120")
+                s.startup_timeout = float(val)
             if "command" in srv:
                 val = srv["command"]
                 if not isinstance(val, str):
@@ -497,17 +468,10 @@ def _apply_env(config: AgentLiteConfig) -> None:
         except ValueError:
             raise SystemExit(f"Config error: AGENTLITE_PORT must be an integer, got: {port_str!r}")
 
-    log_level = os.environ.get("AGENTLITE_LOG_LEVEL")
-    if log_level is not None:
-        config.logging.level = log_level
-
-    log_file = os.environ.get("AGENTLITE_LOG_FILE")
-    if log_file is not None:
-        config.logging.file = log_file
-
-    log_format = os.environ.get("AGENTLITE_LOG_FORMAT")
-    if log_format is not None:
-        config.logging.format = log_format
+    for key in ("level", "file", "format"):
+        value = os.environ.get(f"AGENTLITE_LOG_{key.upper()}")
+        if value is not None:
+            setattr(config.logging, key, value)
 
     sessions_dir = os.environ.get("AGENTLITE_SESSIONS_DIR")
     if sessions_dir is not None:
@@ -635,34 +599,16 @@ def _apply_env(config: AgentLiteConfig) -> None:
                 f"got: {compact_threshold!r}"
             )
 
-    compact_tool_limit = os.environ.get("AGENTLITE_COMPACT_TOOL_LIMIT")
-    if compact_tool_limit is not None:
-        try:
-            compact_tool_limit_val = int(compact_tool_limit)
-            if compact_tool_limit_val <= 0:
-                raise SystemExit(
-                    "Config error: AGENTLITE_COMPACT_TOOL_LIMIT must be a positive integer, "
-                    f"got: {compact_tool_limit!r}"
-                )
-            config.compaction.tool_result_limit = compact_tool_limit_val
-        except ValueError:
-            raise SystemExit(
-                "Config error: AGENTLITE_COMPACT_TOOL_LIMIT must be an integer, "
-                f"got: {compact_tool_limit!r}"
-            )
-
-    compact_tool_keep = os.environ.get("AGENTLITE_COMPACT_TOOL_KEEP")
-    if compact_tool_keep is not None:
-        try:
-            compact_tool_keep_val = int(compact_tool_keep)
-            if compact_tool_keep_val <= 0:
-                raise SystemExit(
-                    "Config error: AGENTLITE_COMPACT_TOOL_KEEP must be a positive integer, "
-                    f"got: {compact_tool_keep!r}"
-                )
-            config.compaction.tool_result_keep = compact_tool_keep_val
-        except ValueError:
-            raise SystemExit(
-                "Config error: AGENTLITE_COMPACT_TOOL_KEEP must be an integer, "
-                f"got: {compact_tool_keep!r}"
-            )
+    for name, key in (
+        ("AGENTLITE_COMPACT_TOOL_LIMIT", "tool_result_limit"),
+        ("AGENTLITE_COMPACT_TOOL_KEEP", "tool_result_keep"),
+    ):
+        value = os.environ.get(name)
+        if value is not None:
+            try:
+                parsed = int(value)
+            except ValueError:
+                raise SystemExit(f"Config error: {name} must be an integer, got: {value!r}")
+            if parsed <= 0:
+                raise SystemExit(f"Config error: {name} must be a positive integer, got: {value!r}")
+            setattr(config.compaction, key, parsed)

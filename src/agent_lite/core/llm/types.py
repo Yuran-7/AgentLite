@@ -9,7 +9,11 @@ class UsageStats:
     output_tokens: int
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
-    context_pct: float = 0.0
+    context_pct: float = 0.0  # 最近一次输入加输出的占用比例，展示时乘 100
+    total_input_tokens: int | None = None  # 含缓存的完整输入，由 provider 归一化
+    context_tokens: int = 0
+    context_window: int = 0
+    context_window_estimated: bool = False
 
 
 @dataclass

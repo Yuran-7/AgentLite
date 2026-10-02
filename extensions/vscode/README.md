@@ -3,6 +3,12 @@
 这是现有 `lite-core` 的图形客户端。聊天界面默认位于右侧辅助侧边栏，与 Codex、Chat 并列，TypeScript 扩展宿主使用 TCP / JSON-RPC / NDJSON 连接 Python core。
 支持多轮消息、流式 Markdown、工具参数与结果、计划、权限确认、取消，以及模型和 token 状态。不会启动或解析 TUI。
 
+## 启动修复（0.0.44）
+
+本地端口暂时被拒绝绑定或占用时，core 在原端口最多重试 4 秒；仍失败时显示具体端口原因和设置入口说明。初始化失败也会关闭已启动的 MCP 进程与 trace。Windows npm 安装的工具入口（包括 scoped package 的 `.cmd`）直接使用 Node 启动，并保留启动参数。
+
+本版同时修改 Python core 源码。源码安装使用当前仓库即可；其他机器需要同步更新 AgentLite Python 包，单独安装 VSIX 不会替换 Python 后端。
+
 ## 收藏回答（0.0.14）
 
 顶部书签图标打开当前会话的收藏面板，点击模型回答下方的书签图标可收藏或取消收藏。已收藏的图标实心显示；生成过程中禁止新增收藏，避免保存未完成的内容。
@@ -22,6 +28,46 @@
 - 输入区的信息图标打开连接详情，包含连接状态、工作区、重连和日志；顶部标题与图标更紧凑。空会话页显示 AgentLite logo，界面标签和欢迎文案不可选中，聊天正文与输入仍可选中。
 
 发送时间和耗时从真实消息及运行状态读取，不伪造未知历史的时间；当前后端历史记录没有这些字段时，恢复的旧消息不显示时间与耗时。
+
+## 输入框快捷命令
+
+在消息开头输入 `/` 打开快捷命令菜单，继续输入英文命令或中文名称即可筛选。方向键选择，Enter / Tab 确认，Esc 或点击外部关闭；Shift+Enter 仍用于换行。普通消息中的路径和斜杠不会触发菜单。
+
+已接入 `/new`、`/history`、`/model`、`/settings`、`/status`、`/logs`、`/mcp`。`/goal`、`/plan`、`/reasoning`、`/memories`、`/skills` 保留占位入口，选择后显示待实现说明，不向模型发送请求，也不更改配置。运行中沿用输入框的锁定规则。
+
+## MCP 服务器（0.0.43）
+
+输入 `/mcp` 打开服务器面板，查看真实的连接状态和工具数量；展开服务器可查看连接地址、错误原因及工具说明、参数定义。面板支持刷新、添加服务器、启用/禁用、重新连接、编辑和应用配置。任务运行中可查看状态，修改连接需等待主任务和后台子任务结束。
+
+“添加服务器”提供 STDIO、Streamable HTTP 和兼容已有服务器的 TCP 三种连接方式。STDIO 的参数填写 JSON 字符串数组，避免路径含空格时被错误拆分；Windows 的标准 npm/npx 包装器自动使用 Node CLI 启动。新工具在下一轮任务中生效，调用沿用现有权限策略。
+
+配置保存在 `~/.agentlite/mcp.json`，所有项目和连接同一 core 的客户端共享。文件不存在时沿用 TOML 中的 `[[mcp.servers]]`；第一次编辑、添加或切换状态会创建 JSON 配置，之后以该文件为准。编辑器提供字段补全和校验，保存后在面板点击“应用配置”，只重连改动或断线的服务器；无效配置不会替换当前可用连接。测试可用 `AGENTLITE_MCP_SETTINGS` 指定独立文件。
+
+```json
+{
+  "servers": [
+    {
+      "name": "documentation",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "enabled": true,
+      "startup_timeout": 10
+    },
+    {
+      "name": "remote",
+      "transport": "http",
+      "url": "https://example.com/mcp",
+      "bearer_token_env": "MY_MCP_TOKEN",
+      "enabled": false
+    }
+  ]
+}
+```
+
+HTTP 支持 JSON 与 SSE 响应、MCP 会话和 Bearer Token。Token 值放在环境变量或 `~/.agentlite/.env`，界面只接收变量名；服务器环境变量与密钥不进入状态快照。当前尚未实现 OAuth 登录、旧式 HTTP+SSE 端点、资源与提示词浏览。
+
+此功能同时更新 Python core。升级插件后，若旧 core 仍在运行，在任务结束后执行 `uv run lite core stop`，再点击聊天输入区信息面板中的“重新连接”；源码安装无需重装 Python 包，非源码安装需同步更新 AgentLite。旧 core 会在 MCP 面板显示明确的版本提示。
 
 ## 历史聊天与模型选择（0.0.8）
 
@@ -119,6 +165,10 @@ core 的工作目录由 `agentLite.coreDirectory` 指定或从安装位置发现
 如果凭证只设置在某个终端中，请从该终端运行 `code .`，确保 VS Code 继承环境。
 复用的 core 沿用原来的用户 `.env` / TOML 启动配置；JSON 模型配置从用户目录读取，选择只影响当前会话。
 
+输入框下方的输入、输出和缓存数值来自最近一次主 Agent 请求；输入已包含缓存，缓存列是其中的读取量。上下文水位为 `(完整输入 + 本次输出) / 模型窗口 × 100%`，不会累计多次请求。Anthropic 的完整输入包含未缓存、缓存读取和缓存写入三个字段；OpenAI 的 `prompt_tokens` 已包含缓存，不能再相加。该数值是上次响应结束时的用量快照，新增用户消息、工具结果和压缩后的上下文要等下一次请求返回用量后更新。
+
+可在用户 `~/.agentlite/settings.json` 的模型条目中设置正整数 `contextWindow`（token 数），或在 TOML 的 `[llm]` 中设置 `context_window`。请按实际端点容量填写；未配置时沿用回退窗口，VS Code 用 `≈` 标记估算。重启 core 并重新加载扩展后，新的用量事件会采用修正后的口径。
+
 多个 VS Code 窗口同时打开时，通过用户目录下 `.agentlite/locks` 中按端口区分的共享启动锁协调；只有一个窗口执行预检和启动，其余窗口等待并复用。锁使用原子目录创建和定期更新时间，异常终止后过期锁可回收，参见 [锁实现说明](https://github.com/moxystudio/node-proper-lockfile)。core 已就绪时直接连接，不启动新的 Python 检查进程。
 
 Windows 的 `.venv/Scripts/python.exe` 是转发启动器，因此一个 core 常表现为两个 `python.exe` 的父子进程：小的启动器与实际解释器。首次启动还有短暂预检和后台启动器，它们不代表多个独立 core；真正的 core 是监听配置端口的解释器进程。
@@ -167,13 +217,20 @@ Logo 使用薄荷绿的字母 A 与暖金色闪电，分别代表 Agent 和 Lite
 
 从 0.0.5 升级后，换项目会自动使用 AgentLite 自己的配置目录。源码安装通常无需额外设置；如果模型配置保存在其他位置，请在用户设置中填写 `agentLite.coreDirectory`。该设置不会改变会话的项目工作目录。
 
-打包输出 `agentlite-vscode-0.0.14.vsix`。在 VS Code 扩展面板菜单选择“从 VSIX 安装”，或运行：
+打包输出 `agentlite-vscode-0.0.46.vsix`。在 VS Code 扩展面板菜单选择“从 VSIX 安装”，或运行：
 
 ```powershell
-code --install-extension ./agentlite-vscode-0.0.14.vsix
+code --install-extension ./agentlite-vscode-0.0.46.vsix
 ```
 
 从旧版升级后，如果 VS Code 记住了左侧位置，右键 AgentLite 图标或视图标题，选择“移动到” → “辅助侧边栏”（Move To → Secondary Side Bar）。VS Code 会记住新位置。默认右侧贡献点从 VS Code 1.106 起正式支持，参见 [官方发布说明](https://code.visualstudio.com/updates/v1_106#_view-containers-in-secondary-side-bar)。
 
 真实模型手工验收：打开侧边栏，让 Agent 读取工作区文件并总结，继续追问，然后请求写入一个临时文件并确认权限，最后取消一个进行中的任务，确认还能继续对话。
 UI 自动测试使用 DOM 环境；实际 VS Code 布局、焦点和主题效果仍应在开发窗口中检查。
+
+## 图片消息（0.0.45）
+
+输入框左下角的「+ → 上传图片」可选择图片，也支持粘贴截图或拖入图片文件。发送前可预览、移除图片；可只发图片，或附带文字。编辑消息时会恢复图片附件，历史会话也保留图片。
+
+支持 PNG、JPEG、GIF、WebP，每条消息最多 4 张，每张最多 3 MiB，单边最多 8192 像素、总像素最多 3200 万。图片随会话保存在本地，并作为原生图片消息块发送给 Anthropic 或 OpenAI-compatible 接口；选择的模型需支持视觉输入。
+

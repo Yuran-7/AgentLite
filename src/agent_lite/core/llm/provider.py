@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,6 +52,7 @@ class AnthropicProvider:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        context_window: int | None = None,
     ) -> None:
         if client is None:
             resolved_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -66,6 +68,10 @@ class AnthropicProvider:
         else:
             self._client = client
         self._model = model
+        if context_window is not None and (type(context_window) is not int or context_window <= 0):
+            raise ValueError("context_window must be a positive integer")
+        self._context_window = context_window or _context_window(model)
+        self._context_window_estimated = context_window is None
 
     # 流式调用 Anthropic API，逐 token 发布事件并返回 LlmResponse；网络中断时自动重试
     async def chat(
@@ -138,19 +144,22 @@ class AnthropicProvider:
         usage = final_message.usage
         cache_read: int = getattr(usage, "cache_read_input_tokens", 0) or 0
         cache_create: int = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        context_pct = usage.input_tokens / _context_window(self._model)
+        total_input_tokens = usage.input_tokens + cache_read + cache_create
+        context_tokens = total_input_tokens + usage.output_tokens
+        context_pct = context_tokens / self._context_window
 
-        await bus.publish(
-            LlmUsageEvent(
-                run_id=run_id,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_read_input_tokens=cache_read,
-                cache_creation_input_tokens=cache_create,
-                context_pct=context_pct,
-                ts=_now(),
-            )
+        stats = UsageStats(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_create,
+            context_pct=context_pct,
+            total_input_tokens=total_input_tokens,
+            context_tokens=context_tokens,
+            context_window=self._context_window,
+            context_window_estimated=self._context_window_estimated,
         )
+        await bus.publish(LlmUsageEvent(run_id=run_id, ts=_now(), **asdict(stats)))
 
         tool_calls: list[ToolCallBlock] = []
         thinking_blocks: list[dict[str, object]] = []
@@ -168,11 +177,5 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             text="".join(text_parts),
             thinking_blocks=thinking_blocks,
-            usage=UsageStats(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_read_input_tokens=cache_read,
-                cache_creation_input_tokens=cache_create,
-                context_pct=context_pct,
-            ),
+            usage=stats,
         )

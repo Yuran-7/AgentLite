@@ -15,7 +15,7 @@ from agent_lite.core.config import LlmConfig
 
 def model_settings(workspace: str | None = None) -> dict[str, Any]:
     paths = [Path.home() / ".agentlite/settings.json"]
-    models: dict[str, dict[str, str]] = {}
+    models: dict[str, dict[str, Any]] = {}
     default = ""
     for path in dict.fromkeys(paths):
         if not path.exists():
@@ -32,10 +32,14 @@ def model_settings(workspace: str | None = None) -> dict[str, Any]:
         seen: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict) or set(entry) - {
-                "id", "name", "model", "protocol", "baseUrl", "apiKeyEnv"
+                "id", "name", "model", "protocol", "baseUrl", "apiKeyEnv", "contextWindow"
             }:
                 raise ValueError("模型字段无效；密钥请放入 ~/.agentlite/.env，通过 apiKeyEnv 引用")
-            if any(not isinstance(v, str) for v in entry.values()):
+            if "contextWindow" in entry and (
+                type(entry["contextWindow"]) is not int or entry["contextWindow"] <= 0
+            ):
+                raise ValueError("contextWindow 必须是正整数")
+            if any(not isinstance(v, str) for k, v in entry.items() if k != "contextWindow"):
                 raise ValueError("模型配置字段必须是字符串")
             if any(not entry.get(k, "").strip() for k in ("id", "model", "protocol")):
                 raise ValueError("每个模型必须填写 id、model、protocol")
@@ -79,4 +83,5 @@ def resolve_model(config: LlmConfig, model_id: str | None, workspace: str | None
     if not key:
         raise ValueError(f"模型密钥未配置：请在 ~/.agentlite/.env 或系统环境变量中设置 {env_name}")
     return replace(config, protocol=profile["protocol"], default_model=profile["model"],
-                   base_url=profile.get("baseUrl", ""), api_key=key)
+                   base_url=profile.get("baseUrl", ""), api_key=key,
+                   context_window=profile.get("contextWindow", config.context_window))

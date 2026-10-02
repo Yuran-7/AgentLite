@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -76,12 +77,30 @@ class SocketServer:
         except (ConnectionRefusedError, OSError):
             pass
 
-        self._server = await asyncio.start_server(
-            self._handle_connection,  # 每个新连接由独立协程处理
-            host=self._host,
-            port=self._port,
-            limit=_MAX_LINE_BYTES,
-        )
+        # Windows can temporarily deny a port after an outbound connection closes.
+        # Keep the shared endpoint stable; never enable SO_REUSEADDR to bypass ownership.
+        for attempt in range(9):
+            try:
+                self._server = await asyncio.start_server(
+                    self._handle_connection,
+                    host=self._host,
+                    port=self._port,
+                    limit=_MAX_LINE_BYTES,
+                )
+                break
+            except OSError as exc:
+                code = getattr(exc, "winerror", None)
+                # asyncio may wrap WinError in a new OSError without winerror.
+                denied = exc.errno == errno.EACCES or code == 10013
+                occupied = exc.errno == errno.EADDRINUSE or code == 10048
+                if not (denied or occupied):
+                    raise
+                if attempt == 8:
+                    reason = "ACCESS_DENIED" if denied else "ADDRESS_IN_USE"
+                    logger.error("CORE_BIND_FAILED port=%d reason=%s", self._port, reason)
+                    raise
+                logger.warning("core port %d unavailable; retry %d/8", self._port, attempt + 1)
+                await asyncio.sleep(0.5)
         return f"{self._host}:{self._port}"
 
     # 关闭服务器：先断开所有活跃连接，再等待服务器完全关闭（最多 2 秒）

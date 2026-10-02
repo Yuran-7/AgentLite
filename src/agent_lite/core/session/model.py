@@ -16,6 +16,7 @@ class Session:
     title: str
     created_at: str
     updated_at: str
+    model_id: str | None = None
     last_chat_at: str | None = None
     workspace_root: str | None = None
     run_ids: list[str] = field(default_factory=list)
@@ -29,6 +30,7 @@ class Session:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "model_id": self.model_id,
             "mode": self.mode,
             "status": self.status,
             "title": self.title,
@@ -49,6 +51,7 @@ class Session:
     def from_dict(cls, data: dict[str, Any]) -> Session:
         return cls(
             id=str(data["id"]),
+            model_id=data.get("model_id"),
             mode=data["mode"],
             status=data["status"],
             title=str(data.get("title", "")),

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { ChatSession } from '../src/session';
+import { ChatSession, historyCards } from '../src/session';
 import { decisions, parsePageMessage } from '../src/protocol';
 import { waitFor } from './helpers';
 
@@ -19,6 +19,137 @@ class Client extends EventEmitter {
   close(): void { this.calls.push('client.close'); }
 }
 
+// 功能：真实连接等待被计入耗时，成功后心跳和新会话不会改变结果，重连重新计时。
+// 设计：控制宿主时钟和订阅响应，明确覆盖 core 就绪前等待与错误终止的边界。
+test('connection timing includes startup and freezes at session readiness', async t => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(performance, 'now', () => now);
+  const client = new Client(); const original = client.request.bind(client);
+  client.request = async method => {
+    if (method === 'event.subscribe') now += 200;
+    if (method === 'session.list') now += 1000;
+    return original(method);
+  };
+  const session = new ChatSession('workspace', () => {});
+  session.beginConnection(); now += 7500;
+  await session.attach(client, 'started');
+  assert.equal(session.state.connectionStartedAt, 100_000);
+  assert.equal(session.state.connectionElapsedMs, 7700);
+  now += 5000; await session.newSession();
+  assert.equal(session.state.connectionElapsedMs, 7700);
+  session.fail('disconnected'); assert.equal(session.state.connectionElapsedMs, 7700);
+  session.beginConnection();
+  assert.equal(session.state.connectionElapsedMs, undefined);
+  const retryAt = now; now += 2500;
+  session.fail('startup failed');
+  assert.equal(session.state.connectionStartedAt, retryAt);
+  assert.equal(session.state.connectionElapsedMs, 2500);
+  await session.dispose();
+});
+
+// 功能：耗时来自当前主运行，完成后附在最终回答，失败和切换清除运行计时。
+// 设计：模拟时钟与实际事件顺序，覆盖中途多个回答块以及迟到 RPC 响应。
+test('work duration and message timestamps reflect the real main run', async t => {
+  let now = 1_000_000; t.mock.method(Date, 'now', () => now);
+  const client = new Client(); const session = new ChatSession('workspace', () => {});
+  await session.attach(client, 'reused');
+  client.send = async () => {
+    now += 1000; client.emit('event', { type: 'run.started', run_id: 'main' });
+    client.emit('event', { type: 'llm.token', run_id: 'main', token: '正在检查' });
+    client.emit('event', { type: 'step.started', run_id: 'main' });
+    client.emit('event', { type: 'llm.token', run_id: 'main', token: '最终回答' });
+    now += 260_000;
+    client.emit('event', { type: 'run.finished', run_id: 'main', status: 'success' });
+    client.emit('event', { type: 'session.waiting_for_input', last_run_id: 'main' });
+    return {};
+  };
+  await session.send('hello');
+  const answers = session.state.cards.filter(card => card.kind === 'assistant');
+  assert.equal(answers[0].workMs, undefined); assert.equal(answers[1].workMs, 261_000);
+  assert(session.state.cards[0].createdAt); assert.equal(session.state.workStartedAt, undefined);
+  assert(!session.state.cards.some(card => card.text === '已完成'));
+  session.state.workStartedAt = now; session.fail('lost'); assert.equal(session.state.workStartedAt, undefined);
+  await session.dispose();
+});
+
+test('a new current session can be renamed before it appears in history', async () => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {});
+  await session.attach(client, 'reused');
+  assert.equal(session.state.history?.length, 0);
+  await session.renameSession('session', 'My new chat');
+  assert(client.calls.includes('session.rename')); assert.equal(session.state.title, 'My new chat');
+  const count = client.calls.length;
+  await session.renameSession('unknown', 'No'); assert.equal(client.calls.length, count);
+  session.state.busy = true; await session.renameSession('session', 'Busy');
+  assert.equal(client.calls.length, count); assert.equal(session.state.title, 'My new chat');
+  session.state.busy = false; await session.dispose();
+});
+
+test('resume restores transcript and model, filters stale events and persists rename through RPC', async () => {
+  const client = new Client();
+  const paramsSeen: { method: string; params: Record<string, unknown> }[] = [];
+  const transport = Object.assign(client, { request: async (method: string, params: Record<string, unknown>) => {
+    paramsSeen.push({ method, params });
+    if (method === 'session.create') return { session_id: 'new' };
+    if (method === 'session.list') return { sessions: [{ session_id: 'old', title: 'Old chat', updated_at: '2026-10-01' }] };
+    if (method === 'model.list') return { models: [{ id: 'custom', model: 'test', protocol: 'openai' }], defaultModel: 'custom' };
+    if (method === 'session.resume') return { title: 'Old chat', model_id: 'custom' };
+    if (method === 'session.get_history') return { messages: [
+      { role: 'user', content: 'question' }, { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }
+    ] };
+    return {};
+  } });
+  const session = new ChatSession('workspace', () => {});
+  await session.attach(transport, 'reused');
+  await session.resumeSession('old');
+  assert.equal(session.state.sessionId, 'old');
+  assert.equal(session.state.selectedModel, 'custom');
+  assert.deepEqual(session.state.cards.map(card => card.text), ['question', 'answer']);
+  const close = paramsSeen.findIndex(call => call.method === 'session.close');
+  const subscribe = paramsSeen.findLastIndex(call => call.method === 'event.subscribe');
+  assert(close > subscribe);
+  session.event({ type: 'llm.token', session_id: 'new', run_id: 'stale', token: 'ignored' });
+  assert.equal(session.state.cards.length, 2);
+  await session.renameSession('old', 'Renamed');
+  assert(paramsSeen.some(call => call.method === 'session.rename' && call.params.title === 'Renamed'));
+  await session.selectModel(''); assert.equal(session.state.selectedModel, '');
+  session.state.busy = true;
+  const count = paramsSeen.length; await session.resumeSession('old'); await session.selectModel('custom');
+  assert.equal(paramsSeen.length, count);
+  session.state.busy = false; await session.dispose();
+});
+
+test('historical tools show results without replaying permissions', () => {
+  const cards = historyCards([
+    { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'shell', input: { command: 'ls' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'file.txt' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] }
+  ]);
+  assert.equal(cards[0].kind, 'tool'); assert.equal(cards[0].output, 'file.txt');
+  assert.equal(cards[0].status, 'success'); assert(!cards.some(card => card.kind === 'permission'));
+});
+
+test('old core model errors explain restart and clear after a successful refresh', async () => {
+  const client = new Client(); const original = client.request.bind(client);
+  let oldCore = true;
+  client.request = async method => {
+    if (method === 'model.list') {
+      if (oldCore) throw new Error('Method not found: model.list');
+      return { models: [{ id: 'custom', name: 'My model', model: 'test', protocol: 'openai' }],
+        defaultModel: 'custom', fallbackModel: { id: '', name: 'existing-model', model: 'existing-model', protocol: 'anthropic' } };
+    }
+    return original(method);
+  };
+  const session = new ChatSession('workspace', () => {});
+  await session.attach(client, 'reused');
+  assert(session.state.error?.includes('重启 core'));
+  oldCore = false; await session.refreshModels();
+  assert.equal(session.state.error, undefined); assert.equal(session.state.selectedModel, 'custom');
+  assert.equal(session.state.fallbackModel?.name, 'existing-model');
+  await session.dispose();
+});
+
 // 功能：前端登记后持续续约，退出时注销，心跳失败后停止接受操作。
 // 设计：用短心跳间隔观察真实计时器，验证隐藏 Webview 时宿主仍持有租约的机制。
 test('frontend lease heartbeat, unregister, and heartbeat failure', async () => {
@@ -26,15 +157,21 @@ test('frontend lease heartbeat, unregister, and heartbeat failure', async () => 
   let failing = false;
   client.request = async method => {
     if (method === 'frontend.register') {
-      client.calls.push(method); return { managed: true, heartbeat_interval_s: 0.01 };
+      client.calls.push(method); return { managed: true, heartbeat_interval_s: 0.01,
+        frontend_counts: { vscode: 1, tui: 0 } };
     }
     if (method === 'frontend.heartbeat' && failing) throw new Error('heartbeat failed');
+    if (method === 'frontend.heartbeat') {
+      client.calls.push(method); return { managed: true, frontend_counts: { vscode: 2, tui: 1 } };
+    }
     return original(method);
   };
   const session = new ChatSession('workspace', () => {});
   await session.attach(client, 'started');
   assert.equal(session.state.coreMode, 'managed');
-  await waitFor(() => client.calls.includes('frontend.heartbeat'));
+  assert.deepEqual(session.state.frontendCounts, { vscode: 1, tui: 0 });
+  await waitFor(() => session.state.frontendCounts?.tui === 1);
+  assert.deepEqual(session.state.frontendCounts, { vscode: 2, tui: 1 });
   await session.dispose();
   assert(client.calls.includes('frontend.unregister'));
   const calls = client.calls.length;
@@ -44,6 +181,7 @@ test('frontend lease heartbeat, unregister, and heartbeat failure', async () => 
   await other.attach(client, 'reused'); failing = true;
   await waitFor(() => other.state.connection === 'error');
   assert.equal(other.state.busy, false);
+  assert.equal(other.state.frontendCounts, undefined);
   await other.dispose();
 });
 
@@ -52,7 +190,7 @@ test('frontend lease heartbeat, unregister, and heartbeat failure', async () => 
 test('subscribe first; early events and late send response keep completed run idle', async () => {
   const client = new Client(); const session = new ChatSession('workspace', () => {});
   await session.attach(client, 'reused');
-  assert.deepEqual(client.calls, ['frontend.register', 'session.create', 'event.subscribe']);
+  assert.deepEqual(client.calls, ['frontend.register', 'session.create', 'event.subscribe', 'session.list', 'model.list']);
   client.send = async () => {
     client.emit('event', { type: 'run.started', session_id: 'session', run_id: 'run' });
     client.emit('event', { type: 'llm.token', run_id: 'run', token: '旧内容' });

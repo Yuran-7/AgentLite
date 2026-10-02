@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -7,14 +8,23 @@ import pytest
 from agent_lite.core.config import get_config
 
 
+# 隔离真实用户配置和 dotenv 对进程环境的修改
+@pytest.fixture(autouse=True)
+def isolated_user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    (home / ".agentlite").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+
+
 def _write_env(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
 # 功能：验证 .env 文件中的值被正确加载并覆盖内建默认值
-# 设计：写 .env 到临时目录并 chdir 进去，清除同名系统环境变量排除干扰，确认 .env 加载路径有效
+# 设计：写 .env 到隔离用户目录并切换工作目录，清除同名环境变量，确认用户配置加载有效
 def test_dotenv_base_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    env_file = tmp_path / ".env"
+    env_file = Path.home() / ".agentlite/.env"
     _write_env(env_file, "AGENTLITE_PORT=9999\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AGENTLITE_PORT", raising=False)
@@ -27,7 +37,7 @@ def test_dotenv_base_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 # 功能：验证系统环境变量的优先级高于 .env 文件中的值
 # 设计：.env 写 9999，系统环境变量写 8888，确认最终值为 8888，对应四级优先链的顶层约束
 def test_system_env_overrides_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    env_file = tmp_path / ".env"
+    env_file = Path.home() / ".agentlite/.env"
     _write_env(env_file, "AGENTLITE_PORT=9999\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENTLITE_PORT", "8888")
@@ -99,7 +109,7 @@ def test_dotenv_before_toml_agentlite_config(tmp_path: Path, monkeypatch: pytest
     toml_path = tmp_path / "custom.toml"
     toml_path.write_bytes(b'[core]\nport = 5555\n')
 
-    env_file = tmp_path / ".env"
+    env_file = Path.home() / ".agentlite/.env"
     _write_env(env_file, f"AGENTLITE_CONFIG={toml_path}\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AGENTLITE_CONFIG", raising=False)
@@ -120,7 +130,7 @@ def test_priority_chain_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     toml_path = tmp_path / "agentlite.toml"
     toml_path.write_bytes(b'[core]\nport = 6000\n')
 
-    env_file = tmp_path / ".env"
+    env_file = Path.home() / ".agentlite/.env"
     _write_env(env_file, "AGENTLITE_PORT=7000\n")
 
     monkeypatch.chdir(tmp_path)
@@ -218,3 +228,14 @@ def test_web_and_subagent_tool_policy_toml(
     assert cfg.web.search_provider == "searxng"
     assert cfg.web.search_base_url == "https://search.example.com"
     assert cfg.web.fetch_max_chars == 6000
+
+
+# 功能：验证启动配置只读取用户 .env，忽略当前项目 .env
+# 设计：项目写入无效协议和冲突端口，用户文件设置有效端口，确保启动不受项目影响
+def test_project_dotenv_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_env(Path.home() / ".agentlite/.env", "AGENTLITE_PORT=9999\n")
+    _write_env(tmp_path / ".env", "AGENTLITE_PORT=1234\nLLM_PROTOCOL=invalid\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENTLITE_PORT", raising=False)
+    monkeypatch.delenv("LLM_PROTOCOL", raising=False)
+    assert get_config().port == 9999

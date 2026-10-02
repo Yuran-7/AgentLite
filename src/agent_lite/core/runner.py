@@ -18,6 +18,7 @@ from agent_lite.core.events.bus import EventBus, EventHandler
 from agent_lite.core.events.writer import EventAppender, EventWriter
 from agent_lite.core.llm.base import LLMProvider
 from agent_lite.core.llm.factory import create_llm_provider
+from agent_lite.core.llm.settings import resolve_model
 from agent_lite.core.loop import AgentLoop
 from agent_lite.core.mcp.server import McpServerManager
 from agent_lite.core.memory.loader import load_agent_context
@@ -82,8 +83,12 @@ class AgentRunner:
             lambda _session_id: self._events_file.parent / "tasks"
         )
 
-    def _create_provider(self, model: str) -> LLMProvider:
-        provider = create_llm_provider(replace(self._config.llm, default_model=model))
+    def _create_provider(self, model: str, session: Session | None = None) -> LLMProvider:
+        config = (
+            resolve_model(self._config.llm, session.model_id, session.workspace_root)
+            if session is not None else self._config.llm
+        )
+        provider = create_llm_provider(replace(config, default_model=model))
         if self._trace is not None:
             return TracingProvider(
                 provider,
@@ -155,7 +160,7 @@ class AgentRunner:
                         subagent_allowed_tools=self._config.agent.subagent_allowed_tools,
                         depth=0,
                         agent_registry=AgentRegistry(workspace_root),
-                        provider_factory=self._create_provider,
+                        provider_factory=lambda model: self._create_provider(model, session),
                         extra_tools=extra_tools,
                     )
                 )
@@ -243,7 +248,8 @@ class AgentRunner:
             registry: ToolRegistry | None = None
             try:
                 provider: LLMProvider = self._provider or create_llm_provider(
-                    self._config.llm
+                    resolve_model(self._config.llm, session.model_id, session.workspace_root)
+                    if session is not None else self._config.llm
                 )
                 if self._trace is not None:
                     provider = TracingProvider(

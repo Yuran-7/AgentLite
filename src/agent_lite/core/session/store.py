@@ -176,11 +176,13 @@ class SessionStore:
         from agent_lite.core.compact.budget import truncate_tool_results
         return truncate_tool_results(messages)
 
+    # 恢复展示历史并保留运行标识与日志中的真实耗时，不影响模型上下文。
     def read_history_messages(self, sid: str) -> list[dict[str, Any]]:
         path = self.session_dir(sid) / "thread.jsonl"
         if not path.exists():
             return []
         messages: list[dict[str, Any]] = []
+        durations = self._history_run_durations(sid)
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line:
                 continue
@@ -191,12 +193,45 @@ class SessionStore:
             if row.get("role") not in ("user", "assistant"):
                 continue
             message = {"role": row["role"], "content": row.get("content", "")}
+            if isinstance(row.get("run_id"), str):
+                message["run_id"] = row["run_id"]
+                if row["run_id"] in durations:
+                    message["work_ms"] = durations[row["run_id"]]
+            if isinstance(row.get("ts"), str):
+                message["created_at"] = row["ts"]
             if "kind" in row:
                 message["kind"] = row["kind"]
             if "notification_id" in row:
                 message["notification_id"] = row["notification_id"]
             messages.append(message)
         return messages
+
+    # 从当前及旧版会话日志提取每轮开始与结束时间，缺失或损坏日志不伪造耗时。
+    def _history_run_durations(self, sid: str) -> dict[str, int]:
+        folder = self.session_dir(sid)
+        starts: dict[str, datetime] = {}
+        durations: dict[str, int] = {}
+        paths = [folder / "events.jsonl", *folder.glob("runs/*/events.jsonl")]
+        for path in paths:
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict) or event.get("type") not in (
+                        "run.started", "run.finished"
+                    ):
+                        continue
+                    run_id = event["run_id"]
+                    ts = datetime.fromisoformat(event["ts"])
+                    if event["type"] == "run.started":
+                        starts[run_id] = ts
+                    elif run_id in starts:
+                        elapsed = (ts - starts[run_id]).total_seconds() * 1000
+                        durations[run_id] = max(0, int(elapsed))
+                except (ValueError, KeyError, TypeError):
+                    continue
+        return durations
 
     # 裁掉尾部未配对 tool_use 以及其后的消息，避免 Anthropic messages.invalid
     def _trim_orphan_tool_use(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

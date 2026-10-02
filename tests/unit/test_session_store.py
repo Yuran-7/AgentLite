@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,36 @@ from agent_lite.core.session.model import Session
 from agent_lite.core.session.store import SessionStore
 
 SESSION_ID = "sess-20260815-000000-0123456789ab"
+
+
+# 功能：展示历史保留运行标识与真实耗时，破损日志不影响恢复，也不污染模型上下文。
+# 设计：写入真实 thread 和新旧日志布局，覆盖多轮、缺失结束时间及无效日期。
+def test_history_preserves_run_timing_without_changing_model_messages(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    store.append_message(SESSION_ID, "user", "question", run_id="main")
+    store.append_message(SESSION_ID, "assistant", "answer", run_id="main")
+    store.append_message(SESSION_ID, "assistant", "old answer", run_id="old")
+    store.append_message(SESSION_ID, "assistant", "unfinished", run_id="unfinished")
+    folder = store.session_dir(SESSION_ID)
+    events = [
+        {"type": "run.started", "run_id": "main", "ts": "2026-10-02T00:00:00+00:00"},
+        {"type": "run.finished", "run_id": "main", "ts": "2026-10-02T00:03:06+00:00"},
+        {"type": "run.started", "run_id": "unfinished", "ts": "invalid"},
+    ]
+    (folder / "events.jsonl").write_text("broken\n" + "\n".join(json.dumps(event) for event in events), encoding="utf-8")
+    legacy = folder / "runs" / "old"
+    legacy.mkdir(parents=True)
+    (legacy / "events.jsonl").write_text("\n".join(json.dumps(event) for event in [
+        {"type": "run.started", "run_id": "old", "ts": "2026-10-02T00:00:00Z"},
+        {"type": "run.finished", "run_id": "old", "ts": "2026-10-02T00:00:05Z"},
+    ]), encoding="utf-8")
+    history = store.read_history_messages(SESSION_ID)
+    assert history[1]["run_id"] == "main"
+    assert history[1]["work_ms"] == 186_000
+    assert history[1]["created_at"]
+    assert history[2]["work_ms"] == 5000
+    assert "work_ms" not in history[3]
+    assert all(set(message) == {"role", "content"} for message in store.read_messages(SESSION_ID))
 
 
 # 功能：验证 SessionStore 初始化时自动创建 sessions 根目录

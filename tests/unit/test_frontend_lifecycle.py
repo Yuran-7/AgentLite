@@ -45,13 +45,15 @@ async def test_heartbeat_and_expiry() -> None:
     shutdown = asyncio.Event()
     lifecycle = FrontendLifecycle(shutdown.set, managed=True, idle_s=0.03, lease_s=0.15)
     writer = connection()
-    lifecycle.register(writer)
+    lifecycle.register(writer, "tui")
+    assert lifecycle.connection_counts() == {"vscode": 0, "tui": 1}
     await asyncio.sleep(0.1)
     lifecycle.heartbeat(writer)
     await asyncio.sleep(0.1)
     writer.close.assert_not_called()
     await asyncio.wait_for(shutdown.wait(), timeout=0.5)
     writer.close.assert_called_once()
+    assert lifecycle.connection_counts() == {"vscode": 0, "tui": 0}
 
 
 # 功能：手动常驻模式不会因前端退出停止，查询连接不能冒充前端续约
@@ -100,3 +102,27 @@ async def test_orphan_startup_and_closed_registration() -> None:
     with pytest.raises(HandlerError):
         lifecycle.register(writer)
     await asyncio.wait_for(shutdown.wait(), timeout=0.5)
+
+
+# 功能：连接统计区分前端类型，续约不重复计数，注销和关闭会移除连接
+# 设计：交错登记三条连接并重登记同一连接，覆盖类型保留、类型切换和重复注销
+@pytest.mark.asyncio
+async def test_connection_counts_follow_active_leases() -> None:
+    lifecycle = FrontendLifecycle(lambda: None, managed=False)
+    a, b, c = connection(), connection(), connection()
+    try:
+        lifecycle.register(a, "vscode")
+        lifecycle.register(b, "vscode")
+        lifecycle.register(c, "tui")
+        lifecycle.heartbeat(a)
+        lifecycle.heartbeat(c)
+        lifecycle.register(b, "vscode")
+        assert lifecycle.connection_counts() == {"vscode": 2, "tui": 1}
+        lifecycle.register(b, "tui")
+        assert lifecycle.connection_counts() == {"vscode": 1, "tui": 2}
+        lifecycle.unregister(c)
+        lifecycle.unregister(c)
+        assert lifecycle.connection_counts() == {"vscode": 1, "tui": 1}
+    finally:
+        lifecycle.close()
+    assert lifecycle.connection_counts() == {"vscode": 0, "tui": 0}

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentLite 模型配置",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "defaultModel": { "type": "string", "description": "默认模型的 id。省略使用列表第一项，空字符串使用原有 .env / TOML 配置。" },
+    "models": {
+      "type": "array",
+      "description": "用户级自定义模型列表，所有项目共用。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "model", "protocol"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "description": "配置中的唯一标识。" },
+          "name": { "type": "string", "description": "下拉框中的显示名称。" },
+          "model": { "type": "string", "minLength": 1, "description": "提供商 API 接受的模型名称。" },
+          "protocol": { "enum": ["openai", "anthropic"], "description": "提供商支持的 API 协议。" },
+          "baseUrl": { "type": "string", "description": "API 地址；OpenAI 兼容接口通常包含 /v1。留空使用对应 SDK 默认地址。" },
+          "apiKeyEnv": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "description": "保存密钥的环境变量名称。此处不要填真实密钥。" }
+        }
+      }
+    }
+  }
+}

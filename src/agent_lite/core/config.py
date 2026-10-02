@@ -67,6 +67,7 @@ class WebConfig:
 
 @dataclass
 class LlmConfig:
+    api_key: str | None = field(default=None, repr=False)
     protocol: str = _DEFAULT_LLM_PROTOCOL  # "anthropic" | "openai"
     default_model: str = _DEFAULT_MODEL
     base_url: str = ""  # 留空时由对应 SDK 的标准环境变量决定
@@ -140,12 +141,12 @@ class AgentLiteConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
-# 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
+# 构建配置：默认值 → 全局 TOML → 项目 TOML → 用户 .env → 系统环境变量
 def get_config() -> AgentLiteConfig:
     config = AgentLiteConfig() # 所谓的内建默认值
 
     # .env 必须在读取 AGENTLITE_CONFIG 之前加载，以便它能影响 TOML 路径
-    load_dotenv(".env", override=False)
+    load_dotenv(Path.home() / ".agentlite/.env", override=False)
 
     # 若显式指定 AGENTLITE_CONFIG，只读该文件；否则按优先级叠加：全局 → 项目本地
     explicit = os.environ.get("AGENTLITE_CONFIG")

@@ -2,7 +2,7 @@
   "name": "agentlite-vscode",
   "displayName": "AgentLite",
   "description": "AgentLite core 的 VS Code 侧边栏客户端",
-  "version": "0.0.7",
+  "version": "0.0.36",
   "icon": "media/icon.png",
   "publisher": "agentlite-local",
   "license": "MIT",
@@ -49,6 +49,10 @@
       {
         "command": "agentLite.open",
         "title": "AgentLite: 打开聊天"
+      },
+      {
+        "command": "agentLite.configureModels",
+        "title": "AgentLite: 模型配置（用户目录）"
       }
     ],
     "configuration": {
@@ -75,7 +79,13 @@
           "description": "127.0.0.1 上共享 core 的 TCP 端口。修改后点击重试。"
         }
       }
-    }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.agentlite/settings.json",
+        "url": "./media/model-settings.schema.json"
+      }
+    ]
   },
   "scripts": {
     "build": "node scripts/render-logo.mjs && node esbuild.mjs",
@@ -89,6 +99,7 @@
   },
   "dependencies": {
     "dompurify": "^3.3.0",
+    "highlight.js": "^11.12.0",
     "marked": "^16.4.0",
     "proper-lockfile": "^4.1.2"
   },

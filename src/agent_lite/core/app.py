@@ -36,6 +36,7 @@ from agent_lite.core.bus.commands import (
     MemoryListResult,
     MemorySearchCommand,
     MemorySearchResult,
+    ModelListCommand,
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
@@ -51,23 +52,26 @@ from agent_lite.core.bus.commands import (
     SessionGetHistoryResult,
     SessionListCommand,
     SessionListResult,
+    SessionRenameCommand,
     SessionResumeCommand,
     SessionResumeResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
     SessionSetMemoryCommand,
     SessionSetMemoryResult,
+    SessionSetModelCommand,
     SessionSetStatsCommand,
     SessionSetStatsResult,
     SessionSetWorkspaceCommand,
     SessionSetWorkspaceResult,
     SessionSummary,
 )
-from agent_lite.core.bus.envelope import JsonRpcNotification
+from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError, JsonRpcNotification
 from agent_lite.core.config import AgentLiteConfig, get_config
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.lifecycle import FrontendLifecycle
-from agent_lite.core.llm.factory import create_llm_provider
+from agent_lite.core.llm.factory import DeferredProvider, create_llm_provider
+from agent_lite.core.llm.settings import model_settings, resolve_model
 from agent_lite.core.logging_setup import setup_logging
 from agent_lite.core.mcp.server import McpServerManager
 from agent_lite.core.memory import MemoryStore
@@ -114,17 +118,21 @@ class CoreApp:
 
     # 将前端租约绑定到当前 TCP 连接并返回续约规则
     async def _frontend_register(self, params: dict[str, Any]) -> FrontendLeaseResult:
-        FrontendRegisterCommand.model_validate(params)
+        cmd = FrontendRegisterCommand.model_validate(params)
         assert self._lifecycle is not None
-        self._lifecycle.register(get_connection_writer())
-        return FrontendLeaseResult(managed=self._lifecycle.managed)
+        self._lifecycle.register(get_connection_writer(), cmd.client)
+        return FrontendLeaseResult(
+            managed=self._lifecycle.managed, frontend_counts=self._lifecycle.connection_counts(),
+        )
 
     # 续约当前连接，其他连接不能代替失效前端保持存活
     async def _frontend_heartbeat(self, params: dict[str, Any]) -> FrontendLeaseResult:
         FrontendHeartbeatCommand.model_validate(params)
         assert self._lifecycle is not None
         self._lifecycle.heartbeat(get_connection_writer())
-        return FrontendLeaseResult(managed=self._lifecycle.managed)
+        return FrontendLeaseResult(
+            managed=self._lifecycle.managed, frontend_counts=self._lifecycle.connection_counts(),
+        )
 
     # 前端退出时主动注销，异常退出则由连接关闭或心跳超时兜底
     async def _frontend_unregister(self, params: dict[str, Any]) -> FrontendUnregisterResult:
@@ -255,6 +263,7 @@ class CoreApp:
         cmd = SessionResumeCommand.model_validate(params)
         session = await self._sessions.resume(cmd.session_id, cmd.workspace_root)
         return SessionResumeResult(
+            model_id=session.model_id,
             session_id=session.id,
             title=session.title,
             status=session.status,
@@ -263,6 +272,41 @@ class CoreApp:
             memory_use_enabled=session.memory_use_enabled,
             stats=session.ui_stats,
         )
+
+    # 返回模型元数据；从不向前端发送密钥。
+    async def _model_list_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        assert self._config is not None
+        cmd = ModelListCommand.model_validate(params)
+        try:
+            settings = model_settings(cmd.workspace_root)
+            settings["fallbackModel"] = {
+                "id": "", "name": self._config.llm.default_model,
+                "model": self._config.llm.default_model, "protocol": self._config.llm.protocol,
+            }
+            return settings
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+
+    async def _session_rename_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        assert self._sessions is not None
+        cmd = SessionRenameCommand.model_validate(params)
+        title = cmd.title.strip()
+        if not title:
+            raise HandlerError(INVALID_PARAMS, "Session title cannot be empty")
+        session = await self._sessions.update_metadata(cmd.session_id, title=title)
+        return {"title": session.title}
+
+    async def _session_model_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        assert self._sessions is not None
+        assert self._config is not None
+        cmd = SessionSetModelCommand.model_validate(params)
+        session = self._sessions._get_session(cmd.session_id)
+        try:
+            resolve_model(self._config.llm, cmd.model_id, session.workspace_root)
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+        await self._sessions.update_metadata(cmd.session_id, model_id=cmd.model_id)
+        return {"model_id": session.model_id}
 
     # 为已有且尚未绑定工作区的 session 设置工作区
     async def _session_set_workspace_handler(
@@ -509,7 +553,10 @@ class CoreApp:
         self._memory_store = MemoryStore(Path(self._config.memory.dir).expanduser())
         logger.info("memory: db=%s", self._memory_store.path)
         assert self._config is not None
-        compact_provider = create_llm_provider(self._config.llm)
+        llm_config = self._config.llm
+        compact_provider = DeferredProvider(
+            lambda: create_llm_provider(resolve_model(llm_config, None, None))
+        )
 
         self._mcp_manager = McpServerManager()
         if self._config.mcp.servers:
@@ -528,6 +575,9 @@ class CoreApp:
             ),
             bus=self._bus,
             provider=compact_provider,
+            provider_factory=lambda session: create_llm_provider(
+                resolve_model(llm_config, session.model_id, session.workspace_root)
+            ),
             memory_store=self._memory_store,
             memory_use_enabled=self._config.memory.use_enabled,
             memory_generate_enabled=self._config.memory.generate_enabled,
@@ -559,6 +609,9 @@ class CoreApp:
         server.register("event.subscribe", self._subscribe_handler)
         server.register("session.create", self._session_create_handler)
         server.register("session.list", self._session_list_handler)
+        server.register("session.rename", self._session_rename_handler)
+        server.register("session.set_model", self._session_model_handler)
+        server.register("model.list", self._model_list_handler)
         server.register("session.resume", self._session_resume_handler)
         server.register("session.set_workspace", self._session_set_workspace_handler)
         server.register("session.send_message", self._session_send_handler)

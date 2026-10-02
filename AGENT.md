@@ -20,12 +20,6 @@ uv run pytest tests/ -v               # all
 # Single test
 uv run pytest tests/unit/test_envelope.py::test_request_roundtrip -v
 
-# Regenerate WIRE_PROTOCOL.md after changing bus models
-uv run python scripts/gen_protocol_doc.py
-
-# Verify WIRE_PROTOCOL.md is in sync (used in CI equivalent)
-uv run python scripts/gen_protocol_doc.py --check
-
 # Run daemon manually
 uv run lite-core                        # foreground; Ctrl+C to stop
 AGENTLITE_PORT=8000 uv run lite-core    # override port
@@ -56,7 +50,7 @@ All IPC messages are typed pydantic v2 models with a **discriminated union on th
 - `commands.py` — typed commands and results for core, sessions, permissions, memory, and subscriptions
 - `events.py` — typed run, token, tool, permission, plan, session, and subagent events
 
-`WIRE_PROTOCOL.md` is **generated** from these models by `scripts/gen_protocol_doc.py`. Always regenerate and commit it after changing bus models.
+The models in `core/bus/` define the wire protocol. Validate CLI, TUI, and VS Code compatibility after changing bus models.
 
 ### Transport layer (`src/agent_lite/core/transport/`)
 
@@ -64,7 +58,7 @@ All IPC messages are typed pydantic v2 models with a **discriminated union on th
 
 ### Config (`src/agent_lite/core/config.py`)
 
-Four-tier priority: **built-in defaults → `~/.agentlite/config.toml` → `.env` → env vars**.
+Four-tier priority: **built-in defaults → `~/.agentlite/config.toml` → `~/.agentlite/.env` → env vars**.
 
 S0 keys: `host` (default `127.0.0.1`), `port` (default `7437`), `log_level`, `log_file`. Config file is silently skipped if absent; unknown keys cause a hard exit.
 

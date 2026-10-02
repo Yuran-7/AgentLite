@@ -388,7 +388,11 @@ async def test_resume_loads_closed_session_from_disk_and_switches_workspace(
     assert resumed.ui_stats == {"rounds": 3, "steps": 9}
     assert store.read_meta(session.id).status == "waiting_for_input"
     assert store.read_meta(session.id).updated_at == last_chat_at
-    assert await restarted.get_history(session.id) == store.read_messages(session.id)
+    history = await restarted.get_history(session.id)
+    assert [{"role": message["role"], "content": message["content"]} for message in history] == (
+        store.read_messages(session.id)
+    )
+    assert all(message.get("created_at") for message in history)
     assert events[-1].type == "session.resumed"  # type: ignore[attr-defined]
 
 

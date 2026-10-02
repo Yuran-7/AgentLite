@@ -10,3 +10,4 @@ tsconfig.json
 package-lock.json
 dist/*.map
 dist/vscode-smoke.js
+dist/preview*

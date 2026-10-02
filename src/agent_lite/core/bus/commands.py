@@ -50,6 +50,7 @@ class FrontendUnregisterCommand(BaseModel):
 
 class FrontendLeaseResult(BaseModel):
     managed: bool
+    frontend_counts: dict[Literal["vscode", "tui"], int] = {"vscode": 0, "tui": 0}
     heartbeat_interval_s: float = 10.0
     lease_timeout_s: float = 45.0
     idle_timeout_s: float = 15.0
@@ -120,7 +121,25 @@ class SessionResumeCommand(BaseModel):
     workspace_root: str | None = None
 
 
+class SessionRenameCommand(BaseModel):
+    type: Literal["session.rename"] = "session.rename"
+    session_id: str
+    title: str = Field(min_length=1, max_length=120)
+
+
+class SessionSetModelCommand(BaseModel):
+    type: Literal["session.set_model"] = "session.set_model"
+    session_id: str
+    model_id: str
+
+
+class ModelListCommand(BaseModel):
+    type: Literal["model.list"] = "model.list"
+    workspace_root: str | None = None
+
+
 class SessionResumeResult(BaseModel):
+    model_id: str | None = None
     session_id: str
     title: str
     status: SessionStatus
@@ -271,6 +290,9 @@ Command = Annotated[
     | SessionCreateCommand
     | SessionListCommand
     | SessionResumeCommand
+    | SessionRenameCommand
+    | SessionSetModelCommand
+    | ModelListCommand
     | SessionSetWorkspaceCommand
     | SessionSendMessageCommand
     | SessionCancelCommand

@@ -83,11 +83,13 @@ class SessionManager:
         memory_min_rollout_idle_hours: int = 6,
         memory_max_rollout_age_days: int = 10,
         task_manager: SubagentTaskManager | None = None,
+        provider_factory: Callable[[Session], LLMProvider] | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
         self._provider = provider
+        self._provider_factory = provider_factory
         self._memory_store = memory_store
         self._memory_use_enabled = memory_use_enabled
         self._memory_generate_enabled = memory_generate_enabled
@@ -311,6 +313,29 @@ class SessionManager:
                     name=f"recover-subagents-{sid}",
                 )
             return session
+
+    # 更新会话名称和独立模型选择，沿用运行锁及延迟持久化。
+    async def update_metadata(
+        self, sid: str, *, title: str | None = None, model_id: str | None = None
+    ) -> Session:
+        session = self._sessions.get(sid)
+        if session is None:
+            try:
+                session = self._store.read_meta(sid)
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                raise HandlerError(SESSION_NOT_FOUND, "session not found") from exc
+            self._sessions[sid] = session
+            self._locks[sid] = asyncio.Lock()
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        async with lock:
+            if title is not None:
+                session.title = title
+            if model_id is not None:
+                session.model_id = model_id
+            self._persist_started_session(session)
+        return session
 
     # 为未绑定工作区的 session 设置工作区；未开始对话时只更新内存
     async def set_workspace(self, sid: str, workspace_root: str) -> str:
@@ -594,7 +619,7 @@ class SessionManager:
         lock = self._locks[sid]
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
-        if self._provider is None:
+        if self._provider is None and self._provider_factory is None:
             raise HandlerError(-32020, "provider not available for compaction")
         async with lock:
             from agent_lite.core.bus.commands import SessionCompactResult
@@ -602,7 +627,12 @@ class SessionManager:
             messages = self._store.read_messages(sid)
             session_dir = self._store.session_dir(sid)
             compactor = Compactor(self._bus, session_dir, sid)
-            result = await compactor.compact_messages(messages, self._provider, focus=focus)
+            provider = (
+                self._provider_factory(self._get_session(sid))
+                if self._provider_factory else self._provider
+            )
+            assert provider is not None
+            result = await compactor.compact_messages(messages, provider, focus=focus)
             if result is None:
                 raise HandlerError(-32021, "compaction failed or not beneficial")
             self._store.write_compacted(sid, [

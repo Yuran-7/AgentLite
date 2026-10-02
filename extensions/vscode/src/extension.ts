@@ -1,12 +1,16 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ensureCore } from './core';
 import { ChatSession } from './session';
 import { parsePageMessage } from './protocol';
 import { webviewHtml } from './html';
+import { BookmarkStore } from './bookmarks';
+import { ArchiveStore } from './archives';
+import { codeBlocks } from './code-blocks';
 
 let provider: ChatProvider | undefined;
 
@@ -16,20 +20,30 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('agentLite.chat', provider));
   context.subscriptions.push(vscode.commands.registerCommand('agentLite.open', () =>
     vscode.commands.executeCommand('workbench.view.extension.agentLite')));
+  context.subscriptions.push(vscode.commands.registerCommand('agentLite.configureModels', () => provider?.openSettings()));
+  context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(document => {
+    if (document.uri.fsPath.endsWith('settings.json')) void provider?.refreshModels();
+  }));
 }
 
 // 卸载扩展时清理自己的任务和连接，保留共享 core。
 export async function deactivate(): Promise<void> { await provider?.shutdown(); provider = undefined; }
 
 class ChatProvider implements vscode.WebviewViewProvider {
+  async refreshModels(): Promise<void> { await this.session?.refreshModels(); }
   private view?: vscode.WebviewView;
   private session?: ChatSession;
   private connecting = false;
   private disposed = false;
   private viewSubscriptions: vscode.Disposable[] = [];
+  private readonly bookmarks: BookmarkStore;
+  private readonly archives: ArchiveStore;
 
   // 保存插件资源和日志目录，不在页面中暴露进程控制能力。
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.bookmarks = new BookmarkStore(context.workspaceState);
+    this.archives = new ArchiveStore(context.workspaceState);
+  }
 
   // 创建受 CSP 限制的页面；页面就绪后发送宿主状态快照。
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -67,6 +81,58 @@ class ChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'openLogs') { await this.openLogs(); return; }
+    if (message.type === 'archiveSession' || message.type === 'restoreSession') {
+      if (!this.session) return;
+      try {
+        await this.archives.set(this.session.state, message.sessionId, message.type === 'archiveSession');
+        this.post({ type: 'state', state: this.session.state });
+      } catch (error) { this.session.report(error); }
+      return;
+    }
+    if (message.type === 'toggleBookmark' || message.type === 'removeBookmark') {
+      if (!this.session) return;
+      try {
+        if (message.type === 'toggleBookmark') await this.bookmarks.toggle(this.session.state, message.cardId);
+        else await this.bookmarks.remove(this.session.state.sessionId, message.bookmarkId);
+        this.post({ type: 'state', state: this.session.state });
+      } catch (error) { this.session.report(error); }
+      finally { this.post({ type: 'bookmarksSettled' }); }
+      return;
+    }
+    if (message.type === 'copyCode' || message.type === 'openCode') {
+      const card = this.session?.state.cards.find(item => item.id === message.cardId && item.kind === 'assistant');
+      const block = card && codeBlocks(card.text)[message.blockIndex];
+      if (!block) return;
+      try {
+        if (message.type === 'copyCode') {
+          await vscode.env.clipboard.writeText(block.text);
+          vscode.window.setStatusBarMessage('代码已复制', 2000);
+        } else {
+          const aliases: Record<string, string> = { py: 'python', js: 'javascript', ts: 'typescript', ps1: 'powershell', sh: 'shellscript', bash: 'shellscript' };
+          const language = aliases[block.language] ?? block.language;
+          const languages = await vscode.languages.getLanguages();
+          const document = await vscode.workspace.openTextDocument({ content: block.text, language: languages.includes(language) ? language : 'plaintext' });
+          await vscode.window.showTextDocument(document, { preview: false });
+        }
+      } catch (error) { this.session?.report(error); }
+      return;
+    }
+    if (message.type === 'copyAnswer' || message.type === 'openAnswer' || message.type === 'copyMessage') {
+      const card = this.session?.state.cards.find(item => item.id === message.cardId &&
+        (message.type === 'copyMessage' ? item.kind === 'user' : item.kind === 'assistant'));
+      if (!card?.text.trim()) return;
+      try {
+        if (message.type !== 'openAnswer') {
+          await vscode.env.clipboard.writeText(card.text);
+          vscode.window.setStatusBarMessage('已复制', 2000);
+          this.post({ type: 'copied', cardId: card.id });
+        } else {
+          const document = await vscode.workspace.openTextDocument({ content: card.text, language: 'markdown' });
+          await vscode.window.showTextDocument(document, { preview: false });
+        }
+      } catch (error) { this.session?.report(error); }
+      return;
+    }
     if (!this.supported()) return;
     try {
       if (message.type === 'retry') {
@@ -74,12 +140,37 @@ class ChatProvider implements vscode.WebviewViewProvider {
       } else if (message.type === 'newSession') {
         if (this.session?.state.connection === 'ready') await this.session.newSession();
       } else if (message.type === 'send') await this.session?.send(message.content);
+      else if (message.type === 'refreshHistory') await this.session?.refreshHistory();
+      else if (message.type === 'refreshModels') await this.session?.refreshModels();
+      else if (message.type === 'resumeSession') await this.session?.resumeSession(message.sessionId);
+      else if (message.type === 'selectModel') await this.session?.selectModel(message.modelId);
+      else if (message.type === 'openSettings') await this.openSettings();
+      else if (message.type === 'renameSession') {
+        const state = this.session?.state;
+        const item = state?.history?.find(entry => entry.session_id === message.sessionId)
+          ?? (state?.sessionId === message.sessionId ? { title: state.title || '新会话' } : undefined);
+        if (!item || this.session?.state.busy || this.session?.state.sending) return;
+        const title = await vscode.window.showInputBox({ title: '重命名会话', value: item.title,
+          prompt: '为这次聊天起一个容易找到的名字',
+          validateInput: value => !value.trim() ? '名称不能为空' : value.trim().length > 120 ? '最多 120 个字符' : undefined });
+        if (title !== undefined) await this.session?.renameSession(message.sessionId, title.trim());
+      }
       else if (message.type === 'cancel') await this.session?.cancel();
       else if (message.type === 'permission') await this.session?.permission(message.toolUseId, message.decision);
     } catch (error) {
       if (message.type === 'newSession') this.session?.fail(String(error));
       else this.session?.report(error);
     }
+  }
+
+  async openSettings(): Promise<void> {
+    const directory = join(homedir(), '.agentlite');
+    const path = join(directory, 'settings.json');
+    await mkdir(directory, { recursive: true });
+    try { await writeFile(path, JSON.stringify({ models: [] }, null, 2) + '\n', { flag: 'wx' }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
+    await vscode.window.showTextDocument(document, { preview: false });
   }
 
   // 将重连与首次启动串行化，确保一个窗口只管理一个会话。
@@ -97,7 +188,7 @@ class ChatProvider implements vscode.WebviewViewProvider {
       }
       await this.session?.dispose();
       const session = new ChatSession(folder.uri.fsPath, state => this.post({ type: 'state', state }));
-      this.session = session; session.connecting();
+      this.session = session; session.beginConnection();
       const config = vscode.workspace.getConfiguration('agentLite');
       const port = config.get<number>('corePort', 7437);
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('agentLite.corePort 必须在 1–65535 之间');
@@ -112,7 +203,15 @@ class ChatProvider implements vscode.WebviewViewProvider {
   }
 
   // 发送页面快照，隐藏的页面由宿主继续保留状态。
-  private post(message: unknown): void { if (!this.disposed) void this.view?.webview.postMessage(message); }
+  private post(message: unknown): void {
+    if (this.disposed) return;
+    if (message && typeof message === 'object' && 'type' in message && message.type === 'state' && 'state' in message) {
+      const state = message.state as import('./session').ChatState;
+      message = { type: 'state', state: { ...state, archivedSessionIds: this.archives.list(),
+        bookmarks: this.bookmarks.list(state.sessionId), bookmarkCardIds: this.bookmarks.matches(state) } };
+    }
+    void this.view?.webview.postMessage(message);
+  }
 
   // 通过编辑器打开诊断文件；自定义 core 日志路径由用户配置决定。
   private async openLogs(): Promise<void> {
@@ -128,7 +227,8 @@ class ChatProvider implements vscode.WebviewViewProvider {
     const nonce = randomBytes(16).toString('hex');
     const script = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js'));
     const style = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'));
-    return webviewHtml(nonce, webview.cspSource, script.toString(), style.toString());
+    const logo = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'logo.svg'));
+    return webviewHtml(nonce, webview.cspSource, script.toString(), style.toString(), logo.toString());
   }
 
   // 终止宿主订阅并等待自己的会话清理。

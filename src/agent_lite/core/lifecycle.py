@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import Literal
 
 from agent_lite.core.bus.envelope import INVALID_REQUEST, HandlerError
 
@@ -18,6 +19,7 @@ class FrontendLifecycle:
         self.startup_s = startup_s
         self._shutdown = shutdown
         self._leases: dict[asyncio.StreamWriter, asyncio.TimerHandle] = {}
+        self._clients: dict[asyncio.StreamWriter, Literal["tui", "vscode"]] = {}
         self._idle: asyncio.TimerHandle | None = None
         self._stopping = False
 
@@ -27,7 +29,9 @@ class FrontendLifecycle:
             self._idle = asyncio.get_running_loop().call_later(self.startup_s, self._expire_idle)
 
     # 注册连接或续约，拒绝已经断开或正在退出的连接
-    def register(self, writer: asyncio.StreamWriter) -> None:
+    def register(
+        self, writer: asyncio.StreamWriter, client: Literal["tui", "vscode"] | None = None,
+    ) -> None:
         if self._stopping or writer.is_closing():
             raise HandlerError(INVALID_REQUEST, "core is stopping or connection is closed")
         if self._idle is not None:
@@ -36,6 +40,8 @@ class FrontendLifecycle:
         previous = self._leases.pop(writer, None)
         if previous is not None:
             previous.cancel()
+        if client is not None:
+            self._clients[writer] = client
         self._leases[writer] = asyncio.get_running_loop().call_later(
             self.lease_s, self._expire_lease, writer
         )
@@ -45,6 +51,13 @@ class FrontendLifecycle:
         if writer not in self._leases:
             raise HandlerError(INVALID_REQUEST, "frontend must register first")
         self.register(writer)
+
+    # 按有效租约的前端类型统计连接数，重复登记和心跳不会重复计数
+    def connection_counts(self) -> dict[Literal["tui", "vscode"], int]:
+        return {
+            "vscode": sum(client == "vscode" for client in self._clients.values()),
+            "tui": sum(client == "tui" for client in self._clients.values()),
+        }
 
     # 手动启动命令将已有自动 core 转为常驻，取消待执行的空闲退出
     def keep_alive(self) -> None:
@@ -57,6 +70,7 @@ class FrontendLifecycle:
 
     # 显式注销或 TCP 断线后释放租约，最后一个前端离开时开始宽限期
     def unregister(self, writer: asyncio.StreamWriter) -> None:
+        self._clients.pop(writer, None)
         lease = self._leases.pop(writer, None)
         if lease is None:
             return
@@ -84,3 +98,4 @@ class FrontendLifecycle:
         for lease in self._leases.values():
             lease.cancel()
         self._leases.clear()
+        self._clients.clear()

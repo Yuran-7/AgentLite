@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.runner import AgentRunner
 
-# Load project .env so ANTHROPIC_API_KEY is available without going through get_config()
-load_dotenv(Path(__file__).parent.parent.parent / ".env", override=False)
+# Load user .env so ANTHROPIC_API_KEY is available without going through get_config()
+load_dotenv(Path.home() / ".agentlite/.env", override=False)
 
 pytestmark = pytest.mark.integration
 

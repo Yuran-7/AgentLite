@@ -1,7 +1,82 @@
-# AgentLite VS Code Demo
+# AgentLite VS Code 插件
 
 这是现有 `lite-core` 的图形客户端。聊天界面默认位于右侧辅助侧边栏，与 Codex、Chat 并列，TypeScript 扩展宿主使用 TCP / JSON-RPC / NDJSON 连接 Python core。
 支持多轮消息、流式 Markdown、工具参数与结果、计划、权限确认、取消，以及模型和 token 状态。不会启动或解析 TUI。
+
+## 收藏回答（0.0.14）
+
+顶部书签图标打开当前会话的收藏面板，点击模型回答下方的书签图标可收藏或取消收藏。已收藏的图标实心显示；生成过程中禁止新增收藏，避免保存未完成的内容。
+
+面板列出回答摘要和时间，选中后展示完整 Markdown，并提供“在聊天中查看”和取消收藏操作。原文不在当前展示中时仍可阅读保存的快照。宽屏并排展示，窄侧栏覆盖展示，可通过右上角关闭按钮或 Escape 返回。
+
+收藏保存在 VS Code 当前工作区的本地扩展状态，按会话隔离；重载窗口、恢复会话后仍然保留，不发送到模型。不跨不同工作区同步。
+
+## 聊天界面细节（0.0.13）
+
+- 用户消息靠右，悬停或键盘聚焦后显示发送时间、复制和编辑按钮。编辑将原问题放回输入框，再次发送会追加新消息，不改写已有记录；运行中禁止编辑。
+- 主任务超过 10 秒时，最终回答上方显示真实的 `Worked for 4m 21s` 耗时与分割线，点击可展开工具和计划过程。运行中显示 `Working` 计时，取消时显示 `Stopping…`。
+- 输入框默认一行，随文字和侧栏宽度自动增高；删除文字或发送后自动收缩，超过最大高度后内部滚动。
+- 模型选择使用带名称、副标题和选中标记的弹出菜单，支持方向键、Home/End、Enter、Escape 和点击外部关闭；运行中锁定选择。
+- 回答支持复制反馈和编辑器展开，上翻聊天后可一键回到最新消息；工具过程采用无外框布局。
+- “＋”上下文菜单中的文件与图片、工作区引用为禁用占位。明暗主题、窄侧栏、键盘焦点和减少动画偏好均有适配。
+- 输入区的信息图标打开连接详情，包含连接状态、工作区、重连和日志；顶部标题与图标更紧凑。空会话页显示 AgentLite logo，界面标签和欢迎文案不可选中，聊天正文与输入仍可选中。
+
+发送时间和耗时从真实消息及运行状态读取，不伪造未知历史的时间；当前后端历史记录没有这些字段时，恢复的旧消息不显示时间与耗时。
+
+## 历史聊天与模型选择（0.0.8）
+
+顶部左侧显示当前会话名称，点击即可改名；右侧依次是收藏回答、历史会话和新建会话图标。
+点击时钟图标查看当前项目的聊天，支持按名称搜索、改名和恢复后继续追问。点击输入框工具栏的信息图标查看连接状态、重连和日志。
+未手动命名时首次消息自动生成会话名称；记录保存在 core 配置的会话目录（默认 `~/.agentlite/sessions`），重载窗口后仍可恢复。
+恢复的工具卡片显示原参数和结果，历史权限不会重新触发。运行中禁止切换会话和模型。
+
+输入框内的底部工具栏可选择模型，直接显示模型名称。选择只影响当前会话的后续请求，并随会话保存；其他窗口不受影响。
+新会话使用 `defaultModel`；未填写时自动使用模型列表的第一项。未配置自定义模型时显示已有 `.env` / TOML 对应的实际模型名称。
+
+点击输入框左下角的齿轮（“模型配置”）打开用户目录 `~/.agentlite/settings.json`；不存在时创建空模型列表。
+编辑器提供字段补全和校验，保存后自动刷新模型列表。
+所有项目共用用户目录中的模型配置，不会在当前项目创建 `.agentlite` 目录，也不读取项目级模型 JSON。
+
+```json
+{
+  "defaultModel": "my-model",
+  "models": [
+    {
+      "id": "my-model",
+      "name": "我的模型",
+      "protocol": "openai",
+      "model": "提供商的模型名称",
+      "baseUrl": "https://your-provider.example/v1",
+      "apiKeyEnv": "MY_MODEL_API_KEY"
+    }
+  ]
+}
+```
+
+在用户目录 `~/.agentlite/.env` 写密钥（Windows：`C:\Users\<用户名>\.agentlite\.env`）：
+
+```dotenv
+MY_MODEL_API_KEY=填入自己的密钥
+```
+
+JSON 保存模型名称、协议和地址；`~/.agentlite/.env` 保存密钥。不要把真实密钥写进 JSON。
+`protocol` 支持 `openai` / `anthropic`，`name`、`baseUrl`、`apiKeyEnv` 可省略。
+省略 `apiKeyEnv` 时读取对应的 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
+模型配置按上面的 JSON 示例填写；示例地址需要替换为你的提供商地址。
+
+模型列表只读取用户目录 `~/.agentlite/settings.json`。
+`defaultModel` 指定新会话使用的模型 id，省略时使用第一项，空字符串表示使用原有 core 配置。
+密钥优先级为系统/进程环境变量 > `~/.agentlite/.env`；不读取项目或 core 启动目录下的 `.env`。
+core 启动时会加载 `~/.agentlite/.env` 到进程环境，因此修改已加载的密钥后需要重启 core。
+JSON 在请求时读取，修改模型名称/协议/地址无需重启。
+
+原项目 `.env` 中的配置和密钥需迁移到 `~/.agentlite/.env`；未配置 JSON 模型时继续使用环境变量和 TOML 配置。
+core 可以在尚未配置模型密钥时启动，先浏览历史或编辑配置；真正请求模型时才检查凭证。
+自定义模型的 JSON 字段优先于 `LLM_PROTOCOL` / `LLM_DEFAULT_MODEL` / `LLM_BASE_URL`，密钥只读取指定变量。
+模型被移除、JSON 格式错误或密钥缺失时显示错误，不自动切换到其他模型。
+
+升级后需在没有运行任务时执行 `uv run lite core stop`，再重连插件，以加载新的后端接口。
+升级插件后，执行 VS Code 的“开发人员: 重新加载窗口”，以替换内存中的旧插件。
 
 ## 从源码运行
 
@@ -40,9 +115,9 @@ npm install
 端口未监听时才执行 `python -m agent_lite.core`，并等待最多 30 秒；进程提前退出时立即报告启动失败和可识别的缺失凭证变量。host/port 由插件显式传入。
 core 的工作目录由 `agentLite.coreDirectory` 指定或从安装位置发现，用于读取模型配置。选定的项目目录仅作为会话的 `workspace_root`，不会要求每个项目都安装 AgentLite 或配置 API key。多个根目录时先选择本次操作的项目。
 
-模型和凭证仍由 core 配置。新启动的 core 按已有规则读取继承环境、core 配置目录中的 `.env` / `.agentlite/config.toml` 和全局配置。插件不会复制或缓存凭证，运行环境缓存只保存 Python 路径。
+模型和凭证仍由 core 配置。新启动的 core 按已有规则读取继承环境、用户目录中的 `~/.agentlite/.env`、全局 TOML 和 core 配置目录中的 `.agentlite/config.toml`。插件不会复制或缓存凭证，运行环境缓存只保存 Python 路径。
 如果凭证只设置在某个终端中，请从该终端运行 `code .`，确保 VS Code 继承环境。
-复用的 core 沿用它原来的启动配置，打开另一个工作区不会重新加载共享进程的模型配置。
+复用的 core 沿用原来的用户 `.env` / TOML 启动配置；JSON 模型配置从用户目录读取，选择只影响当前会话。
 
 多个 VS Code 窗口同时打开时，通过用户目录下 `.agentlite/locks` 中按端口区分的共享启动锁协调；只有一个窗口执行预检和启动，其余窗口等待并复用。锁使用原子目录创建和定期更新时间，异常终止后过期锁可回收，参见 [锁实现说明](https://github.com/moxystudio/node-proper-lockfile)。core 已就绪时直接连接，不启动新的 Python 检查进程。
 
@@ -55,13 +130,16 @@ Windows 的 `.venv/Scripts/python.exe` 是转发启动器，因此一个 core �
 - 权限卡片支持允许一次、始终允许、拒绝一次、始终拒绝；“始终”行为沿用 core 的权限存储语义。
 - 点击停止后等待 core 的取消事件；不会关闭会话或 core，之后可继续追问。
 - 隐藏或重建侧边栏时，从扩展宿主快照恢复当前展示。
+- 历史会话单行显示，右侧为简短相对时间；悬停或键盘聚焦时显示归档与改名。归档保存在插件当前工作区中，不删除会话文件，可通过“已归档”入口查看和恢复。
 - 连接中断时展示内容标为中断。点击重试创建新会话，不自动重新执行旧任务。
 - 退出或卸载扩展时取消自己的运行、关闭自己的会话并注销前端，**不调用 `core.shutdown`**。只要还有其他 TUI 或 VS Code 前端，core 就继续运行；最后一个前端退出后等待 15 秒，再正常清理退出。关闭或隐藏聊天视图不会注销前端，重载窗口在宽限期内可以重新连接。
-- 前端每 10 秒发送心跳，45 秒未续约会被视为失效；TCP 断开会立即释放租约。自动 core 启动后 60 秒没有任何前端登记，也会回收。状态栏显示“随前端自动退出”或“手动常驻”。
+- 前端每 10 秒发送心跳，45 秒未续约会被视为失效；TCP 断开会立即释放租约。自动 core 启动后 60 秒没有任何前端登记，也会回收。连接图标表示当前连接状态。
+- 连接信息显示当前共享 core 的 VS Code 插件和 TUI 连接数量（包含当前插件），随 10 秒心跳刷新。旧 core 未提供统计时显示“连接数量暂不可用”。
+- 连接信息实时显示本次连接等待秒数，成功后固定为“连接 core 花了 X 秒”。从插件开始连接计时，包含 core 探测、启动、前端登记和会话订阅；心跳与新建聊天不会重置耗时，重新连接会重新计时。
 - `uv run lite core start` 手动启动常驻 core，或者将现有自动 core 转为常驻。直接运行 `lite-core` 默认常驻；`uv run lite core stop` 可主动停止。常驻 core 不随前端退出而停止。
 - 点击“日志”打开插件启动日志或默认 core 日志 `~/.agentlite/logs/core.log`；自定义日志位置以 core 配置为准。启动诊断位于扩展的 globalStorage 目录下 `core-launch.log`。
 
-只有受信任的本地文件夹支持启动。第一版不支持 Remote / WSL / 虚拟工作区，不提供历史会话列表、文件引用、diff 审阅、模型切换或 Marketplace 发布。
+只有受信任的本地文件夹支持启动。目前不支持 Remote / WSL / 虚拟工作区、文件引用、diff 审阅或 Marketplace 发布。
 新增 `frontend.register`、`frontend.heartbeat`、`frontend.unregister` 和 `core.keep_alive` 管理生命周期，登记绑定 TCP 连接；普通 CLI 查询不会计入前端。其他接口保持兼容。长任务的 `session.send_message` 响应在整轮结束后返回，运行状态由事件驱动。
 
 ## 构建、测试与安装
@@ -89,10 +167,10 @@ Logo 使用薄荷绿的字母 A 与暖金色闪电，分别代表 Agent 和 Lite
 
 从 0.0.5 升级后，换项目会自动使用 AgentLite 自己的配置目录。源码安装通常无需额外设置；如果模型配置保存在其他位置，请在用户设置中填写 `agentLite.coreDirectory`。该设置不会改变会话的项目工作目录。
 
-打包输出 `agentlite-vscode-0.0.7.vsix`。在 VS Code 扩展面板菜单选择“从 VSIX 安装”，或运行：
+打包输出 `agentlite-vscode-0.0.14.vsix`。在 VS Code 扩展面板菜单选择“从 VSIX 安装”，或运行：
 
 ```powershell
-code --install-extension ./agentlite-vscode-0.0.7.vsix
+code --install-extension ./agentlite-vscode-0.0.14.vsix
 ```
 
 从旧版升级后，如果 VS Code 记住了左侧位置，右键 AgentLite 图标或视图标题，选择“移动到” → “辅助侧边栏”（Move To → Secondary Side Bar）。VS Code 会记住新位置。默认右侧贡献点从 VS Code 1.106 起正式支持，参见 [官方发布说明](https://code.visualstudio.com/updates/v1_106#_view-containers-in-secondary-side-bar)。

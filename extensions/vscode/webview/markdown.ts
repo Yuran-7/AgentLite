@@ -10,6 +10,6 @@ export function markdown(text: string): string {
   return DOMPurify.sanitize(parser.parse(text, { async: false }), {
     ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote', 'ul', 'ol', 'li',
       'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a'],
-    ALLOWED_ATTR: ['href', 'title'], ALLOW_DATA_ATTR: false
+    ALLOWED_ATTR: ['href', 'title', 'class'], ALLOW_DATA_ATTR: false
   });
 }

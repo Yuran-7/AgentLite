@@ -61,12 +61,16 @@ async def test_tui_autostart_and_shared_exit(
         reader = asyncio.create_task(client.run_event_loop())
         lease = await client.send_command("frontend.register", {"client": "tui"})
         assert lease["managed"] is True
+        assert lease["frontend_counts"] == {"vscode": 0, "tui": 1}
         second = await core_connection.connect_frontend("127.0.0.1", free_port, str(tmp_path))
         second_reader = asyncio.create_task(second.run_event_loop())
-        await second.send_command("frontend.register", {"client": "vscode"})
+        lease = await second.send_command("frontend.register", {"client": "vscode"})
+        assert lease["frontend_counts"] == {"vscode": 1, "tui": 1}
         assert len(processes) == 1
         await client.send_command("frontend.unregister", {})
         await client.close()
+        lease = await second.send_command("frontend.heartbeat", {})
+        assert lease["frontend_counts"] == {"vscode": 1, "tui": 0}
         pong = await second.send_command("core.ping", {"client": "remaining-frontend"})
         assert pong["server_version"]
         await second.close()

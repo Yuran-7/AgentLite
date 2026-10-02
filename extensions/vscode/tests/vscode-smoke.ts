@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import assert from 'node:assert/strict';
 import { server, reply, waitFor } from './helpers';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 
 // 在真正的扩展宿主加载插件，验证 Webview 脚本就绪后完成会话订阅。
 export async function run(): Promise<void> {
@@ -19,6 +22,10 @@ export async function run(): Promise<void> {
     await vscode.commands.executeCommand('agentLite.chat.focus');
     await waitFor(() => methods.includes('event.subscribe'), 15_000);
     assert.deepEqual(methods.slice(0, 4), ['core.ping', 'frontend.register', 'session.create', 'event.subscribe']);
-    console.log('VSCODE_SMOKE_OK: extension activated, actual webview ready, session subscribed');
+    await vscode.commands.executeCommand('agentLite.configureModels');
+    assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath,
+      vscode.Uri.file(join(homedir(), '.agentlite', 'settings.json')).fsPath);
+    assert(!existsSync(join(vscode.workspace.workspaceFolders![0].uri.fsPath, '.agentlite')));
+    console.log('VSCODE_SMOKE_OK: actual webview ready, session subscribed, model configuration opens user directory');
   } finally { await fixture.close(); }
 }

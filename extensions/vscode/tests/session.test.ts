@@ -5,6 +5,19 @@ import { ChatSession, historyCards } from '../src/session';
 import { decisions, parsePageMessage } from '../src/protocol';
 import { waitFor } from './helpers';
 
+// 多模态工具历史只展示文字摘要，不将图片引用序列化为实现细节。
+test('history tool results render PDF text summaries', () => {
+  const cards = historyCards([
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'pdf', name: 'read_file', input: { path: 'paper.pdf' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'pdf', content: [
+      { type: 'text', text: 'PDF paper.pdf, page 1\nImage: /assets/page-1.jpg' },
+      { type: 'image', source: { type: 'file', path: '/assets/page-1.jpg' } },
+    ] }] },
+  ]);
+  assert.equal(cards[0].output, 'PDF paper.pdf, page 1\nImage: /assets/page-1.jpg');
+  assert.equal(cards[0].status, 'success');
+});
+
 class Client extends EventEmitter {
   calls: string[] = [];
   send?: () => Promise<Record<string, unknown>>;
@@ -45,6 +58,33 @@ test('MCP state stays separate from chat errors, serializes changes and reports 
   await session.refreshMcp(); assert(session.state.mcpError?.includes('重启 core')); assert.equal(session.state.error, undefined);
   assert(!session.state.mcpLoading);
   await session.manageMcp('reload'); assert(!session.state.mcpBusy);
+});
+
+// 功能：压缩当前会话互斥执行，保留展示记录，失败后恢复输入并保留占用。
+// 设计：延迟 RPC 替身覆盖双击与运行中操作，再验证成功与失败两条状态路径。
+test('manual compaction preserves cards and serializes actions with accurate usage state', async () => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  Object.assign(session.state, { sessionId: 'session', connection: 'ready', contextPercent: 62, usage: '62%' });
+  session.state.cards.push({ id: 'answer', kind: 'assistant', text: 'keep this answer' });
+  session.state.runId = 'run'; session.event({ type: 'llm.usage', run_id: 'run', context_pct: .62 });
+  assert.equal(session.state.contextPercent, 62); session.state.runId = undefined;
+  let finish!: (result: Record<string, unknown>) => void;
+  let calls = 0;
+  client.request = async method => {
+    if (method !== 'session.compact') return {};
+    calls++; return new Promise(resolve => { finish = resolve; });
+  };
+  session.state.busy = true; await session.compactSession(); assert.equal(calls, 0); session.state.busy = false;
+  const pending = session.compactSession(); await session.compactSession();
+  assert.equal(calls, 1); assert(session.state.compacting && session.state.sending);
+  finish({ saved_tokens: 2000, summary_tokens: 500 }); await pending;
+  assert.equal(session.state.cards[0].text, 'keep this answer');
+  assert(session.state.cards.at(-1)?.text.includes('2,000'));
+  assert.equal(session.state.contextPercent, 62); assert(!session.state.compacting && !session.state.sending);
+  session.state.contextPercent = 40;
+  client.request = async () => { throw new Error('not beneficial'); };
+  await session.compactSession(); assert.equal(session.state.contextPercent, 40);
+  assert(session.state.error?.includes('not beneficial')); assert(!session.state.sending);
 });
 
 // 功能：真实连接等待被计入耗时，成功后心跳和新会话不会改变结果，重连重新计时。
@@ -125,7 +165,7 @@ test('resume restores transcript and model, filters stale events and persists re
     if (method === 'session.resume') return { title: 'Old chat', model_id: 'custom' };
     if (method === 'session.get_history') return { messages: [
       { role: 'user', content: 'question' }, { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }
-    ] };
+    ], last_usage: { context_pct: .62, context_window_estimated: true, total_input_tokens: 62000, output_tokens: 500 } };
     return {};
   } });
   const session = new ChatSession('workspace', () => {});
@@ -133,6 +173,8 @@ test('resume restores transcript and model, filters stale events and persists re
   await session.resumeSession('old');
   assert.equal(session.state.sessionId, 'old');
   assert.equal(session.state.selectedModel, 'custom');
+  assert.equal(session.state.contextPercent, 62);
+  assert(session.state.contextEstimated); assert(session.state.usage.includes('上下文 ≈62.0%'));
   assert.deepEqual(session.state.cards.map(card => card.text), ['question', 'answer']);
   const close = paramsSeen.findIndex(call => call.method === 'session.close');
   const subscribe = paramsSeen.findLastIndex(call => call.method === 'event.subscribe');

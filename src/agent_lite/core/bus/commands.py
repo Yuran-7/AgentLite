@@ -73,8 +73,8 @@ class AgentRunResult(BaseModel):
 
 class EventSubscribeCommand(BaseModel):
     type: Literal["event.subscribe"] = "event.subscribe"
-    topics: list[str]          # fnmatch 模式，如 ["step.*", "tool.*"]
-    scope: str = "global"      # "global" | "run:<run_id>" | "session:<session_id>"
+    topics: list[str]  # fnmatch 模式，如 ["step.*", "tool.*"]
+    scope: str = "global"  # "global" | "run:<run_id>" | "session:<session_id>"
     replay_from_run: str | None = None  # 设置则先从 events.jsonl 回放历史再接实时流
 
 
@@ -189,6 +189,7 @@ class SessionGetHistoryCommand(BaseModel):
 
 class SessionGetHistoryResult(BaseModel):
     messages: list[dict[str, Any]]
+    last_usage: dict[str, Any] | None = None
 
 
 class SessionCloseCommand(BaseModel):
@@ -291,6 +292,41 @@ class MemoryDeleteResult(BaseModel):
     deleted: bool
 
 
+class FileHistoryListCommand(BaseModel):
+    type: Literal["file_history.list"] = "file_history.list"
+    session_id: str
+
+
+class FileHistoryDiffCommand(BaseModel):
+    type: Literal["file_history.diff"] = "file_history.diff"
+    session_id: str
+    change_id: str
+    from_change_id: str | None = None
+
+
+class FileHistoryRestoreCommand(BaseModel):
+    type: Literal["file_history.restore"] = "file_history.restore"
+    session_id: str
+    change_id: str
+    dry_run: bool = False
+
+
+class FileHistoryListResult(BaseModel):
+    changes: list[dict[str, Any]]
+
+
+class FileHistoryDiffResult(BaseModel):
+    diff: str
+
+
+class FileHistoryRestoreResult(BaseModel):
+    path: str
+    dry_run: bool
+    diff: str
+    change_id: str | None = None
+    warning: str | None = None
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -320,6 +356,9 @@ Command = Annotated[
     | SessionSetStatsCommand
     | MemorySearchCommand
     | MemoryListCommand
-    | MemoryDeleteCommand,
+    | MemoryDeleteCommand
+    | FileHistoryListCommand
+    | FileHistoryDiffCommand
+    | FileHistoryRestoreCommand,
     Discriminator("type"),
 ]

@@ -20,6 +20,34 @@ function page() {
 const state = (): ChatState => ({ workspace: 'C:/workspace', connection: 'ready', origin: 'reused',
   busy: false, sending: false, cancelling: false, model: 'demo', usage: '', cards: [] });
 
+// 功能：文件汇总始终可见，前三行可展开并发送查看与撤销操作，运行时禁止撤销。
+// 设计：驱动真实打包页面，覆盖完成回答的折叠规则、恶意文件名和心跳重绘后的展开状态。
+test('file change cards expand, dispatch actions and remain outside collapsed work', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+  snapshot.cards = [
+    { id: 'answer', kind: 'assistant', text: 'done', runId: 'run', completed: true },
+    { id: 'files:run', kind: 'files', text: '', runId: 'run', fileSummary: { undone: false, files:
+      Array.from({ length: 4 }, (_, n) => ({ path: `C:/workspace/src/<img onerror=alert(1)>${n}.ts`, added: n + 1, removed: n, changeIds: [`change${n}`] })) } },
+  ];
+  fixture.render(snapshot);
+  const { document } = fixture;
+  assert.equal(document.querySelectorAll('.file-change-row').length, 3);
+  assert.equal(document.querySelector('.card.files')?.hasAttribute('hidden'), false);
+  assert.equal(document.querySelector('.file-changes-title strong')?.textContent, '已修改 4 个文件');
+  assert.equal(document.querySelector('.file-changes-title .lines-added')?.textContent, '+10');
+  assert.equal(document.querySelector('.file-changes img'), null);
+  (document.querySelector('.file-changes-more') as HTMLButtonElement).click();
+  assert.equal(document.querySelectorAll('.file-change-row').length, 4);
+  snapshot.busy = true; fixture.render(snapshot);
+  assert.equal(document.querySelectorAll('.file-change-row').length, 4);
+  assert((document.querySelector('.file-changes-undo') as HTMLButtonElement).disabled);
+  snapshot.busy = false; fixture.render(snapshot);
+  (document.querySelector('.file-change-row') as HTMLButtonElement).click();
+  assert.equal(parsePageMessage(fixture.messages.at(-1))?.type, 'viewFileChanges');
+  (document.querySelector('.file-changes-undo') as HTMLButtonElement).click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'undoFileChanges', cardId: 'files:run' });
+});
+
 // 功能：上传预览可移除，图片消息在发送、编辑和历史恢复后保留附件。
 // 设计：驱动真实页面的文件选择事件，覆盖异步读取及纯图片消息的发送边界。
 test('image upload, remove, send, restore and edit preserve attachments', async t => {
@@ -104,6 +132,29 @@ test('MCP panel shows empty and old-core errors, locks mutations during tasks an
   assert.equal(parsePageMessage({ type: 'mcp.manage', action: 'add', server: { command: 'arbitrary' } }), undefined);
 });
 
+// 功能：Compact 菜单显示真实占用，更新时保留选择，未知占用不伪造百分比。
+// 设计：驱动真实页面的输入与键盘事件，验证压缩仅提交专用操作并显示执行状态。
+test('compact slash command displays live context usage and dispatches without a prompt', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+  snapshot.sessionId = 'compact-session'; snapshot.contextPercent = 62; fixture.render(snapshot);
+  const { document, dom } = fixture; const input = document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '/compact'; input.dispatchEvent(new dom.window.Event('input'));
+  assert(document.getElementById('slash-compact')?.textContent?.includes('62% 已使用'));
+  assert.equal(document.querySelector('.compact-ring')?.getAttribute('stroke-dasharray'), '62 100');
+  snapshot.contextPercent = 75; snapshot.contextEstimated = true; fixture.render(snapshot);
+  assert(document.getElementById('slash-compact')?.textContent?.includes('≈75%'));
+  assert.equal(input.getAttribute('aria-activedescendant'), 'slash-compact');
+  input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'compactSession' });
+  assert(!fixture.messages.some(message => message.type === 'send'));
+  snapshot.sending = true; snapshot.compacting = true; fixture.render(snapshot);
+  assert(input.disabled); assert(!document.getElementById('run-status')!.hidden);
+  assert.equal(document.getElementById('run-label')!.textContent, '正在压缩上下文…');
+  snapshot.sending = false; snapshot.compacting = false; snapshot.contextPercent = undefined; fixture.render(snapshot);
+  input.value = '/compact'; input.dispatchEvent(new dom.window.Event('input'));
+  assert(document.getElementById('slash-compact')?.textContent?.includes('暂无对话用量'));
+});
+
 test('slash menu filters, navigates and dispatches existing commands without sending prompts', t => {
   const fixture = page(); t.after(() => fixture.dom.window.close()); fixture.render(state());
   const { document, dom } = fixture;
@@ -111,7 +162,7 @@ test('slash menu filters, navigates and dispatches existing commands without sen
   const type = (value: string) => { input.value = value; input.dispatchEvent(new dom.window.Event('input')); };
   const key = (value: string) => input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }));
   type('/'); assert(!document.getElementById('slash-menu')!.hidden);
-  assert.equal(document.querySelectorAll('#slash-options [role="option"]').length, 12);
+  assert.equal(document.querySelectorAll('#slash-options [role="option"]').length, 13);
   assert.equal(input.getAttribute('aria-activedescendant'), 'slash-new');
   key('ArrowUp'); assert.equal(input.getAttribute('aria-activedescendant'), 'slash-skills');
   key('ArrowDown'); key('Enter');
@@ -346,7 +397,7 @@ test('shared tooltips cover all controls and dynamic titles safely', async () =>
   assert.equal(document.querySelectorAll('[title]').length, 0);
   assert.equal(document.getElementById('attach')!.dataset.tooltip, '添加上下文');
   assert.equal(document.getElementById('attachment-tooltip'), null);
-  for (const id of ['attach', 'settings', 'connection-toggle', 'model-toggle', 'session-title',
+  for (const id of ['attach', 'settings', 'connection-toggle', 'model-toggle',
     'bookmark', 'history-toggle', 'new', 'history-refresh', 'send', 'bookmarks-close']) {
     const target = document.getElementById(id)!;
     if (target.closest('[hidden]') || target.hidden) continue;

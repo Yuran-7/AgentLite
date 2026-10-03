@@ -24,7 +24,7 @@ def cmd_ping(config: AgentLiteConfig) -> None:
 # 当前 _ping 协程有 4 个显式 await，网络 I/O 期间会将控制权交还事件循环
 async def _ping(config: AgentLiteConfig) -> None:
     t0 = time.monotonic()
-    reader, writer = await asyncio.open_connection(config.host, config.port)  # 以异步（非阻塞）方式建立一个 TCP 客户端连接
+    reader, writer = await asyncio.open_connection(config.host, config.port)
 
     req = {
         "jsonrpc": "2.0", # JSON-RPC 2.0 协议版本
@@ -33,7 +33,7 @@ async def _ping(config: AgentLiteConfig) -> None:
         "params": {"client": f"cli/{agent_lite.__version__}"},
     }
     # json.dumps(req) 会将字典转换为 JSON 字符串，末尾加上换行符 \n 以便服务端按行读取
-    # NDJSON（Newline Delimited JSON）是一种常用的流式 JSON 格式，每行都是一个独立的 JSON 对象，适合网络传输和日志记录
+    # NDJSON 每行是独立 JSON 对象，适合网络传输和日志记录
     # encode() 的作用是将字符串（str）编码为字节串（bytes）对象
     writer.write((json.dumps(req) + "\n").encode())
     await writer.drain()

@@ -117,7 +117,7 @@ class Compactor:
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
 
         compress_request: list[dict[str, object]] = [
-            {"role": "user", "content": f"{prompt}\n\n---\n\n{history_text}"} # 先压缩命令，再加上历史消息
+            {"role": "user", "content": f"{prompt}\n\n---\n\n{history_text}"}
         ]
 
         try:
@@ -128,7 +128,7 @@ class Compactor:
                 bus=silent_bus,
                 run_id="compact",
                 step=0,
-                system="You are a helpful assistant that summarizes conversations.",  # 这个属于system prompt
+                system="You are a helpful assistant that summarizes conversations.",
             )
         except Exception:
             logger.exception("compactor: LLM call failed, skipping compaction")
@@ -179,9 +179,16 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
                         f"{block.get('input', {})}\n</tool_call>"
                     )
                 elif btype == "tool_result":
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, list):
+                        result_content = "\n".join(
+                            str(part.get("text", "")) if part.get("type") == "text"
+                            else f"[图片资产: {part.get('source', {}).get('path', 'inline')}]"
+                            for part in result_content
+                        )
                     blocks.append(
                         f"<tool_result id={block.get('tool_use_id')}>\n"
-                        f"{block.get('content', '')}\n</tool_result>"
+                        f"{result_content}\n</tool_result>"
                     )
             parts.append(f"[{role}]\n" + "\n".join(blocks))
     return "\n\n".join(parts)

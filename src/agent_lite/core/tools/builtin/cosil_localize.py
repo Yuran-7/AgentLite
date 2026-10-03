@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -193,11 +194,18 @@ def build_repository_structure(
     return instance_id, structure, cache_path
 
 
+# 返回经过容器类型检查的结构条目，防止元数据中的 object 被当作可迭代列表
+def _metadata_items(metadata: dict[str, object], key: str) -> list[dict[str, Any]]:
+    items = metadata.get(key, [])
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+# 渲染代码结构概要
 def _render_structure(structure: dict[str, dict[str, object]]) -> str:
     lines: list[str] = []
     for file_name, metadata in sorted(structure.items()):
         lines.append(f"file: {file_name}")
-        for cls in metadata.get("classes", []):
+        for cls in _metadata_items(metadata, "classes"):
             if not isinstance(cls, dict):
                 continue
             methods = cls.get("methods", [])
@@ -206,7 +214,7 @@ def _render_structure(structure: dict[str, dict[str, object]]) -> str:
             lines.append(f"  class: {cls.get('name', '')}{suffix}")
         function_names = [
             fn.get("name", "")
-            for fn in metadata.get("functions", [])
+            for fn in _metadata_items(metadata, "functions")
             if isinstance(fn, dict)
         ]
         if function_names:
@@ -269,7 +277,7 @@ def _dependency_candidates(
     edges: dict[str, set[str]] = {file_name: set() for file_name in structure}
     for file_name, metadata in structure.items():
         current_parts = _module_name(file_name).split(".")[:-1]
-        for item in metadata.get("imports", []):
+        for item in _metadata_items(metadata, "imports"):
             if not isinstance(item, dict):
                 continue
             module = str(item.get("module", ""))
@@ -314,14 +322,14 @@ def _find_symbol(
 
     if tool_call.name == "cosil_get_class":
         class_name = str(tool_call.input.get("class_name", ""))
-        for cls in metadata.get("classes", []):
+        for cls in _metadata_items(metadata, "classes"):
             if isinstance(cls, dict) and cls.get("name") == class_name:
                 key = f"class: {class_name}"
                 return key, _source_segment(lines, int(cls["start"]), int(cls["end"]))
     elif tool_call.name == "cosil_get_method":
         class_name = str(tool_call.input.get("class_name", ""))
         function_name = str(tool_call.input.get("function_name", ""))
-        for cls in metadata.get("classes", []):
+        for cls in _metadata_items(metadata, "classes"):
             if not isinstance(cls, dict) or cls.get("name") != class_name:
                 continue
             for method in cls.get("methods", []):
@@ -330,7 +338,7 @@ def _find_symbol(
                     return key, _source_segment(lines, int(method["start"]), int(method["end"]))
     elif tool_call.name == "cosil_get_function":
         function_name = str(tool_call.input.get("function_name", ""))
-        for function in metadata.get("functions", []):
+        for function in _metadata_items(metadata, "functions"):
             if isinstance(function, dict) and function.get("name") == function_name:
                 key = f"function: {function_name}"
                 return key, _source_segment(

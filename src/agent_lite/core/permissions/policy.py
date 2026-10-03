@@ -52,6 +52,7 @@ DEFAULT_POLICIES: dict[str, ToolPolicy] = {
     "shell":      ToolPolicy(default=PermissionDecision.ASK),
     "bash":       ToolPolicy(default=PermissionDecision.ASK),  # legacy tool name
     "write_file": ToolPolicy(default=PermissionDecision.ASK),
+    "edit_file":  ToolPolicy(default=PermissionDecision.ASK),
     "read_file":  ToolPolicy(default=PermissionDecision.ALLOW),
     "list_dir":   ToolPolicy(default=PermissionDecision.ALLOW),
     "web_search": ToolPolicy(default=PermissionDecision.ALLOW),
@@ -67,6 +68,7 @@ _PREVIEW_KEY: dict[str, str] = {
     "bash":       "command",  # legacy tool name
     "read_file":  "path",
     "write_file": "path",
+    "edit_file": "path",
     "list_dir":   "path",
     "web_search": "query",
     "web_fetch":  "url",

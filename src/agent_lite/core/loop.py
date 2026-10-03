@@ -9,6 +9,7 @@ from agent_lite.core.bus.events import StepFinishedEvent, StepStartedEvent
 from agent_lite.core.context import ExecutionContext
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.base import LLMProvider
+from agent_lite.core.tools.base import ToolResult
 from agent_lite.core.tools.registry import ToolRegistry
 from agent_lite.core.tools.result_storage import ToolResultStore
 
@@ -54,6 +55,7 @@ class AgentLoop:
     async def run(self, context: ExecutionContext) -> None:
         from agent_lite.core.tools.invocation import invoke_tool
 
+        pending_deliveries: list[ToolResult] = []
         while not context.is_done():
             if self._task_manager is not None:
                 notifications = await self._task_manager.drain_run_notifications(
@@ -98,6 +100,11 @@ class AgentLoop:
                 context.mark_failed("llm_error")
                 break
 
+            # 成功模型响应证明上轮结果已被看到，同批次预生成的写入不能借读取取得资格
+            for delivered in pending_deliveries:
+                delivered.confirm_delivery()
+            pending_deliveries.clear()
+
             # [observe] append assistant content blocks to context
             # thinking blocks must come first and be preserved verbatim for extended thinking mode
             blocks: list[dict[str, object]] = list(response.thinking_blocks)
@@ -122,7 +129,11 @@ class AgentLoop:
                         result_store=self._result_store,
                         token_budget=budget,
                     )
-                    context.add_tool_result(tc.id, result.content, is_error=result.is_error)
+                    context.add_tool_result(tc.id, result.model_content(), is_error=result.is_error)
+                    pending_deliveries.append(result)
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise asyncio.CancelledError()
             elif response.stop_reason == "max_tokens" and response.tool_calls:
                 # Output token limit hit mid-tool-call; input is incomplete.
                 # Add synthetic error results so the conversation stays balanced.
@@ -168,7 +179,9 @@ class AgentLoop:
                 and response.usage is not None
                 and response.usage.context_pct >= self._compact_threshold
             ):
-                await self._compactor.compact(context, self._provider)
+                if await self._compactor.compact(context, self._provider) is not None:
+                    self._registry.clear_read_context()
+                    pending_deliveries.clear()
 
             await self._bus.publish(
                 StepFinishedEvent(run_id=context.run_id, step=context.step, ts=_now())

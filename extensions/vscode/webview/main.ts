@@ -7,6 +7,7 @@ import { installTooltips } from './tooltips';
 import { installSlashCommands } from './slash-commands';
 import { installImages } from './images';
 import { installMcpPanel } from './mcp-panel';
+import { renderFileChanges } from './file-changes';
 
 declare function acquireVsCodeApi(): { postMessage(message: PageMessage): void };
 const api = acquireVsCodeApi();
@@ -43,13 +44,14 @@ const slash = installSlashCommands(input, id => {
   } else if (id === 'settings') post({ type: 'openSettings' });
   else if (id === 'mcp') mcpPanel.open();
   else if (id === 'logs') post({ type: 'openLogs' });
+  else if (id === 'compact') post({ type: 'compactSession' });
   else if (id === 'status') slash.showDetail('当前状态', [
     `会话：${latest?.title || '新会话'}`, `会话 ID：${latest?.sessionId || '尚未创建'}`,
     `模型：${document.getElementById('model-label')!.textContent || '尚未选择'}`,
     `连接：${document.getElementById('connection')!.textContent}`, `工作区：${latest?.workspace || '未知'}`,
     latest?.usage || '暂无用量统计',
   ].join('\n'));
-});
+}, () => ({ percent: latest?.contextPercent, estimated: latest?.contextEstimated }));
 const copyShape = '<rect x="4" y="8" width="12" height="13" rx="2"/><path d="M8 8V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-2"/>';
 const bookmarkShape = '<path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16l-6-4z"/>';
 const bookmarkToggle = document.getElementById('bookmark') as HTMLButtonElement;
@@ -234,9 +236,9 @@ function duration(ms: number): string {
 // 首段内容出现前显示 Thinking，之后仅保留当前聊天中的运行状态与耗时。
 function updateWorking(): void {
   const hasRunSummary = !!latest?.runId && latest.cards.some(card => card.kind === 'assistant' && card.runId === latest?.runId);
-  document.getElementById('run-status')!.hidden = !latest?.busy || hasRunSummary;
+  document.getElementById('run-status')!.hidden = (!latest?.busy && !latest?.compacting) || hasRunSummary;
   document.getElementById('run-label')!.textContent = latest?.cancelling ? 'Stopping…'
-    : 'Thinking…';
+    : latest?.compacting ? '正在压缩上下文…' : 'Thinking…';
   for (const summary of document.querySelectorAll<HTMLElement>('[data-working-summary]')) {
     summary.textContent = latest?.cancelling ? 'Stopping…'
       : latest?.workStartedAt ? `Working for ${duration(Date.now() - latest.workStartedAt)}` : 'Working…';
@@ -363,7 +365,7 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       work.append(summary);
       const activity = element('div', '', 'work-activity');
       for (const item of latest?.cards.filter(item => item.runId === card.runId && item.kind !== 'user' &&
-        !(finalAnswer && item.id === card.id) && !(item.kind === 'permission' && item.status === 'pending')) ?? []) {
+        item.kind !== 'files' && !(finalAnswer && item.id === card.id) && !(item.kind === 'permission' && item.status === 'pending')) ?? []) {
         const entry = element('article'); renderCard(item, entry, true); activity.append(entry);
       }
       if (!activity.childElementCount) activity.append(element('div', '推理与生成已完成'));
@@ -405,7 +407,7 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       for (const image of card.images) {
         if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.media_type)) continue;
         const img = document.createElement('img'); img.src = `data:${image.media_type};base64,${image.data}`;
-        img.alt = image.name; img.title = image.name; gallery.append(img);
+        img.alt = image.name; gallery.append(img);
       }
       container.append(gallery);
     }
@@ -424,6 +426,8 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     });
     edit.dataset.edit = 'true'; edit.disabled = input.disabled;
     actions.append(copy, edit); container.append(actions);
+  } else if (card.kind === 'files') {
+    renderFileChanges(card, container, latest, post);
   } else if (card.kind === 'tool') {
     const details = document.createElement('details'); details.open = wasOpen;
     details.append(element('summary', `${card.title} · ${labels[card.status ?? ''] ?? card.status ?? ''}${card.elapsedMs !== undefined ? ` · ${card.elapsedMs}ms` : ''}`));
@@ -450,7 +454,8 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
 }
 
 // 整轮完成后把所有回答文字集中放到活动记录后面，保留各段稳定标识与原始顺序。
-function orderedCards(source: Card[]): Card[] {
+function orderedCards(all: Card[]): Card[] {
+  const source = all.filter(card => card.kind !== 'files');
   const completed = new Set(source.filter(card => card.kind === 'assistant' && (card.completed || card.workMs !== undefined) && card.runId).map(card => card.runId!));
   const last = new Map<string, number>();
   const answers = new Map<string, Card[]>();
@@ -466,6 +471,10 @@ function orderedCards(source: Card[]): Card[] {
     if (!(card.kind === 'assistant' && card.runId && completed.has(card.runId))) result.push(card);
     if (card.runId && last.get(card.runId) === index) result.push(...answers.get(card.runId) ?? []);
   });
+  for (const card of all.filter(item => item.kind === 'files')) {
+    const index = result.findLastIndex(item => item.runId === card.runId);
+    if (index < 0) result.push(card); else result.splice(index + 1, 0, card);
+  }
   return result;
 }
 
@@ -475,7 +484,7 @@ function render(state: ChatState): void {
   latest = state;
   mcpPanel.render(state);
   sessionTitle.textContent = state.title || '新会话';
-  sessionTitle.dataset.tooltip = `${state.title || '新会话'} · 点击重命名`;
+  sessionTitle.setAttribute('aria-label', `${state.title || '新会话'} · 点击重命名`);
   document.getElementById('workspace')!.textContent = state.workspace;
   updateConnection();
   connectionToggle.dataset.state = state.connection;
@@ -533,7 +542,7 @@ function render(state: ChatState): void {
   if (locked) closeMenus(true);
   const nextHistorySignature = JSON.stringify([state.history, state.archivedSessionIds, state.sessionId, locked]);
   if (historySignature !== nextHistorySignature) { renderHistory(state); historySignature = nextHistorySignature; }
-  input.disabled = locked; imageInput.render(); send.disabled = locked || imageInput.loading() || (!input.value.trim() && !imageInput.get().length);
+  input.disabled = locked; slash.refresh(); imageInput.render(); send.disabled = locked || imageInput.loading() || (!input.value.trim() && !imageInput.get().length);
   for (const record of rendered.values()) {
     const edit = record.element.querySelector<HTMLButtonElement>('[data-edit]'); if (edit) edit.disabled = locked;
   }
@@ -559,12 +568,12 @@ function render(state: ChatState): void {
     if (record.element !== position) cards.insertBefore(record.element, position);
     position = record.element.nextElementSibling;
     const runCards = card.kind === 'assistant' && card.runId ? state.cards.filter(item => item.runId === card.runId) : undefined;
-    const signature = JSON.stringify([card, runCards, state.bookmarkCardIds?.[card.id], state.busy, state.sending]);
+    const signature = JSON.stringify([card, runCards, state.bookmarkCardIds?.[card.id], state.busy, state.sending, state.connection]);
     const answers = card.runId ? state.cards.filter(answer => answer.kind === 'assistant' && answer.runId === card.runId) : [];
     const completed = answers.some(answer => answer.completed || answer.workMs !== undefined);
     const visibleAnswer = completed ? answers.at(-1) : undefined;
     if (signature !== record.signature) { renderCard(card, record.element, card.kind === 'assistant' && !!visibleAnswer && card.id !== visibleAnswer.id); record.signature = signature; }
-    record.element.hidden = !!visibleAnswer && card.kind !== 'user' &&
+    record.element.hidden = !!visibleAnswer && card.kind !== 'user' && card.kind !== 'files' &&
       (card.kind === 'assistant' ? card.id !== visibleAnswer.id : !(card.kind === 'permission' && card.status === 'pending'));
   }
   cards.append(document.getElementById('run-status')!);

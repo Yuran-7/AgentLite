@@ -18,12 +18,14 @@ from agent_lite.core.subagent.registry import SubagentTaskManager
 from agent_lite.core.tools.base import BaseTool, ToolResult
 from agent_lite.core.tools.builtin.bash import ShellTool
 from agent_lite.core.tools.builtin.cosil_localize import CosilLocalizeTool
+from agent_lite.core.tools.builtin.edit_file import EditFileTool
 from agent_lite.core.tools.builtin.list_dir import ListDirTool
 from agent_lite.core.tools.builtin.read_file import ReadFileTool
 from agent_lite.core.tools.builtin.update_plan import UpdatePlanTool
 from agent_lite.core.tools.builtin.web_fetch import WebFetchTool
 from agent_lite.core.tools.builtin.web_search import WebSearchTool
 from agent_lite.core.tools.builtin.write_file import WriteFileTool
+from agent_lite.core.tools.file_operations import FileOperationService
 from agent_lite.core.tools.registry import ToolRegistry
 from agent_lite.core.tools.result_storage import ToolResultStore
 
@@ -67,6 +69,7 @@ class SpawnAgentTool(BaseTool):
         provider_factory: Callable[[str], LLMProvider] | None = None,
         extra_tools: list[BaseTool] | None = None,
         result_store: ToolResultStore | None = None,
+        file_session_dir: Path | None = None,
     ) -> None:
         self._provider = provider
         self._provider_factory = provider_factory
@@ -86,6 +89,7 @@ class SpawnAgentTool(BaseTool):
                 "read_file",
                 "shell",
                 "write_file",
+                "edit_file",
                 "list_dir",
                 "update_plan",
                 "spawn_agent",
@@ -99,6 +103,7 @@ class SpawnAgentTool(BaseTool):
         self._agent_registry = agent_registry or AgentRegistry(workspace_root)
         self._extra_tools = extra_tools or []
         self._result_store = result_store
+        self._file_session_dir = file_session_dir
 
         def describe_agent(agent: AgentDefinition) -> str:
             tools = self._agent_registry.effective_tools(
@@ -316,10 +321,13 @@ class SpawnAgentTool(BaseTool):
             self._agent_registry.effective_tools(definition, self._subagent_allowed_tools)
         )
         registry = ToolRegistry()
+        files = FileOperationService(self._workspace_root, self._file_session_dir,
+                                     agent_id=child_run_id)
         tools: list[BaseTool] = [
-            ReadFileTool(self._workspace_root),
+            ReadFileTool(self._workspace_root, files),
             ShellTool(self._workspace_root),
-            WriteFileTool(self._workspace_root),
+            WriteFileTool(self._workspace_root, files),
+            EditFileTool(self._workspace_root, files),
             ListDirTool(self._workspace_root),
         ]
         if self._workspace_root is not None:
@@ -354,6 +362,7 @@ class SpawnAgentTool(BaseTool):
                     agent_registry=self._agent_registry,
                     extra_tools=self._extra_tools,
                     result_store=self._result_store,
+                    file_session_dir=self._file_session_dir,
                 )
             )
         return registry

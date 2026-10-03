@@ -31,6 +31,7 @@ from agent_lite.core.subagent.tool import SpawnAgentTool
 from agent_lite.core.tools.base import BaseTool
 from agent_lite.core.tools.builtin import (
     CosilLocalizeTool,
+    EditFileTool,
     ListDirTool,
     ReadFileTool,
     ShellTool,
@@ -38,6 +39,12 @@ from agent_lite.core.tools.builtin import (
     WebFetchTool,
     WebSearchTool,
     WriteFileTool,
+)
+from agent_lite.core.tools.file_operations import (
+    FileHistoryStore,
+    FileOperationService,
+    FileReadContext,
+    session_read_context,
 )
 from agent_lite.core.tools.registry import ToolRegistry
 from agent_lite.core.tools.result_storage import ToolResultStore
@@ -111,6 +118,7 @@ class AgentRunner:
         workspace_root: Path | None = None,
         agent_context: str = "",
         tool_whitelist: list[str] | None = None,
+        file_read_context: FileReadContext | None = None,
     ) -> ToolRegistry:
         allowed: set[str] | None = (
             {
@@ -125,10 +133,14 @@ class AgentRunner:
             return allowed is None or name in allowed
 
         registry = ToolRegistry()
+        directory = (store.session_dir(session.id)
+                     if session is not None and store is not None else self._events_file.parent)
+        files = FileOperationService(workspace_root, directory, file_read_context)
         for t in [
-            ReadFileTool(workspace_root),
+            ReadFileTool(workspace_root, files),
             ShellTool(workspace_root),
-            WriteFileTool(workspace_root),
+            WriteFileTool(workspace_root, files),
+            EditFileTool(workspace_root, files),
             ListDirTool(workspace_root),
         ]:
             if _ok(t.name):
@@ -172,6 +184,7 @@ class AgentRunner:
                             token_limit=self._config.compaction.tool_result_token_limit,
                             batch_token_limit=self._config.compaction.tool_result_batch_token_limit,
                         ),
+                        file_session_dir=directory,
                     )
                 )
         if self._mcp_manager is not None:
@@ -211,6 +224,12 @@ class AgentRunner:
             else None
         )
         agent_ctx = load_agent_context(workspace_root)
+        scope = repr((workspace_root, session.model_id if session else None,
+                      system_prompt_override, tool_whitelist, agent_ctx))
+        file_read_context = (session_read_context(session_dir, scope)
+                             if session is not None else FileReadContext())
+        file_read_context.verify_replay(history)
+        await asyncio.to_thread(FileHistoryStore(session_dir).recover)
 
         # 2. 建立本次 run 的局部事件总线，再桥接到全局总线供 TUI 实时订阅
         bus = EventBus()
@@ -278,6 +297,7 @@ class AgentRunner:
                     workspace_root=workspace_root,
                     agent_context=agent_ctx,
                     tool_whitelist=tool_whitelist,
+                    file_read_context=file_read_context,
                 )
                 compactor = Compactor(bus, session_dir, session_id_str) # 上下文压缩器
                 loop = AgentLoop(
@@ -330,6 +350,7 @@ class AgentRunner:
                 context.persistence_messages(prefill_len),
                 run_id=run_id,
             )
+            file_read_context.remember_messages(context.messages)
 
         if cancelled:
             raise asyncio.CancelledError()

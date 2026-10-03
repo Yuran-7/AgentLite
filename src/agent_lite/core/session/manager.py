@@ -30,6 +30,14 @@ from agent_lite.core.session.model import Session, SessionMode
 from agent_lite.core.session.store import SessionStore
 from agent_lite.core.skills.loader import SkillLoader
 from agent_lite.core.subagent.registry import SubagentTaskManager
+from agent_lite.core.tools.file_operations import (
+    FileOperationError,
+    FileOperationService,
+    clear_session_read_context,
+    file_lock,
+    finish_commit,
+    text_diff,
+)
 
 if TYPE_CHECKING:
     from agent_lite.core.llm.base import LLMProvider
@@ -307,6 +315,7 @@ class SessionManager:
                 "waiting_for_input" if self._store.read_messages(sid) else "active"
             )
             self._store.write_meta(session)
+            clear_session_read_context(self._store.session_dir(sid))
             await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
             if self._task_manager is not None:
                 asyncio.create_task(
@@ -649,6 +658,7 @@ class SessionManager:
                 {"role": "user", "content": result.summary_text},
                 {"role": "assistant", "content": "Understood, I'll continue from this summary."},
             ])
+            clear_session_read_context(session_dir)
             return SessionCompactResult(
                 summary_tokens=result.summary_tokens,
                 saved_tokens=max(0, result.original_token_estimate - result.summary_tokens),
@@ -658,6 +668,65 @@ class SessionManager:
     async def get_history(self, sid: str) -> list[dict[str, Any]]:
         self._get_session(sid)
         return self._store.read_history_messages(sid)
+
+    # 恢复会话最近一次主对话输出的上下文水位，不依赖前端内存或显示字符串。
+    async def last_usage(self, sid: str) -> dict[str, Any] | None:
+        session = self._get_session(sid)
+        return await asyncio.to_thread(self._store.last_usage, sid, list(session.run_ids))
+
+    # 查询或恢复文件历史，恢复操作与当前会话运行互斥且由核心执行
+    async def file_history(self, sid: str, action: str, change_id: str | None = None,
+                           dry_run: bool = False,
+                           from_change_id: str | None = None) -> dict[str, Any]:
+        try:
+            session = self._sessions.get(sid) or self._store.read_meta(sid)
+        except (OSError, ValueError, KeyError) as exc:
+            raise HandlerError(SESSION_NOT_FOUND, "session not found") from exc
+        directory = self._store.session_dir(sid)
+        service = FileOperationService(
+            Path(session.workspace_root) if session.workspace_root else None, directory,
+            agent_id="history-cli",
+        )
+        history = service.history
+        assert history is not None
+
+        # 核对记录并执行只读查询，避免阻塞所有前端连接
+        def query() -> dict[str, Any]:
+            history.recover()
+            with file_lock(history.directory / "index"):
+                if action == "list":
+                    return {"changes": history.records()}
+                if change_id is None:
+                    raise ValueError("change_id is required")
+                record = history.get(change_id)
+                first = history.get(from_change_id) if from_change_id else record
+                if from_change_id and (
+                    first["status"] != "committed" or record["status"] != "committed"
+                    or first["path"] != record["path"]
+                    or not first.get("run_id") or first.get("run_id") != record.get("run_id")
+                    or first["timestamp"] > record["timestamp"]
+                ):
+                    raise ValueError("Diff range must belong to the same file and run")
+                return {"diff": text_diff(history.read_blob(first["before"]),
+                                          history.read_blob(record["after"]), record["path"],
+                                          max_chars=None)}
+
+        try:
+            if action != "restore":
+                return await asyncio.to_thread(query)
+            lock = self._locks.setdefault(sid, asyncio.Lock())
+            if lock.locked():
+                raise HandlerError(SESSION_BUSY, "session busy")
+            async with lock:
+                await asyncio.to_thread(history.recover)
+                if change_id is None:
+                    raise ValueError("change_id is required")
+                result = await finish_commit(lambda: service.restore(change_id, dry_run=dry_run))
+                if not dry_run:
+                    clear_session_read_context(directory)
+                return result
+        except (FileOperationError, OSError, ValueError) as exc:
+            raise HandlerError(-32030, str(exc)) from exc
 
     # 从内存索引取 session，不存在时抛 JSON-RPC 结构化错误
     def _get_session(self, sid: str) -> Session:

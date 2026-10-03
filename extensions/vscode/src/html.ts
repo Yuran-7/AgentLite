@@ -5,7 +5,7 @@ export function webviewHtml(nonce: string, source: string, script: string, style
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${source} data:; style-src ${source}; script-src 'nonce-${nonce}';">
     <link rel="stylesheet" href="${style}"><title>AgentLite</title></head>
     <body><header><div class="topline">
-    <button id="session-title" disabled data-tooltip="点击重命名会话" aria-label="重命名当前会话">新会话</button>
+    <button id="session-title" disabled aria-label="重命名当前会话">新会话</button>
     <div class="session-actions">
     <button id="bookmark" class="icon-button" data-tooltip="收藏的回答" aria-label="收藏的回答" aria-expanded="false" aria-controls="bookmarks-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16l-6-4z"/></svg></button>
     <button id="history-toggle" class="icon-button" aria-expanded="false" aria-controls="history-panel" data-tooltip="历史会话" aria-label="历史会话"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button>

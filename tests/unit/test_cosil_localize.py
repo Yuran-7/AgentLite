@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_lite.core.events.bus import EventBus
 from agent_lite.core.config import AgentLiteConfig
+from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 from agent_lite.core.runner import AgentRunner
 from agent_lite.core.tools.builtin.cosil_localize import (

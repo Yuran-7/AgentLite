@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,48 @@ class SessionStore:
     # 返回指定 session 汇总所有 run 事件的日志路径
     def events_file(self, sid: str) -> Path:
         return self.session_dir(sid) / "events.jsonl"
+
+    # 从日志尾部读取本会话主运行最后一次用量，兼容旧布局并跳过子 Agent 和损坏记录。
+    def last_usage(self, sid: str, run_ids: list[str]) -> dict[str, Any] | None:
+        allowed = set(run_ids)
+        paths = [self.events_file(sid)] + [
+            self.session_dir(sid) / "runs" / run_id / "events.jsonl"
+            for run_id in reversed(run_ids)
+        ]
+        for path in paths:
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(0, os.SEEK_END)
+                    position = stream.tell()
+                    pending = b""
+                    while position > 0:
+                        size = min(position, 65_536)
+                        position -= size
+                        stream.seek(position)
+                        lines = (stream.read(size) + pending).split(b"\n")
+                        pending = lines.pop(0) if position else b""
+                        for line in reversed(lines):
+                            try:
+                                event = json.loads(line)
+                            except (ValueError, UnicodeDecodeError):
+                                continue
+                            if not isinstance(event, dict):
+                                continue
+                            pct = event.get("context_pct")
+                            if (
+                                event.get("type") == "llm.usage"
+                                and event.get("run_id") in allowed
+                                and isinstance(pct, (int, float)) and not isinstance(pct, bool)
+                                and math.isfinite(pct) and pct >= 0
+                            ):
+                                return {key: event[key] for key in (
+                                    "context_pct", "context_window_estimated", "context_window",
+                                    "input_tokens", "total_input_tokens", "output_tokens",
+                                    "cache_read_input_tokens",
+                                ) if key in event}
+            except OSError:
+                continue
+        return None
 
     def tasks_dir(self, sid: str) -> Path:
         return self.session_dir(sid) / "tasks"

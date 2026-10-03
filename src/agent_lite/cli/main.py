@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent_lite.cli.commands.chat import cmd_chat
 from agent_lite.cli.commands.core import cmd_core_start, cmd_core_status, cmd_core_stop
+from agent_lite.cli.commands.history import cmd_history
 from agent_lite.cli.commands.ping import cmd_ping
 from agent_lite.cli.commands.run import cmd_run
 from agent_lite.cli.commands.trace import cmd_trace
@@ -22,6 +23,16 @@ def main() -> None:
 
     subparsers.add_parser("ping", help="Ping the core daemon")
     subparsers.add_parser("chat", help="Start a multi-turn chat session")
+
+    history_parser = subparsers.add_parser("history", help="View or restore file changes")
+    history_sub = history_parser.add_subparsers(dest="history_command", required=True)
+    for action in ("list", "diff", "restore"):
+        action_parser = history_sub.add_parser(action)
+        action_parser.add_argument("--session", required=True)
+        if action != "list":
+            action_parser.add_argument("--change", required=True)
+        if action == "restore":
+            action_parser.add_argument("--dry-run", action="store_true")
 
     run_parser = subparsers.add_parser("run", help="Run an agent task")
     run_parser.add_argument("--goal", required=True, help="Goal for the agent to accomplish")
@@ -77,6 +88,9 @@ def main() -> None:
             raw=args.raw,
             follow=args.follow,
         )
+    elif args.command == "history":
+        cmd_history(config, args.history_command, args.session,
+                    getattr(args, "change", None), getattr(args, "dry_run", False))
     else:
         parser.print_help()
         sys.exit(1)

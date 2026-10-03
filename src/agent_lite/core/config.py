@@ -24,6 +24,7 @@ _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "read_file",
     "shell",
     "write_file",
+    "edit_file",
     "list_dir",
     "update_plan",
     "spawn_agent",

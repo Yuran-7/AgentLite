@@ -12,6 +12,7 @@ import httpx
 
 from agent_lite.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.assets import expand_assets
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 
 _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
@@ -106,7 +107,7 @@ class AnthropicProvider:
             "model": self._model,
             "max_tokens": 8192,
             "system": system_blocks,
-            "messages": messages,
+            "messages": expand_assets(messages),
         }
         if tools:
             kwargs["tools"] = tools
@@ -170,7 +171,9 @@ class AnthropicProvider:
                 )
             elif block.type == "thinking":
                 # thinking blocks must be passed back verbatim in subsequent requests
-                thinking_blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+                thinking_blocks.append({
+                    "type": "thinking", "thinking": block.thinking, "signature": block.signature,
+                })
 
         return LlmResponse(
             stop_reason=final_message.stop_reason or "end_turn",

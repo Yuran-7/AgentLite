@@ -4,6 +4,7 @@ import { server, reply, waitFor } from './helpers';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { PreviewDocuments } from '../src/preview-documents';
 
 // 在真正的扩展宿主加载插件，验证 Webview 脚本就绪后完成会话订阅。
 export async function run(): Promise<void> {
@@ -26,6 +27,27 @@ export async function run(): Promise<void> {
     assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath,
       vscode.Uri.file(join(homedir(), '.agentlite', 'settings.json')).fsPath);
     assert(!existsSync(join(vscode.workspace.workspaceFolders![0].uri.fsPath, '.agentlite')));
+    const subscriptions: vscode.Disposable[] = [];
+    const previews = new PreviewDocuments({ subscriptions });
+    try {
+      await previews.open('smoke-answer', '回答.md', '只读回答预览', 'markdown');
+      const document = vscode.window.activeTextEditor!.document;
+      assert.equal(document.uri.scheme, 'agentlite-preview');
+      assert.equal(document.getText(), '只读回答预览');
+      assert.equal(document.languageId, 'markdown');
+      assert(!document.isUntitled); assert(!document.isDirty);
+      await previews.open('smoke-answer', '回答.md', '只读回答预览', 'markdown');
+      assert.equal(vscode.window.activeTextEditor!.document.uri.toString(), document.uri.toString());
+      await vscode.commands.executeCommand('type', { text: 'edit' });
+      assert.equal(document.getText(), '只读回答预览');
+      assert(!document.isDirty);
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+      await previews.open('smoke-answer', '回答.md', '只读回答预览', 'markdown');
+      assert.equal(vscode.window.activeTextEditor!.document.getText(), '只读回答预览');
+      await previews.open('smoke-code', '代码片段', 'const n = 1;', 'typescript');
+      assert.equal(vscode.window.activeTextEditor!.document.languageId, 'typescript');
+      assert(!vscode.window.activeTextEditor!.document.isDirty);
+    } finally { subscriptions.forEach(item => item.dispose()); }
     console.log('VSCODE_SMOKE_OK: actual webview ready, session subscribed, model configuration opens user directory');
   } finally { await fixture.close(); }
 }

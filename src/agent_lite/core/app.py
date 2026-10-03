@@ -25,6 +25,12 @@ from agent_lite.core.bus.commands import (
     CoreShutdownResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    FileHistoryDiffCommand,
+    FileHistoryDiffResult,
+    FileHistoryListCommand,
+    FileHistoryListResult,
+    FileHistoryRestoreCommand,
+    FileHistoryRestoreResult,
     FrontendHeartbeatCommand,
     FrontendLeaseResult,
     FrontendRegisterCommand,
@@ -85,6 +91,7 @@ from agent_lite.core.runner import AgentRunner
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session import SessionManager, SessionStore
 from agent_lite.core.subagent.registry import SubagentTaskManager
+from agent_lite.core.tools.file_operations import recover_file_histories
 from agent_lite.core.trace.record import TraceRecord
 from agent_lite.core.trace.writer import TraceWriter
 from agent_lite.core.transport.ipc_broadcaster import IpcEventBroadcaster
@@ -394,7 +401,9 @@ class CoreApp:
         assert self._sessions is not None
         cmd = SessionGetHistoryCommand.model_validate(params)
         messages = await self._sessions.get_history(cmd.session_id)
-        return SessionGetHistoryResult(messages=messages)
+        return SessionGetHistoryResult(
+            messages=messages, last_usage=await self._sessions.last_usage(cmd.session_id),
+        )
 
     # 修改当前 session 的 memory 检索和候选生成开关
     async def _session_set_memory_handler(self, params: dict[str, Any]) -> SessionSetMemoryResult:
@@ -473,6 +482,33 @@ class CoreApp:
         cmd = SessionCompactCommand.model_validate(params)
         result = await self._sessions.compact(cmd.session_id, cmd.focus)
         return result  # type: ignore[no-any-return]
+
+    # 列出会话的文件修改记录，包括中断提交的核对状态
+    async def _file_history_list_handler(self, params: dict[str, Any]) -> FileHistoryListResult:
+        assert self._sessions is not None
+        cmd = FileHistoryListCommand.model_validate(params)
+        result = await self._sessions.file_history(cmd.session_id, "list")
+        return FileHistoryListResult.model_validate(result)
+
+    # 返回历史中一次文件修改的文字差异
+    async def _file_history_diff_handler(self, params: dict[str, Any]) -> FileHistoryDiffResult:
+        assert self._sessions is not None
+        cmd = FileHistoryDiffCommand.model_validate(params)
+        result = await self._sessions.file_history(
+            cmd.session_id, "diff", cmd.change_id, from_change_id=cmd.from_change_id,
+        )
+        return FileHistoryDiffResult.model_validate(result)
+
+    # 校验当前文件版本后恢复一次修改，支持只读预览
+    async def _file_history_restore_handler(
+        self, params: dict[str, Any]
+    ) -> FileHistoryRestoreResult:
+        assert self._sessions is not None
+        cmd = FileHistoryRestoreCommand.model_validate(params)
+        result = await self._sessions.file_history(
+            cmd.session_id, "restore", cmd.change_id, cmd.dry_run
+        )
+        return FileHistoryRestoreResult.model_validate(result)
 
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
@@ -621,6 +657,7 @@ class CoreApp:
         self._bus.subscribe(self._broadcaster.handle)
         self._sessions_root = Path(self._config.session.dir).expanduser().resolve()
         store = SessionStore(self._sessions_root)
+        await asyncio.to_thread(recover_file_histories, self._sessions_root)
         self._task_manager = SubagentTaskManager(store.tasks_dir)
         logger.info("sessions: root=%s", self._sessions_root)
         self._memory_store = MemoryStore(Path(self._config.memory.dir).expanduser())
@@ -696,6 +733,9 @@ class CoreApp:
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("file_history.list", self._file_history_list_handler)
+        server.register("file_history.diff", self._file_history_diff_handler)
+        server.register("file_history.restore", self._file_history_restore_handler)
         server.register("memory.search", self._memory_search_handler)
         server.register("memory.list", self._memory_list_handler)
         server.register("memory.delete", self._memory_delete_handler)

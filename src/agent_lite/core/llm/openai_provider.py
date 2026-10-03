@@ -13,6 +13,7 @@ import openai
 
 from agent_lite.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
 from agent_lite.core.events.bus import EventBus
+from agent_lite.core.llm.assets import expand_assets
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 
 _DEFAULT_CONTEXT_WINDOW = 200_000
@@ -51,6 +52,7 @@ def _convert_messages(
     messages: list[dict[str, object]],
     system: str | None,
 ) -> list[dict[str, object]]:
+    messages = expand_assets(messages)
     converted: list[dict[str, object]] = [
         {"role": "system", "content": system or _SYSTEM_PROMPT},
     ]
@@ -103,11 +105,31 @@ def _convert_messages(
                 continue
             block = raw_block
             if block.get("type") == "tool_result":
+                tool_content = block.get("content", "")
+                if isinstance(tool_content, list):
+                    rendered: list[str] = []
+                    for part in tool_content:
+                        if part.get("type") == "text":
+                            rendered.append(str(part.get("text", "")))
+                        elif part.get("type") == "image":
+                            source = part.get("source", {})
+                            if source.get("type") == "base64":
+                                image_parts.extend([
+                                    {"type": "text", "text": (
+                                        f"Tool result {block.get('tool_use_id')}: "
+                                        + (rendered[-1] if rendered else "PDF page")
+                                    )},
+                                    {"type": "image_url", "image_url": {
+                                        "url": (f"data:{source['media_type']};base64,"
+                                                f"{source['data']}"),
+                                    }},
+                                ])
+                    tool_content = "\n".join(rendered)
                 converted.append(
                     {
                         "role": "tool",
                         "tool_call_id": str(block.get("tool_use_id", "")),
-                        "content": str(block.get("content", "")),
+                        "content": str(tool_content),
                     }
                 )
             elif block.get("type") == "text":

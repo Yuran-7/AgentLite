@@ -12,6 +12,38 @@ from agent_lite.core.session.store import SessionStore
 SESSION_ID = "sess-20260815-000000-0123456789ab"
 
 
+# 功能：从会话尾部恢复最后一次主运行水位，跳过子 Agent、缺失字段和损坏记录。
+# 设计：跨块 UTF-8 长日志和无末尾换行覆盖反向读取边界，同时验证零水位和旧日志布局。
+def test_last_usage_reads_latest_main_output_across_log_chunks(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    folder = store.session_dir(SESSION_ID)
+    folder.mkdir(parents=True)
+    path = store.events_file(SESSION_ID)
+    events = [
+        {"type": "llm.usage", "run_id": "main", "context_pct": .40},
+        {"type": "llm.usage", "run_id": "main", "context_pct": .62,
+         "context_window_estimated": True, "input_tokens": 62000},
+        {"type": "llm.token", "run_id": "main", "token": "正文" * 20_000},
+        {"type": "llm.usage", "run_id": "child", "context_pct": .99},
+        {"type": "llm.usage", "run_id": "main"},
+        {"type": "llm.usage", "run_id": "main", "context_pct": True},
+    ]
+    path.write_text("\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+                    + "\nbroken", encoding="utf-8")
+    usage = store.last_usage(SESSION_ID, ["main"])
+    assert usage is not None and usage["context_pct"] == .62
+    assert usage["input_tokens"] == 62000 and usage["context_window_estimated"]
+    assert store.last_usage(SESSION_ID, []) is None
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write('\n{"type":"llm.usage","run_id":"main","context_pct":0}')
+    assert store.last_usage(SESSION_ID, ["main"]) == {"context_pct": 0}
+    path.unlink()
+    legacy = folder / "runs" / "main"
+    legacy.mkdir(parents=True)
+    (legacy / "events.jsonl").write_text(json.dumps(events[1]), encoding="utf-8")
+    assert store.last_usage(SESSION_ID, ["main"]) == usage
+
+
 # 功能：展示历史保留运行标识与真实耗时，破损日志不影响恢复，也不污染模型上下文。
 # 设计：写入真实 thread 和新旧日志布局，覆盖多轮、缺失结束时间及无效日期。
 def test_history_preserves_run_timing_without_changing_model_messages(tmp_path: Path) -> None:

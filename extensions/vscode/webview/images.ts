@@ -17,7 +17,7 @@ export function installImages(input: HTMLTextAreaElement, changed: () => void) {
       const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', `移除 ${image.name}`);
       remove.disabled = input.disabled;
       remove.onclick = () => { images.splice(index, 1); render(); changed(); };
-      item.title = image.name; item.append(img, remove); preview.append(item);
+      item.append(img, remove); preview.append(item);
     });
   };
   const add = async (files: File[]) => {

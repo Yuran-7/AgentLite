@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { CoreEvent, Decision, ImageAttachment } from './protocol';
 import type { Bookmark } from './bookmarks';
+import { summarizeChanges, type FileChange, type FileSummary } from './file-changes';
 
 export type Card = {
-  id: string; kind: 'user' | 'assistant' | 'tool' | 'permission' | 'plan' | 'notice' | 'subagent';
+  id: string; kind: 'user' | 'assistant' | 'tool' | 'permission' | 'plan' | 'notice' | 'subagent' | 'files';
+  fileSummary?: FileSummary;
   runId?: string; text: string; title?: string; status?: string; params?: unknown;
   output?: string; elapsedMs?: number; toolUseId?: string; createdAt?: string; workMs?: number; completed?: boolean;
   images?: ImageAttachment[];
@@ -23,6 +25,7 @@ export type ChatState = {
   connectionStartedAt?: number; connectionElapsedMs?: number;
   busy: boolean; sending: boolean; cancelling: boolean; error?: string;
   model: string; usage: string; cards: Card[]; workStartedAt?: number;
+  contextPercent?: number; contextEstimated?: boolean; compacting?: boolean;
 };
 export type SessionSummary = { session_id: string; title: string; updated_at: string; workspace_root?: string };
 export type ModelProfile = { id: string; name?: string; model: string; protocol: string };
@@ -51,6 +54,77 @@ export class ChatSession {
   private explicitModel = false;
   private modelError?: string;
   private runStarts = new Map<string, number>();
+  private fileRefresh = Promise.resolve();
+  private fileDiffs = new Map<string, string>();
+  private fileRecords: FileChange[] = [];
+  private undoing = false;
+
+  // 串行刷新真实文件历史，迟到的旧会话响应不能覆盖当前页面。
+  refreshFileChanges(): Promise<void> {
+    const epoch = this.epoch; const sessionId = this.state.sessionId;
+    this.fileRefresh = this.fileRefresh.then(async () => {
+      if (!this.client || !sessionId || epoch !== this.epoch || this.disposed) return;
+      try {
+        const result = await this.client.request('file_history.list', { session_id: sessionId });
+        const records = (Array.isArray(result.changes) ? result.changes : []) as FileChange[];
+        const firstChanges = new Map<string, string>();
+        const diffs = new Map<string, string>();
+        for (const record of records) {
+          if (record.status !== 'committed' || record.operation === 'restore' || !record.run_id) continue;
+          const group = `${record.run_id}:${record.path}`;
+          if (!firstChanges.has(group)) firstChanges.set(group, record.id);
+          const first = firstChanges.get(group)!;
+          const key = `${sessionId}:${first}:${record.id}`;
+          if (!this.fileDiffs.has(key)) {
+            const response = await this.client.request('file_history.diff', {
+              session_id: sessionId, change_id: record.id, from_change_id: first
+            });
+            this.fileDiffs.set(key, String(response.diff ?? ''));
+          }
+          diffs.set(record.id, this.fileDiffs.get(key)!);
+        }
+        if (epoch !== this.epoch || this.disposed) return;
+        this.fileRecords = records;
+        const summaries = summarizeChanges(records, diffs);
+        for (const [runId, summary] of summaries) {
+          const card = this.state.cards.find(item => item.kind === 'files' && item.runId === runId);
+          if (card) card.fileSummary = { ...summary, busy: card.fileSummary?.busy, error: card.fileSummary?.error };
+          else this.state.cards.push({ id: `files:${runId}`, kind: 'files', text: '', runId, fileSummary: summary });
+        }
+        this.publish();
+      } catch (error) {
+        if (epoch === this.epoch && !this.errorText(error).includes('Method not found')) this.report(error);
+      }
+    });
+    return this.fileRefresh;
+  }
+
+  // 只查看宿主已加载的当前会话记录，不接受页面提供的路径或补丁。
+  fileChangesDiff(cardId: string, path?: string): string | undefined {
+    const card = this.state.cards.find(item => item.id === cardId && item.kind === 'files');
+    if (!card?.fileSummary || !this.state.sessionId) return;
+    const files = card.fileSummary.files.filter(file => !path || file.path === path);
+    return files.map(file => {
+      const records = this.fileRecords.filter(record => record.path === file.path && record.run_id === card.runId && record.operation !== 'restore' && record.status === 'committed');
+      return this.fileDiffs.get(`${this.state.sessionId}:${records[0]?.id}:${records.at(-1)?.id}`) ?? '';
+    }).join('\n');
+  }
+
+  // 逆序撤销本轮尚未恢复的记录，遇到外部修改冲突立即停止并显示部分结果。
+  async undoFileChanges(cardId: string): Promise<void> {
+    const card = this.state.cards.find(item => item.id === cardId && item.kind === 'files');
+    if (!this.client || this.state.connection !== 'ready' || this.disposed || !card?.fileSummary || card.fileSummary.undone || this.undoing || this.state.busy || this.state.sending || this.switching) return;
+    this.undoing = true; card.fileSummary.busy = true; card.fileSummary.error = undefined; this.publish();
+    const ids = new Set(card.fileSummary.files.flatMap(file => file.changeIds));
+    try {
+      for (const record of this.fileRecords.filter(item => ids.has(item.id)).reverse()) {
+        await this.client.request('file_history.restore', { session_id: this.state.sessionId, change_id: record.id }, 120_000);
+        card.fileSummary.files.forEach(file => { file.changeIds = file.changeIds.filter(id => id !== record.id); });
+      }
+      card.fileSummary.undone = true;
+    } catch (error) { card.fileSummary.error = `撤销未完成：${this.errorText(error)}`; }
+    finally { this.undoing = false; card.fileSummary.busy = false; await this.refreshFileChanges(); this.publish(); }
+  }
 
   // 在扩展宿主维护完整展示状态，页面重建时无需重新订阅或重放。
   constructor(workspace: string, private readonly changed: (state: ChatState) => void,
@@ -122,7 +196,7 @@ export class ChatSession {
 
   // 原子切换到已订阅的新会话，失败后禁用发送以防误用旧订阅。
   async newSession(): Promise<void> {
-    if (!this.client || this.state.busy || this.state.sending || this.disposed || this.switching) return;
+    if (!this.client || this.state.busy || this.state.sending || this.undoing || this.disposed || this.switching) return;
     this.switching = true;
     try {
       this.connecting();
@@ -146,6 +220,7 @@ export class ChatSession {
       this.finishConnection();
       this.state.title = '新会话'; this.state.selectedModel = undefined; this.explicitModel = false;
       this.state.model = ''; this.state.usage = ''; this.state.runId = undefined;
+      this.state.contextPercent = undefined; this.state.contextEstimated = undefined;
       this.streams.clear(); this.children.clear(); this.runStarts.clear(); this.state.workStartedAt = undefined; this.publish();
       if (previous) await this.client.request('session.close', { session_id: previous }, 1500).catch(() => {});
       await this.refreshHistory(); await this.refreshModels();
@@ -219,6 +294,26 @@ export class ChatSession {
 
   mcpSettingsSaved(): void { this.state.mcpNeedsReload = true; this.publish(); }
 
+  // 手动压缩当前会话，锁定重复操作并保留页面聊天记录。
+  async compactSession(): Promise<void> {
+    if (!this.client || !this.state.sessionId || this.state.connection !== 'ready' || this.disposed ||
+        this.state.busy || this.state.sending || this.undoing || this.switching || this.state.mcpBusy) return;
+    const epoch = this.epoch;
+    this.state.sending = true; this.state.compacting = true; this.state.error = undefined; this.publish();
+    try {
+      const result = await this.client.request('session.compact', { session_id: this.state.sessionId }, 120_000);
+      if (epoch !== this.epoch || this.disposed) return;
+      this.add('notice', `上下文已压缩，节省约 ${Number(result.saved_tokens ?? 0).toLocaleString()} tokens；聊天记录仍可查看。`);
+    } catch (error) {
+      if (epoch === this.epoch && !this.disposed) {
+        const text = this.errorText(error);
+        this.state.error = text.includes('Method not found') ? '当前 core 不支持手动压缩，请重启 core 后重试。' : `上下文压缩失败：${text}`;
+      }
+    } finally {
+      if (epoch === this.epoch && !this.disposed) { this.state.sending = false; this.state.compacting = false; this.publish(); }
+    }
+  }
+
   async selectModel(modelId: string): Promise<void> {
     if (!this.client || this.state.connection !== 'ready' || this.state.busy || this.state.sending) return;
     this.state.sending = true; this.publish();
@@ -237,7 +332,7 @@ export class ChatSession {
   }
 
   async resumeSession(sessionId: string): Promise<void> {
-    if (!this.client || this.switching || this.state.connection !== 'ready' || this.state.busy || this.state.sending ||
+    if (!this.client || this.switching || this.undoing || this.state.connection !== 'ready' || this.state.busy || this.state.sending ||
         !this.state.history?.some(item => item.session_id === sessionId)) return;
     if (sessionId === this.state.sessionId) return;
     this.switching = true;
@@ -256,16 +351,18 @@ export class ChatSession {
       this.state.selectedModel = typeof resumed.model_id === 'string' ? resumed.model_id : undefined;
       this.explicitModel = typeof resumed.model_id === 'string';
       this.state.model = ''; this.state.usage = ''; this.state.error = undefined;
+      this.state.contextPercent = undefined; this.state.contextEstimated = undefined;
+      if (history.last_usage && typeof history.last_usage === 'object') this.applyUsage(history.last_usage as Record<string, unknown>);
       this.state.runId = undefined; this.state.connection = 'ready'; this.publish();
       if (previous && previous !== sessionId) await this.client.request('session.close', { session_id: previous }, 1500).catch(() => {});
-      await this.refreshModels(); await this.refreshHistory();
+      await this.refreshModels(); await this.refreshHistory(); await this.refreshFileChanges();
     } catch (error) { this.fail(this.errorText(error)); }
     finally { this.switching = false; }
   }
 
   // 发送任务时锁定输入，等待整轮 RPC 响应但让事件立即驱动显示。
   async send(content: string, images: ImageAttachment[] = []): Promise<void> {
-    if (!this.client || this.state.connection !== 'ready' || this.state.busy || this.state.sending || this.state.mcpBusy || (!content.trim() && !images.length)) return;
+    if (!this.client || this.state.connection !== 'ready' || this.state.busy || this.state.sending || this.undoing || this.state.mcpBusy || (!content.trim() && !images.length)) return;
     const epoch = this.epoch;
     this.state.busy = true; this.state.sending = true; this.state.error = undefined;
     this.state.workStartedAt = Date.now();
@@ -383,6 +480,7 @@ export class ChatSession {
       const card = this.state.cards.findLast(item => item.kind === 'tool' && item.toolUseId === toolId);
       if (card) Object.assign(card, { status: type.endsWith('failed') ? 'failed' : 'success',
         output: String(event.output ?? event.error_message ?? ''), elapsedMs: Number(event.elapsed_ms ?? 0) });
+      if (type === 'tool.call_finished' && ['write_file', 'edit_file', 'spawn_agent'].includes(String(event.tool_name ?? card?.title))) void this.refreshFileChanges();
     } else if (type === 'permission.requested') {
       Object.assign(this.add('permission', String(event.param_preview ?? ''), runId), {
         toolUseId: toolId, title: String(event.tool_name), params: event.params, status: 'pending'
@@ -397,14 +495,12 @@ export class ChatSession {
     } else if (type === 'llm.model_selected' && !this.children.has(runId)) {
       this.state.model = String(event.model ?? '');
     } else if (type === 'llm.usage' && !this.children.has(runId)) {
-      const input = event.total_input_tokens ?? event.input_tokens ?? 0;
-      const pct = (Number(event.context_pct ?? 0) * 100).toFixed(1);
-      const estimated = event.context_window_estimated ? '≈' : '';
-      this.state.usage = `输入 ${input} · 输出 ${event.output_tokens ?? 0} · 缓存 ${event.cache_read_input_tokens ?? 0} · 上下文 ${estimated}${pct}%`;
+      this.applyUsage(event);
     } else if (type === 'subagent.finished') {
       const card = this.state.cards.findLast(item => item.kind === 'subagent' && item.runId === runId);
       if (card) card.status = String(event.status);
     } else if (type === 'run.finished') {
+      void this.refreshFileChanges();
       const started = this.runStarts.get(runId);
       const answer = this.state.cards.findLast(card => card.kind === 'assistant' && card.runId === runId);
       if (answer) answer.completed = true;
@@ -425,6 +521,19 @@ export class ChatSession {
       this.add('notice', `${event.level}: ${event.message ?? ''}`, runId);
     }
     this.publish();
+  }
+
+  // 从实时事件或会话历史恢复最近一次主对话输出的用量和上下文水位。
+  private applyUsage(usage: Record<string, unknown>): void {
+    if (typeof usage.context_pct === 'number' && Number.isFinite(usage.context_pct) && usage.context_pct >= 0) {
+      this.state.contextPercent = usage.context_pct * 100;
+      this.state.contextEstimated = !!usage.context_window_estimated;
+    }
+    const input = usage.total_input_tokens ?? usage.input_tokens ?? 0;
+    const pct = this.state.contextPercent?.toFixed(1);
+    const estimated = this.state.contextEstimated ? '≈' : '';
+    this.state.usage = `输入 ${input} · 输出 ${usage.output_tokens ?? 0} · 缓存 ${usage.cache_read_input_tokens ?? 0}`
+      + (pct === undefined ? '' : ` · 上下文 ${estimated}${pct}%`);
   }
 
   // 新建有稳定标识的卡片供页面增量更新。
@@ -486,7 +595,10 @@ export function historyCards(messages: unknown[]): Card[] {
       } else if (block.type === 'tool_result') {
         const card = tools.get(String(block.tool_use_id));
         if (card) {
-          card.output = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
+          card.output = typeof block.content === 'string' ? block.content : Array.isArray(block.content)
+            ? (block.content as Array<Record<string, unknown>>).filter(part => part?.type === 'text')
+              .map(part => String(part.text ?? '')).join('\n')
+            : JSON.stringify(block.content, null, 2);
           card.status = block.is_error ? 'failed' : 'success';
         }
       }

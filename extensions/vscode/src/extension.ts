@@ -11,6 +11,7 @@ import { webviewHtml } from './html';
 import { BookmarkStore } from './bookmarks';
 import { ArchiveStore } from './archives';
 import { codeBlocks } from './code-blocks';
+import { PreviewDocuments } from './preview-documents';
 
 let provider: ChatProvider | undefined;
 
@@ -43,11 +44,13 @@ class ChatProvider implements vscode.WebviewViewProvider {
   private viewSubscriptions: vscode.Disposable[] = [];
   private readonly bookmarks: BookmarkStore;
   private readonly archives: ArchiveStore;
+  private readonly previews: PreviewDocuments;
 
   // 保存插件资源和日志目录，不在页面中暴露进程控制能力。
   constructor(private readonly context: vscode.ExtensionContext) {
     this.bookmarks = new BookmarkStore(context.workspaceState);
     this.archives = new ArchiveStore(context.workspaceState);
+    this.previews = new PreviewDocuments(context);
   }
 
   // 创建受 CSP 限制的页面；页面就绪后发送宿主状态快照。
@@ -86,6 +89,19 @@ class ChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'openLogs') { await this.openLogs(); return; }
+    if (message.type === 'viewFileChanges' || message.type === 'undoFileChanges') {
+      const session = this.session;
+      if (!session) return;
+      try {
+        if (message.type === 'undoFileChanges') await session.undoFileChanges(message.cardId);
+        else {
+          const diff = session.fileChangesDiff(message.cardId, message.path);
+          if (diff === undefined) return;
+          await this.previews.open(`changes:${message.cardId}:${message.path ?? ''}`, '文件更改.diff', diff || '没有文本差异', 'diff');
+        }
+      } catch (error) { session.report(error); }
+      return;
+    }
     if (message.type === 'archiveSession' || message.type === 'restoreSession') {
       if (!this.session) return;
       try {
@@ -116,8 +132,7 @@ class ChatProvider implements vscode.WebviewViewProvider {
           const aliases: Record<string, string> = { py: 'python', js: 'javascript', ts: 'typescript', ps1: 'powershell', sh: 'shellscript', bash: 'shellscript' };
           const language = aliases[block.language] ?? block.language;
           const languages = await vscode.languages.getLanguages();
-          const document = await vscode.workspace.openTextDocument({ content: block.text, language: languages.includes(language) ? language : 'plaintext' });
-          await vscode.window.showTextDocument(document, { preview: false });
+          await this.previews.open(`code:${card.id}:${message.blockIndex}`, '代码片段', block.text, languages.includes(language) ? language : 'plaintext');
         }
       } catch (error) { this.session?.report(error); }
       return;
@@ -132,8 +147,7 @@ class ChatProvider implements vscode.WebviewViewProvider {
           vscode.window.setStatusBarMessage('已复制', 2000);
           this.post({ type: 'copied', cardId: card.id });
         } else {
-          const document = await vscode.workspace.openTextDocument({ content: card.text, language: 'markdown' });
-          await vscode.window.showTextDocument(document, { preview: false });
+          await this.previews.open(`answer:${card.id}`, '回答.md', card.text, 'markdown');
         }
       } catch (error) { this.session?.report(error); }
       return;
@@ -144,7 +158,8 @@ class ChatProvider implements vscode.WebviewViewProvider {
         if (!this.session?.state.busy && !this.session?.state.sending) await this.connect();
       } else if (message.type === 'newSession') {
         if (this.session?.state.connection === 'ready') await this.session.newSession();
-      } else if (message.type === 'send') await this.session?.send(message.content, message.images);
+      } else if (message.type === 'compactSession') await this.session?.compactSession();
+      else if (message.type === 'send') await this.session?.send(message.content, message.images);
       else if (message.type === 'refreshHistory') await this.session?.refreshHistory();
       else if (message.type === 'refreshModels') await this.session?.refreshModels();
       else if (message.type === 'resumeSession') await this.session?.resumeSession(message.sessionId);

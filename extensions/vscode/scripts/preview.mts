@@ -33,6 +33,21 @@ if (process.argv.includes('--greeting')) {
   state.usage = '';
 }
 if (process.argv.includes('--empty')) { state.cards = []; state.usage = ''; state.title = '新会话'; }
+if (process.argv.includes('--file-changes')) {
+  state.workspace = 'C:\\Users\\HuanZhu\\Desktop\\AgentLite';
+  state.cards = [
+    { id: 'user', kind: 'user', text: '改进文件操作与历史记录。' },
+    { id: 'answer', kind: 'assistant', text: '已更新文件操作和历史接口。', runId: 'file-preview', completed: true, workMs: 42000 },
+    { id: 'files:file-preview', kind: 'files', text: '', runId: 'file-preview', fileSummary: {
+      undone: false, files: [
+        { path: `${state.workspace}\\src\\agent_lite\\core\\tools\\file_operations.py`, added: 29, removed: 8, changeIds: ['a'] },
+        { path: `${state.workspace}\\src\\agent_lite\\core\\bus\\commands.py`, added: 1, removed: 0, changeIds: ['b'] },
+        { path: `${state.workspace}\\src\\agent_lite\\core\\tools\\base.py`, added: 1, removed: 1, changeIds: ['c'] },
+        { path: `${state.workspace}\\extensions\\vscode\\src\\session.ts`, added: 10, removed: 0, changeIds: ['d'] },
+      ],
+    } },
+  ];
+}
 if (process.argv.includes('--bookmarks')) {
   const answer = state.cards.find(card => card.kind === 'assistant');
   if (answer) {

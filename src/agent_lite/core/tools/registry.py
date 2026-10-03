@@ -35,3 +35,8 @@ class ToolRegistry:
                 await tool.aclose()
             except Exception:
                 continue
+
+    # 压缩后通知文件工具清除阅读资格和去重缓存
+    def clear_read_context(self) -> None:
+        for tool in self._tools.values():
+            tool.clear_read_context()

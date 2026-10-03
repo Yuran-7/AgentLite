@@ -19,6 +19,7 @@ from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.types import ToolCallBlock
 from agent_lite.core.tools.base import ToolResult
 from agent_lite.core.tools.errors import RateLimitedError
+from agent_lite.core.tools.file_operations import FileOperationError
 from agent_lite.core.tools.registry import ToolRegistry
 from agent_lite.core.tools.result_storage import ToolResultStore
 
@@ -161,6 +162,7 @@ async def invoke_tool(
         error_message: str | None = None
 
         try:
+            tool.set_call_context(run_id, tool_call.id)
             result = await asyncio.wait_for(
                 tool.invoke(dict(tool_call.input)), timeout=timeout
             )
@@ -187,8 +189,15 @@ async def invoke_tool(
                         ts=_now(),
                     )
                 )
-                return ToolResult(content=stored.content)
+                result.content = stored.content
+                result.truncated = result.truncated or stored.truncated
+                result.delivery_truncated = stored.truncated
+                result.output_path = stored.output_path
+                return result
 
+        except FileOperationError as exc:
+            error_class = exc.error_type
+            error_message = str(exc)
         except RateLimitedError as exc:
             error_class = "rate_limited"
             error_message = str(exc)
@@ -199,6 +208,11 @@ async def invoke_tool(
                 attempt=attempt,
                 result_store=result_store, token_budget=token_budget,
             )
+        except (OSError, UnicodeDecodeError) as exc:
+            error_class = (
+                "file_io" if tool_call.name in {"write_file", "edit_file"} else "runtime_error"
+            )
+            error_message = str(exc)
         except Exception as exc:
             error_class = "runtime_error"
             error_message = str(exc)

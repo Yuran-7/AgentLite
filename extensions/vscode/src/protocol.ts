@@ -11,6 +11,9 @@ export type PageMessage =
   | { type: 'copyAnswer' | 'openAnswer' | 'copyMessage'; cardId: string }
   | { type: 'copyCode' | 'openCode'; cardId: string; blockIndex: number }
   | { type: 'toggleBookmark'; cardId: string }
+  | { type: 'viewFileChanges'; cardId: string; path?: string }
+  | { type: 'undoFileChanges'; cardId: string }
+  | { type: 'compactSession' }
   | { type: 'removeBookmark'; bookmarkId: string }
   | { type: 'send'; content: string; images?: ImageAttachment[] }
   | { type: 'permission'; toolUseId: string; decision: Decision };
@@ -19,6 +22,13 @@ export type PageMessage =
 export function parsePageMessage(value: unknown): PageMessage | undefined {
   if (!value || typeof value !== 'object') return;
   const message = value as Record<string, unknown>;
+  if (message.type === 'compactSession') return { type: 'compactSession' };
+  if (['viewFileChanges', 'undoFileChanges'].includes(String(message.type)) &&
+      typeof message.cardId === 'string' && message.cardId.length > 0 && message.cardId.length < 200) {
+    if (message.type === 'undoFileChanges') return { type: 'undoFileChanges', cardId: message.cardId };
+    if (message.path !== undefined && (typeof message.path !== 'string' || !message.path || message.path.length > 32768)) return;
+    return { type: 'viewFileChanges', cardId: message.cardId, path: message.path as string | undefined };
+  }
   if (['copyCode', 'openCode'].includes(String(message.type)) && typeof message.cardId === 'string' &&
       message.cardId.length > 0 && message.cardId.length < 200 && Number.isSafeInteger(message.blockIndex) &&
       Number(message.blockIndex) >= 0 && Number(message.blockIndex) < 10_000) {

@@ -73,6 +73,7 @@ def _param_summary(tool_name: str, params: dict[str, Any], max_len: int = 72) ->
     keys_by_tool = {
         "read_file": ("path",),
         "write_file": ("path",),
+        "edit_file": ("path",),
         "list_dir": ("path", "max_depth"),
         "bash": ("command",),  # legacy sessions
         "shell": ("command",),
@@ -319,7 +320,8 @@ class PermissionSelect(Static):
 
     # 焦点到达时记录，用于确认 focus() 是否真正生效
     def on_focus(self, event: events.Focus) -> None:
-        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r", self.has_focus, self.app.focused)
+        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r",
+                  self.has_focus, self.app.focused)
 
     # 焦点离开时记录，用于追踪是否被其他控件抢走焦点
     def on_blur(self, event: events.Blur) -> None:
@@ -859,12 +861,18 @@ class AgentLiteTuiApp(App[None]):
     """
 
     _BANNER = (
-        "[bold cyan] █████╗  ██████╗ ███████╗███╗   ██╗████████╗██╗     ██╗████████╗███████╗[/bold cyan]\n"
-        "[bold cyan]██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██║     ██║╚══██╔══╝██╔════╝[/bold cyan]\n"
-        "[bold cyan]███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ██║     ██║   ██║   █████╗  [/bold cyan]\n"
-        "[bold cyan]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██║     ██║   ██║   ██╔══╝  [/bold cyan]\n"
-        "[bold cyan]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████╗██║   ██║   ███████╗[/bold cyan]\n"
-        "[bold cyan]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝   ╚═╝   ╚══════╝[/bold cyan]\n"
+        "[bold cyan] █████╗  ██████╗ ███████╗███╗   ██╗████████╗"
+        "██╗     ██╗████████╗███████╗[/bold cyan]\n"
+        "[bold cyan]██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝"
+        "██║     ██║╚══██╔══╝██╔════╝[/bold cyan]\n"
+        "[bold cyan]███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   "
+        "██║     ██║   ██║   █████╗  [/bold cyan]\n"
+        "[bold cyan]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   "
+        "██║     ██║   ██║   ██╔══╝  [/bold cyan]\n"
+        "[bold cyan]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   "
+        "███████╗██║   ██║   ███████╗[/bold cyan]\n"
+        "[bold cyan]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   "
+        "╚══════╝╚═╝   ╚═╝   ╚══════╝[/bold cyan]\n"
         "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 停止/退出[/dim]"
     )
 
@@ -2169,10 +2177,11 @@ class AgentLiteTuiApp(App[None]):
             self._append(perm_block)
             select = PermissionSelect(tool_use_id)
             self._mount_permission_select(select)
-            log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
+            log.debug("PermissionSelect mounted before #prompt  pending=%d",
+                      len(self._pending_permission_blocks))
 
         elif t == "permission.denied":
-            # 处理超时或断连等非用户交互触发的 deny（用户主动 deny 已由 on_permission_select_decided 处理）
+            # 处理超时或断连触发的 deny，主动拒绝由控件回调处理
             tool_use_id = str(event.get("tool_use_id", ""))
             decision = str(event.get("decision", "denied"))
             if tool_use_id in self._pending_permission_blocks:

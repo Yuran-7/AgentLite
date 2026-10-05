@@ -22,7 +22,8 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("ping", help="Ping the core daemon")
-    subparsers.add_parser("chat", help="Start a multi-turn chat session")
+    chat_parser = subparsers.add_parser("chat", help="Start a multi-turn chat session")
+    chat_parser.add_argument("--permission-mode", choices=["manual", "accept_edits", "auto"])
 
     history_parser = subparsers.add_parser("history", help="View or restore file changes")
     history_sub = history_parser.add_subparsers(dest="history_command", required=True)
@@ -35,6 +36,7 @@ def main() -> None:
             action_parser.add_argument("--dry-run", action="store_true")
 
     run_parser = subparsers.add_parser("run", help="Run an agent task")
+    run_parser.add_argument("--permission-mode", choices=["manual", "accept_edits", "auto"])
     run_parser.add_argument("--goal", required=True, help="Goal for the agent to accomplish")
 
     core_parser = subparsers.add_parser("core", help="Manage the core daemon")
@@ -66,9 +68,10 @@ def main() -> None:
     if args.command == "ping":
         cmd_ping(config)  # 进入cmd_ping之后，我们从同步CLI世界切换到异步网络I/O
     elif args.command == "chat":
-        cmd_chat(config, workspace_root=workspace_root)
+        cmd_chat(config, workspace_root=workspace_root, permission_mode=args.permission_mode)
     elif args.command == "run":
-        cmd_run(args.goal, config, workspace_root=workspace_root)
+        cmd_run(args.goal, config, workspace_root=workspace_root,
+                permission_mode=args.permission_mode)
     elif args.command == "core":
         if args.core_command == "start":
             cmd_core_start(config)

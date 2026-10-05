@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from agent_lite.core.config import AgentLiteConfig
+from agent_lite.core.permissions.types import PermissionMode
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
 
 
@@ -71,6 +72,7 @@ async def _run_async(
     goal: str,
     config: AgentLiteConfig,
     workspace_root: str | None = None,
+    permission_mode: PermissionMode | None = None,
 ) -> int:
     client = SocketClient(config.host, config.port)
     try:
@@ -105,6 +107,8 @@ async def _run_async(
         run_params: dict[str, Any] = {"goal": goal}
         if workspace_root is not None:
             run_params["workspace_root"] = workspace_root
+        if permission_mode is not None:
+            run_params["permission_mode"] = permission_mode
         await client.send_command("agent.run", run_params)  # 再触发 agent run
     except IpcError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -129,9 +133,10 @@ def cmd_run(
     goal: str,
     config: AgentLiteConfig,
     workspace_root: str | None = None,
+    permission_mode: PermissionMode | None = None,
 ) -> None:
     try:
-        exit_code = asyncio.run(_run_async(goal, config, workspace_root))
+        exit_code = asyncio.run(_run_async(goal, config, workspace_root, permission_mode))
     except KeyboardInterrupt:
         sys.exit(130)
     sys.exit(exit_code)

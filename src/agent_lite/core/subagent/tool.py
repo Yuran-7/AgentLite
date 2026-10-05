@@ -32,7 +32,7 @@ from agent_lite.core.tools.result_storage import ToolResultStore
 if TYPE_CHECKING:
     from agent_lite.core.config import WebConfig
     from agent_lite.core.llm.base import LLMProvider
-    from agent_lite.core.permissions.manager import PermissionManager
+    from agent_lite.core.permissions.manager import PermissionContext, PermissionManager
 
 
 def _now() -> str:
@@ -70,12 +70,14 @@ class SpawnAgentTool(BaseTool):
         extra_tools: list[BaseTool] | None = None,
         result_store: ToolResultStore | None = None,
         file_session_dir: Path | None = None,
+        permission_context: PermissionContext | None = None,
     ) -> None:
         self._provider = provider
         self._provider_factory = provider_factory
         self._parent_bus = parent_bus
         self._parent_run_id = parent_run_id
         self._permission_manager = permission_manager
+        self._permission_context = permission_context
         self._max_steps = max_steps
         self._task_manager = task_manager
         self._session_id = session_id
@@ -200,6 +202,7 @@ class SpawnAgentTool(BaseTool):
             child_registry,
             child_bus,
             permission_manager=self._permission_manager,
+            permission_context=self._permission_context,
             session_id=self._session_id,
             task_manager=self._task_manager,
             result_store=self._result_store,
@@ -351,6 +354,7 @@ class SpawnAgentTool(BaseTool):
                     parent_bus=child_bus,
                     parent_run_id=child_run_id,
                     permission_manager=self._permission_manager,
+                    permission_context=self._permission_context,
                     max_steps=self._max_steps,
                     task_manager=self._task_manager,
                     session_id=self._session_id,

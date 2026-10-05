@@ -143,7 +143,10 @@ def test_literal_key_in_env_reference_is_rejected_without_disclosure(tmp_path):
         assert 'MY_MODEL_API_KEY' in str(exc.value)
 
 
-async def test_runner_uses_session_profile_for_main_and_child_providers(tmp_path, monkeypatch):
+# 功能：主代理与子代理使用会话选中的模型及 OpenAI 接口模式。
+# 设计：两种模式共用 runner 路径，检查子代理替换模型名时仍保留接口选择。
+@pytest.mark.parametrize("mode", ["chat_completions", "responses"])
+async def test_runner_uses_session_profile_for_main_and_child_providers(tmp_path, monkeypatch, mode):
     from agent_lite.core.config import AgentLiteConfig
     from agent_lite.core.events.bus import EventBus
     from agent_lite.core.llm.types import LlmResponse
@@ -163,24 +166,29 @@ async def test_runner_uses_session_profile_for_main_and_child_providers(tmp_path
     manager = SessionManager(store, lambda: None, EventBus())
     session = await manager.create("chat", workspace_root=str(tmp_path))
     session.model_id = "test"
+    session.reasoning_effort = "high"
     store.append_message(session.id, "user", "hello")
     runner = AgentRunner(config, events_file=tmp_path / "events.jsonl")
     with patch("pathlib.Path.home", return_value=tmp_path):
         write_settings(tmp_path, {"models": [{"id": "test", "model": "chosen-model",
                        "protocol": "openai", "baseUrl": "https://example.test/v1",
-                       "apiKeyEnv": "RUNNER_MODEL_KEY"}]})
+                       "apiKeyEnv": "RUNNER_MODEL_KEY", "apiMode": mode}]})
         with patch("agent_lite.core.runner.create_llm_provider", return_value=Provider()) as factory:
             outcome = await runner.run_and_capture("hello", session=session, store=store)
             assert outcome.status == "success"
             selected = factory.call_args.args[0]
             assert selected.default_model == "chosen-model"
             assert selected.protocol == "openai"
+            assert selected.api_mode == mode
+            assert selected.reasoning_effort == "high"
             assert selected.api_key == "runner-secret"
             runner._create_provider("child-model", session)
             child = factory.call_args.args[0]
             assert child.default_model == "child-model"
             assert child.base_url == "https://example.test/v1"
             assert child.api_key == "runner-secret"
+            assert child.api_mode == mode
+            assert child.reasoning_effort == "high"
 
 
 async def test_core_can_start_before_model_credentials_are_configured(tmp_path, monkeypatch):
@@ -263,4 +271,27 @@ def test_reject_invalid_profile_context_window(tmp_path, monkeypatch, window):
     write_settings(tmp_path, {"models": [{"id": "custom", "model": "custom",
         "protocol": "openai", "contextWindow": window}]})
     with pytest.raises(ValueError, match="contextWindow"):
+        model_settings()
+
+
+# 功能：settings.json 模式选择传递到运行时，旧配置保留 Chat Completions。
+# 设计：覆盖省略字段及两个合法模式，并防止配置继承其他 profile 的模式。
+@pytest.mark.parametrize("mode", [None, "chat_completions", "responses"])
+def test_profile_api_mode(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("MODE_TEST_KEY", "test")
+    profile = {"id": "test", "model": "test", "protocol": "openai", "apiKeyEnv": "MODE_TEST_KEY"}
+    if mode is not None:
+        profile["apiMode"] = mode
+    write_settings(tmp_path, {"models": [profile]})
+    assert resolve_model(LlmConfig(api_mode="responses"), "test", None).api_mode == (mode or "chat_completions")
+
+
+# 功能：拒绝非法模式与 Anthropic 的 OpenAI 模式字段。
+# 设计：覆盖错误枚举、类型及协议组合，确保在发送请求前报告配置问题。
+@pytest.mark.parametrize("protocol,mode", [("openai", "invalid"), ("openai", None), ("anthropic", "responses")])
+def test_reject_invalid_api_mode(tmp_path, monkeypatch, protocol, mode):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    write_settings(tmp_path, {"models": [{"id": "test", "model": "test", "protocol": protocol, "apiMode": mode}]})
+    with pytest.raises(ValueError):
         model_settings()

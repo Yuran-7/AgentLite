@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -7,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+from agent_lite.core.permissions.types import PermissionMode, validate_permission_mode
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7437
@@ -74,6 +77,8 @@ class LlmConfig:
     context_window: int | None = None  # 显式窗口大小；未配置时使用兼容回退
     base_url: str = ""  # 留空时由对应 SDK 的标准环境变量决定
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
+    api_mode: str = "chat_completions"  # OpenAI: "chat_completions" | "responses"
+    reasoning_effort: str = ""  # Empty uses the provider's default.
 
 
 @dataclass
@@ -85,6 +90,10 @@ class TraceConfig:
 
 @dataclass
 class PermissionConfig:
+    default_mode: PermissionMode = "auto"
+    classifier_enabled: bool = True
+    classifier_model: str = ""
+    classifier_timeout_s: float = 20.0
     timeout_s: float = 60.0  # 审批超时秒数；0 表示不超时
 
 
@@ -330,7 +339,32 @@ def _apply_toml(config: AgentLiteConfig, data: dict[str, Any]) -> None:
                 setattr(config.trace, key, val)
 
     if "permission" in data:
-        perm = _config_section(data, "permission", {"timeout_s"})
+        perm = _config_section(data, "permission", {
+            "timeout_s", "default_mode", "classifier_enabled", "classifier_model",
+            "classifier_timeout_s",
+        })
+        if "default_mode" in perm:
+            try:
+                config.permission.default_mode = validate_permission_mode(perm["default_mode"])
+            except ValueError as exc:
+                raise SystemExit("Config error: permission.default_mode is invalid") from exc
+        if "classifier_enabled" in perm:
+            if type(perm["classifier_enabled"]) is not bool:
+                raise SystemExit("Config error: permission.classifier_enabled must be a boolean")
+            config.permission.classifier_enabled = perm["classifier_enabled"]
+        if "classifier_model" in perm:
+            if not isinstance(perm["classifier_model"], str):
+                raise SystemExit(
+                    "Config error: permission.classifier_model must be a model id string"
+                )
+            config.permission.classifier_model = perm["classifier_model"]
+        if "classifier_timeout_s" in perm:
+            value = perm["classifier_timeout_s"]
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise SystemExit(
+                    "Config error: permission.classifier_timeout_s must be finite and > 0"
+                )
+            config.permission.classifier_timeout_s = float(value)
         if "timeout_s" in perm:
             val = perm["timeout_s"]
             if not isinstance(val, (int, float)) or val < 0:
@@ -567,6 +601,32 @@ def _apply_env(config: AgentLiteConfig) -> None:
     trace_payload = os.environ.get("AGENTLITE_TRACE_INCLUDE_LLM_PAYLOAD")
     if trace_payload is not None:
         config.trace.include_llm_payload = trace_payload.lower() not in ("0", "false", "no")
+
+    mode = os.environ.get("AGENTLITE_PERMISSION_DEFAULT_MODE")
+    if mode is not None:
+        try:
+            config.permission.default_mode = validate_permission_mode(mode)
+        except ValueError as exc:
+            raise SystemExit("Config error: AGENTLITE_PERMISSION_DEFAULT_MODE is invalid") from exc
+    enabled = os.environ.get("AGENTLITE_PERMISSION_CLASSIFIER_ENABLED")
+    if enabled is not None:
+        if enabled.lower() not in {"true", "false", "1", "0", "yes", "no"}:
+            raise SystemExit(
+                "Config error: AGENTLITE_PERMISSION_CLASSIFIER_ENABLED must be a boolean"
+            )
+        config.permission.classifier_enabled = enabled.lower() in {"true", "1", "yes"}
+    classifier_model = os.environ.get("AGENTLITE_PERMISSION_CLASSIFIER_MODEL")
+    if classifier_model is not None:
+        config.permission.classifier_model = classifier_model
+    classifier_timeout = os.environ.get("AGENTLITE_PERMISSION_CLASSIFIER_TIMEOUT_S")
+    if classifier_timeout is not None:
+        try:
+            timeout_value = float(classifier_timeout)
+        except ValueError as exc:
+            raise SystemExit("Config error: classifier timeout must be a number") from exc
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            raise SystemExit("Config error: classifier timeout must be finite and > 0")
+        config.permission.classifier_timeout_s = timeout_value
 
     perm_timeout = os.environ.get("AGENTLITE_PERMISSION_TIMEOUT_S")
     if perm_timeout is not None:

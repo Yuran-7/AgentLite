@@ -54,6 +54,33 @@ class _BlockingRunner:
         raise AssertionError("unreachable")
 
 
+# 功能：斜杠技能调用将工作区技能指令和参数交给模型运行入口。
+# 设计：捕获 runner 的入参，避免网络模型依赖并检查系统提示词中的展开结果。
+async def test_workspace_skill_invocation_uses_rendered_prompt(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    folder = workspace / ".agentlite" / "skills" / "explain"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: explain\ndescription: Explain a file\n---\nExplain $ARGUMENTS\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    class CapturingRunner:
+        # 捕获运行参数而不访问模型。
+        async def run_and_capture(self, goal: str, **kwargs: object) -> RunOutcome:
+            captured.update(goal=goal, **kwargs)
+            return RunOutcome(status="success", result="done", reason=None)
+
+    manager = SessionManager(SessionStore(tmp_path / "sessions"),
+                             lambda: CapturingRunner(), EventBus())  # type: ignore[arg-type]
+    session = await manager.create("chat", "", workspace_root=str(workspace))
+    await manager.send_message(session.id, "/explain src/main.py")
+    assert captured["goal"] == "Explain src/main.py"
+    assert "Explain src/main.py" in str(captured["system_prompt_override"])
+    assert str(folder / "SKILL.md") in str(captured["system_prompt_override"])
+
+
 # 功能：验证 create 只创建内存 session，首次消息后才写入 meta
 # 设计：覆盖 session 目录的延迟持久化边界
 async def test_create_session_persists_only_after_first_message(tmp_path: Path) -> None:

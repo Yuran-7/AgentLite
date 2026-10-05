@@ -189,6 +189,28 @@ class SessionStore:
                 ),
             )
 
+    # 单独持久化来自 IPC 用户输入的授权上下文，避免压缩摘要污染来源。
+    def append_permission_user(self, sid: str, text: str) -> None:
+        folder = self.session_dir(sid)
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / "permission_users.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+
+    # 读取可信输入日志，旧会话缺少日志时保守返回空意图。
+    def read_permission_users(self, sid: str) -> list[str]:
+        path = self.session_dir(sid) / "permission_users.jsonl"
+        if not path.exists():
+            return []
+        users: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and isinstance(row.get("text"), str):
+                users.append(row["text"])
+        return users
+
     # 读取完整 thread 并返回可直接传给 Anthropic 的 messages
     def read_messages(self, sid: str) -> list[dict[str, Any]]:
         path = self.session_dir(sid) / "thread.jsonl"
@@ -238,7 +260,7 @@ class SessionStore:
         if not path.exists():
             return []
         messages: list[dict[str, Any]] = []
-        durations = self._history_run_durations(sid)
+        durations, reasons = self._history_run_details(sid)
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line:
                 continue
@@ -253,6 +275,8 @@ class SessionStore:
                 message["run_id"] = row["run_id"]
                 if row["run_id"] in durations:
                     message["work_ms"] = durations[row["run_id"]]
+                if row["run_id"] in reasons:
+                    message["run_reason"] = reasons[row["run_id"]]
             if isinstance(row.get("ts"), str):
                 message["created_at"] = row["ts"]
             if "kind" in row:
@@ -262,11 +286,12 @@ class SessionStore:
             messages.append(message)
         return messages
 
-    # 从当前及旧版会话日志提取每轮开始与结束时间，缺失或损坏日志不伪造耗时。
-    def _history_run_durations(self, sid: str) -> dict[str, int]:
+    # 从新旧会话日志恢复每轮真实耗时及结束原因，缺失记录不推测暂停状态。
+    def _history_run_details(self, sid: str) -> tuple[dict[str, int], dict[str, str]]:
         folder = self.session_dir(sid)
         starts: dict[str, datetime] = {}
         durations: dict[str, int] = {}
+        reasons: dict[str, str] = {}
         paths = [folder / "events.jsonl", *folder.glob("runs/*/events.jsonl")]
         for path in paths:
             if not path.is_file():
@@ -279,6 +304,8 @@ class SessionStore:
                     ):
                         continue
                     run_id = event["run_id"]
+                    if event["type"] == "run.finished" and isinstance(event.get("reason"), str):
+                        reasons[run_id] = event["reason"]
                     ts = datetime.fromisoformat(event["ts"])
                     if event["type"] == "run.started":
                         starts[run_id] = ts
@@ -287,7 +314,7 @@ class SessionStore:
                         durations[run_id] = max(0, int(elapsed))
                 except (ValueError, KeyError, TypeError):
                     continue
-        return durations
+        return durations, reasons
 
     # 裁掉尾部未配对 tool_use 以及其后的消息，避免 Anthropic messages.invalid
     def _trim_orphan_tool_use(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

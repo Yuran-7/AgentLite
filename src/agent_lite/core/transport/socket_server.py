@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from agent_lite.core.bus.envelope import (
     INTERNAL_ERROR,
+    INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
@@ -213,7 +214,7 @@ class SocketServer:
         except ValidationError as e:
             await self._send(
                 writer,
-                make_error(req.id, INVALID_REQUEST, "Invalid params", str(e)),
+                make_error(req.id, INVALID_PARAMS, "Invalid params", str(e)),
             )
             return
         except Exception as e:

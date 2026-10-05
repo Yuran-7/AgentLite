@@ -52,6 +52,7 @@ from agent_lite.core.bus.commands import (
     SessionCancelResult,
     SessionCloseCommand,
     SessionCloseResult,
+    SessionCollaborationCommand,
     SessionCompactCommand,
     SessionCompactResult,
     SessionCreateCommand,
@@ -60,6 +61,8 @@ from agent_lite.core.bus.commands import (
     SessionGetHistoryResult,
     SessionListCommand,
     SessionListResult,
+    SessionPermissionModeCommand,
+    SessionReasoningCommand,
     SessionRenameCommand,
     SessionResumeCommand,
     SessionResumeResult,
@@ -73,6 +76,10 @@ from agent_lite.core.bus.commands import (
     SessionSetWorkspaceCommand,
     SessionSetWorkspaceResult,
     SessionSummary,
+    SkillListCommand,
+    SkillListResult,
+    SkillSummary,
+    UserInputRespondCommand,
 )
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError, JsonRpcNotification
 from agent_lite.core.config import AgentLiteConfig, get_config
@@ -80,6 +87,7 @@ from agent_lite.core.events.bus import EventBus
 from agent_lite.core.lifecycle import FrontendLifecycle
 from agent_lite.core.llm.factory import DeferredProvider, create_llm_provider
 from agent_lite.core.llm.images import ImageAttachment
+from agent_lite.core.llm.reasoning import supported_efforts, with_reasoning
 from agent_lite.core.llm.settings import model_settings, resolve_model
 from agent_lite.core.logging_setup import setup_logging
 from agent_lite.core.mcp.server import McpServerManager
@@ -87,9 +95,11 @@ from agent_lite.core.mcp.settings import parse_server
 from agent_lite.core.memory import MemoryStore
 from agent_lite.core.permissions.manager import PermissionManager
 from agent_lite.core.permissions.storage import load_policy_file
+from agent_lite.core.planning import UserInputManager
 from agent_lite.core.runner import AgentRunner
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session import SessionManager, SessionStore
+from agent_lite.core.skills.loader import SkillLoader
 from agent_lite.core.subagent.registry import SubagentTaskManager
 from agent_lite.core.tools.file_operations import recover_file_histories
 from agent_lite.core.trace.record import TraceRecord
@@ -118,6 +128,7 @@ class CoreApp:
         self._trace: TraceWriter | None = None
         self._config: AgentLiteConfig | None = None
         self._running_runs: dict[str, _RunningRun] = {}
+        self._input_manager = UserInputManager()
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
@@ -204,6 +215,7 @@ class CoreApp:
             mode="one_shot",
             title=cmd.goal[:40],
             workspace_root=cmd.workspace_root,
+            permission_mode=cmd.permission_mode,
         )
         run_id = new_run_id()
         self._start_session_run(session.id, cmd.goal, run_id)
@@ -248,8 +260,10 @@ class CoreApp:
             mode=cmd.mode,
             title=cmd.title,
             workspace_root=cmd.workspace_root,
+            permission_mode=cmd.permission_mode,
         )
         return SessionCreateResult(
+            permission_mode=session.permission_mode,
             session_id=session.id,
             status=session.status,
             workspace_root=session.workspace_root,
@@ -283,6 +297,9 @@ class CoreApp:
         session = await self._sessions.resume(cmd.session_id, cmd.workspace_root)
         return SessionResumeResult(
             model_id=session.model_id,
+            reasoning_effort=session.reasoning_effort,
+            collaboration_mode=session.collaboration_mode,
+            permission_mode=session.permission_mode,
             session_id=session.id,
             title=session.title,
             status=session.status,
@@ -301,6 +318,7 @@ class CoreApp:
             settings["fallbackModel"] = {
                 "id": "", "name": self._config.llm.default_model,
                 "model": self._config.llm.default_model, "protocol": self._config.llm.protocol,
+                "reasoningEffort": self._config.llm.reasoning_effort,
             }
             return settings
         except ValueError as exc:
@@ -310,6 +328,15 @@ class CoreApp:
         McpListCommand.model_validate(params)
         assert self._mcp_manager is not None
         return self._mcp_manager.snapshot()
+
+    # 返回当前工作区可见的 skill 元数据，供各前端展示和调用。
+    async def _skill_list_handler(self, params: dict[str, Any]) -> SkillListResult:
+        cmd = SkillListCommand.model_validate(params)
+        skills = SkillLoader().list_all_skills(cmd.workspace_root)
+        return SkillListResult(skills=[SkillSummary(
+            name=skill.name, description=skill.description, source=skill.source,
+            path=str(skill.path) if skill.path else "",
+        ) for skill in skills])
 
     async def _mcp_manage_handler(self, params: dict[str, Any]) -> dict[str, Any]:
         cmd = McpManageCommand.model_validate(params)
@@ -353,13 +380,83 @@ class CoreApp:
         cmd = SessionSetModelCommand.model_validate(params)
         session = self._sessions._get_session(cmd.session_id)
         try:
-            resolve_model(self._config.llm, cmd.model_id, session.workspace_root)
+            config = resolve_model(self._config.llm, cmd.model_id, session.workspace_root)
         except ValueError as exc:
             raise HandlerError(INVALID_PARAMS, str(exc)) from exc
-        await self._sessions.update_metadata(cmd.session_id, model_id=cmd.model_id)
-        return {"model_id": session.model_id}
+        effort = session.reasoning_effort
+        if effort not in ("", *supported_efforts(config.default_model, config.protocol)):
+            effort = ""
+        await self._sessions.update_metadata(
+            cmd.session_id, model_id=cmd.model_id, reasoning_effort=effort
+        )
+        return {"model_id": session.model_id, "reasoning_effort": session.reasoning_effort}
+
+    async def _session_reasoning_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        assert self._sessions is not None and self._config is not None
+        cmd = SessionReasoningCommand.model_validate(params)
+        session = self._sessions._get_session(cmd.session_id)
+        try:
+            config = resolve_model(self._config.llm, session.model_id, session.workspace_root)
+            supported = bool(supported_efforts(config.default_model, config.protocol))
+            if cmd.effort is not None:
+                if cmd.effort and not supported:
+                    raise ValueError("当前模型不支持推理强度设置")
+                with_reasoning(config, cmd.effort)
+                await self._sessions.update_metadata(cmd.session_id, reasoning_effort=cmd.effort)
+            return {
+                "supported": supported,
+                "efforts": supported_efforts(config.default_model, config.protocol)
+                if supported else [],
+                "effort": session.reasoning_effort,
+                "effective_effort": session.reasoning_effort or config.reasoning_effort,
+                "model": config.default_model,
+            }
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
 
     # 为已有且尚未绑定工作区的 session 设置工作区
+    # 读取或切换协作模式，忙碌会话由元数据锁拒绝修改。
+    async def _session_collaboration_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        assert self._sessions is not None
+        cmd = SessionCollaborationCommand.model_validate(params)
+        if cmd.permission_mode is not None and cmd.mode is None:
+            raise HandlerError(INVALID_PARAMS, "permission_mode requires collaboration mode")
+        session = self._sessions._get_session(cmd.session_id)
+        if cmd.mode is not None:
+            session = await self._sessions.update_metadata(
+                cmd.session_id, collaboration_mode=cmd.mode, permission_mode=cmd.permission_mode
+            )
+        return {"mode": session.collaboration_mode, "permission_mode": session.permission_mode}
+
+    # 读取或切换会话权限模式，运行中的会话也可更新。
+    async def _session_permission_mode_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        assert self._sessions is not None
+        cmd = SessionPermissionModeCommand.model_validate(params)
+        session = self._sessions._get_session(cmd.session_id)
+        if cmd.mode is not None:
+            session = await self._sessions.set_permission_mode(cmd.session_id, cmd.mode)
+        return {"mode": session.permission_mode}
+
+    # 接收结构化问题答案并恢复当前模型运行。
+    async def _user_input_handler(self, params: dict[str, Any]) -> dict[str, Any]:
+        cmd = UserInputRespondCommand.model_validate(params)
+        try:
+            pending = self._input_manager.pending.get(cmd.request_id)
+            self._input_manager.respond(cmd.session_id, cmd.request_id, cmd.answers)
+            if pending is not None and self._sessions is not None:
+                questions = {q.id: q.question for q in pending[1].questions}
+                self._sessions._store.append_permission_user(
+                    cmd.session_id,
+                    "\n".join(
+                        f"代理问题（仅上下文）：{questions[key]}\n用户回答：{answer}"
+                        for key, answer in cmd.answers.items()
+                    ),
+                )
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+        return {"ok": True}
+
+    # 为会话绑定工作区。
     async def _session_set_workspace_handler(
         self, params: dict[str, Any]
     ) -> SessionSetWorkspaceResult:
@@ -473,7 +570,10 @@ class CoreApp:
         if self._permission_manager is None:
             logger.error("permission.respond: PermissionManager not initialized")
             return PermissionRespondResult()
-        self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+        try:
+            self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
         return PermissionRespondResult()
 
     # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
@@ -680,11 +780,15 @@ class CoreApp:
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
                 task_manager=self._task_manager,
+                input_manager=self._input_manager,
             ),
             bus=self._bus,
             provider=compact_provider,
             provider_factory=lambda session: create_llm_provider(
-                resolve_model(llm_config, session.model_id, session.workspace_root)
+                with_reasoning(
+                    resolve_model(llm_config, session.model_id, session.workspace_root),
+                    session.reasoning_effort,
+                )
             ),
             memory_store=self._memory_store,
             memory_use_enabled=self._config.memory.use_enabled,
@@ -692,6 +796,7 @@ class CoreApp:
             memory_min_rollout_idle_hours=self._config.memory.min_rollout_idle_hours,
             memory_max_rollout_age_days=self._config.memory.max_rollout_age_days,
             task_manager=self._task_manager,
+            default_permission_mode=self._config.permission.default_mode,
         )
 
         shutdown = asyncio.Event()
@@ -720,8 +825,13 @@ class CoreApp:
         server.register("session.list", self._session_list_handler)
         server.register("session.rename", self._session_rename_handler)
         server.register("session.set_model", self._session_model_handler)
+        server.register("session.reasoning", self._session_reasoning_handler)
+        server.register("session.permission_mode", self._session_permission_mode_handler)
+        server.register("session.collaboration", self._session_collaboration_handler)
+        server.register("user_input.respond", self._user_input_handler)
         server.register("model.list", self._model_list_handler)
         server.register("mcp.list", self._mcp_list_handler)
+        server.register("skill.list", self._skill_list_handler)
         server.register("mcp.manage", self._mcp_manage_handler)
         server.register("session.resume", self._session_resume_handler)
         server.register("session.set_workspace", self._session_set_workspace_handler)

@@ -78,6 +78,8 @@ def config_factory() -> AgentLiteConfig:
     config.trace.enabled = False
     config.web.enabled = False
     config.permission.timeout_s = 0.4
+    # 此夹具验证原有四种人工审批决策，不依赖新会话的 Auto 默认值。
+    config.permission.default_mode = "manual"
     return config
 
 

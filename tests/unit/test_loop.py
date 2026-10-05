@@ -96,6 +96,39 @@ async def _events(bus: EventBus) -> list[BaseModel]:
 # --- tests -------------------------------------------------------------------
 
 
+# 功能：同次模型回复不能预先弹出多个问题，第二题必须在看到答案后重新生成。
+# 设计：用计数问答工具模拟批量调用，验证仅第一题执行且模型收到第二题的错误反馈。
+async def test_input_batch_requires_new_model_turn() -> None:
+    class InputTool(_EchoTool):
+        name = "request_user_input"
+        calls = 0
+
+        # 计数已展示的问题并返回用户答案。
+        async def invoke(self, params: dict[str, object]) -> ToolResult:
+            self.calls += 1
+            return ToolResult(content="user answer")
+
+    tool = InputTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    provider = _MockProvider([
+        LlmResponse(stop_reason="tool_use", tool_calls=[
+            _tc("request_user_input", uid="first"),
+            _tc("request_user_input", uid="premature"),
+        ]),
+        LlmResponse(stop_reason="end_turn", text="<proposed_plan>\nPlan\n</proposed_plan>"),
+    ])
+    loop, _ = _make_loop(provider, registry)
+    context = _ctx()
+    await loop.run(context)
+    assert tool.calls == 1
+    results = context.messages[2]["content"]
+    assert results[0]["content"] == "user answer"
+    assert results[1]["is_error"]
+    assert "Reconsider" in results[1]["content"]
+    assert context.status == "success"
+
+
 # 功能：验证 LLM 返回 end_turn 时 loop 将 context 标记为 success
 # 设计：单步 provider 直接返回 end_turn，最简正常路径，确认 loop 的基本终止逻辑
 async def test_end_turn_marks_success() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -24,7 +25,7 @@ from agent_lite.core.tools.registry import ToolRegistry
 from agent_lite.core.tools.result_storage import ToolResultStore
 
 if TYPE_CHECKING:
-    from agent_lite.core.permissions.manager import PermissionManager
+    from agent_lite.core.permissions.manager import PermissionContext, PermissionManager
 
 _DEFAULT_TIMEOUT: float = 120.0
 _MAX_RETRIES: int = 2
@@ -79,10 +80,12 @@ async def invoke_tool(
     timeout: float = _DEFAULT_TIMEOUT,
     *,
     permission_manager: PermissionManager | None = None,
+    permission_context: PermissionContext | None = None,
     session_id: str = "",
     result_store: ToolResultStore | None = None,
     token_budget: int | None = None,
 ) -> ToolResult:
+    tool_call = ToolCallBlock(tool_call.id, tool_call.name, deepcopy(tool_call.input))
     t0 = time.monotonic()
     result_store = result_store or ToolResultStore(None)
 
@@ -91,7 +94,7 @@ async def invoke_tool(
             run_id=run_id,
             tool_use_id=tool_call.id,
             tool_name=tool_call.name,
-            params=dict(tool_call.input),
+            params=deepcopy(tool_call.input),
             ts=_now(),
         )
     )
@@ -117,16 +120,17 @@ async def invoke_tool(
                 result_store=result_store, token_budget=token_budget,
             )
 
-    if permission_manager is not None:
+    if permission_manager is not None and not getattr(tool, "waits_for_user", False):
         async def _emit_permission(raw: dict[str, Any]) -> None:
             await bus.publish(PermissionRequestedEvent(**raw, run_id=run_id))
 
         allowed, decision = await permission_manager.check_and_wait(  # 核心函数
             tool_use_id=tool_call.id,
             tool_name=tool_call.name,
-            params=dict(tool_call.input),
+            params=deepcopy(tool_call.input),
             session_id=session_id,
             event_emitter=_emit_permission,
+            context=permission_context,
         )
         if allowed:
             if decision not in ("auto_allow",):
@@ -164,7 +168,8 @@ async def invoke_tool(
         try:
             tool.set_call_context(run_id, tool_call.id)
             result = await asyncio.wait_for(
-                tool.invoke(dict(tool_call.input)), timeout=timeout
+                tool.invoke(dict(tool_call.input)),
+                timeout=None if getattr(tool, "waits_for_user", False) else timeout
             )
             ms = elapsed()
 

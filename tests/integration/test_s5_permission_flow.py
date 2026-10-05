@@ -81,6 +81,8 @@ def _runner(
     max_steps: int = 10,
 ) -> AgentRunner:
     config = AgentLiteConfig()
+    # 此测试套件明确覆盖 Manual 的旧版长期授权行为。
+    config.permission.default_mode = "manual"
     config.agent.max_steps = max_steps
     return AgentRunner(
         config,

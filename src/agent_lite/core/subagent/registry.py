@@ -224,6 +224,14 @@ class SubagentTaskManager:
                     record.task_id, record.session_id, self._notification(record)
                 )
 
+    # 查询仍在执行的后台任务，协作模式切换必须等待整个会话空闲。
+    def has_running_session(self, session_id: str) -> bool:
+        return any(
+            record.session_id == session_id
+            and task_id in self._tasks and not self._tasks[task_id].done()
+            for task_id, record in self._records.items()
+        )
+
     async def cancel_session(self, session_id: str) -> None:
         tasks = [
             self._tasks[task_id]

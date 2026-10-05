@@ -11,6 +11,7 @@ from typing import Any
 from dotenv import dotenv_values
 
 from agent_lite.core.config import LlmConfig
+from agent_lite.core.llm.reasoning import EFFORTS, supported_efforts
 
 
 def model_settings(workspace: str | None = None) -> dict[str, Any]:
@@ -32,7 +33,8 @@ def model_settings(workspace: str | None = None) -> dict[str, Any]:
         seen: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict) or set(entry) - {
-                "id", "name", "model", "protocol", "baseUrl", "apiKeyEnv", "contextWindow"
+                "id", "name", "model", "protocol", "baseUrl", "apiKeyEnv", "contextWindow",
+                "apiMode", "reasoningEffort"
             }:
                 raise ValueError("模型字段无效；密钥请放入 ~/.agentlite/.env，通过 apiKeyEnv 引用")
             if "contextWindow" in entry and (
@@ -53,7 +55,19 @@ def model_settings(workspace: str | None = None) -> dict[str, Any]:
                     "密钥请写入 ~/.agentlite/.env，而不是这个字段"
                 )
             seen.add(entry["id"])
+            if "apiMode" in entry and (
+                entry["protocol"] != "openai"
+                or entry["apiMode"] not in {"chat_completions", "responses"}
+            ):
+                raise ValueError("apiMode 仅用于 openai，必须是 chat_completions 或 responses")
             models[entry["id"]] = dict(entry)
+            if "reasoningEffort" in entry and (
+                entry["reasoningEffort"] not in EFFORTS
+                or entry["reasoningEffort"] not in supported_efforts(
+                    entry["model"], entry["protocol"]
+                )
+            ):
+                raise ValueError("reasoningEffort 必须是当前模型支持的推理强度")
         if "defaultModel" in data:
             if not isinstance(data["defaultModel"], str):
                 raise ValueError("defaultModel 必须是模型 id 字符串")
@@ -83,5 +97,7 @@ def resolve_model(config: LlmConfig, model_id: str | None, workspace: str | None
     if not key:
         raise ValueError(f"模型密钥未配置：请在 ~/.agentlite/.env 或系统环境变量中设置 {env_name}")
     return replace(config, protocol=profile["protocol"], default_model=profile["model"],
+                   api_mode=profile.get("apiMode", "chat_completions"),
+                   reasoning_effort=profile.get("reasoningEffort", ""),
                    base_url=profile.get("baseUrl", ""), api_key=key,
                    context_window=profile.get("contextWindow", config.context_window))

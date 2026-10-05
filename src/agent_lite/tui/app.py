@@ -23,6 +23,7 @@ from agent_lite.core.config import AgentLiteConfig
 from agent_lite.core.skills.loader import SkillLoader
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
 from agent_lite.tui.core_connection import connect_frontend, frontend_heartbeat
+from agent_lite.tui.plan_input import PlanInputScreen
 
 log = logging.getLogger(__name__)
 _BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -159,6 +160,7 @@ class ToolCallBlock(Widget):
         self._elapsed_ms = 0
         self._is_error = False
         self._finished = False
+        self._auto_approved = False
 
     # 组合工具摘要、悬停箭头和折叠详情区域
     def compose(self) -> ComposeResult:
@@ -177,6 +179,8 @@ class ToolCallBlock(Widget):
         line = f"  [dim]tool[/dim] [bold]{self._tool_name}[/bold]"
         if params_pre:
             line += f"  [dim]{params_pre}[/dim]"
+        if getattr(self, "_auto_approved", False):
+            line += "  [dim]auto-approved[/dim]"
         if self._finished:
             color = "red" if self._is_error else "green"
             status = "failed" if self._is_error else "done"
@@ -294,9 +298,11 @@ class PermissionSelect(Static):
             super().__init__()
 
     # 初始化控件，存储工具 ID（用于 IPC 回复）
-    def __init__(self, tool_use_id: str) -> None:
+    def __init__(self, tool_use_id: str, allowed_decisions: list[str] | None = None) -> None:
         super().__init__("")
         self._tool_use_id = tool_use_id
+        self._CHOICES = tuple(choice for choice in type(self)._CHOICES
+                              if allowed_decisions is None or choice[0] in allowed_decisions)
         self._cursor = 0
 
     def on_mount(self) -> None:
@@ -362,7 +368,8 @@ class PermissionSelect(Static):
     # 发布决策消息，由宿主 App 负责 IPC 回复和控件清理
     def _pick(self, decision: str) -> None:
         log.debug("PermissionSelect._pick  decision=%s", decision)
-        self.post_message(self.Decided(self, self._tool_use_id, decision))
+        if any(choice[0] == decision for choice in self._CHOICES):
+            self.post_message(self.Decided(self, self._tool_use_id, decision))
 
 
 class PermissionBlock(Static):
@@ -385,16 +392,20 @@ class PermissionBlock(Static):
             super().__init__()
 
     # 初始化审批块，记录工具 ID、名称和参数预览
-    def __init__(self, tool_use_id: str, tool_name: str, param_preview: str) -> None:
+    def __init__(
+        self, tool_use_id: str, tool_name: str, param_preview: str, reason: str = "",
+    ) -> None:
         self._tool_use_id = tool_use_id
         self._tool_name = tool_name
         self._param_preview = param_preview
+        self._reason = reason
         self._resolved = False
         super().__init__(self._pending_text(), classes="log-line")
 
     def _pending_text(self) -> str:
         preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else ""
-        return f"[bold red]? permission[/bold red]  [bold]{self._tool_name}[/bold]{preview}"
+        reason = f"\n  {escape(self._reason)}" if self._reason else ""
+        return f"[bold red]? permission[/bold red]  [bold]{self._tool_name}[/bold]{preview}{reason}"
 
     # 将块收缩为单行摘要并发布 Resolved 消息
     def _resolve(self, decision: str) -> None:
@@ -831,6 +842,7 @@ class AgentLiteTuiApp(App[None]):
     TITLE = "AgentLite"
     BINDINGS = [
         Binding("ctrl+c", "cancel_run", "stop / quit", priority=True),
+        Binding("shift+tab", "cycle_mode", "mode", priority=True),
     ]
     CSS = """
     Screen { background: $background; }
@@ -892,6 +904,9 @@ class AgentLiteTuiApp(App[None]):
         self._replay_run_id = replay_run_id
         self._llm_protocol = llm_protocol
         self._workspace_root = workspace_root
+        self._permission_mode = "manual"
+        self._collaboration_mode = "default"
+        self._mode_changing = False
         self._model_name = model
         self._header_state = "connecting"
         self._client: SocketClient | None = None
@@ -944,6 +959,9 @@ class AgentLiteTuiApp(App[None]):
             ("new", "start a new session", False),
             ("resume", "resume a previous session", False),
             ("compact", "compress context window", False),
+            ("mode", "manual / edits / auto / plan", False),
+            ("plan", "toggle plan mode (/plan off to execute)", False),
+            ("reasoning", "show or set reasoning effort", False),
             ("memories", "configure and review memories", False),
         ]
         try:
@@ -1109,6 +1127,27 @@ class AgentLiteTuiApp(App[None]):
             event.text_area.text = ""
             if self._client is not None and self._session_id is not None and not self._busy:
                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
+            return
+        if content == "/mode" or content.startswith("/mode "):
+            event.text_area.text = ""
+            self.run_worker(self._do_mode(content[5:].strip()), name="mode", exclusive=False)
+            return
+        if content in {"/plan", "/plan on", "/plan off"}:
+            event.text_area.text = ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_plan(content), name="plan", exclusive=False)
+            return
+        if content == "/reasoning" or content.startswith("/reasoning "):
+            event.text_area.text = ""
+            if self._client is None or self._session_id is None or self._busy:
+                self._append(Static("agent busy or disconnected", classes="log-line"))
+                return
+            self._busy = True
+            event.text_area.disabled = True
+            self.run_worker(
+                self._do_reasoning(content[len("/reasoning"):].strip()),
+                name="reasoning", exclusive=False,
+            )
             return
         # 检测 /memories 指令；先展示 Generate/Use 两个独立开关，暂不执行具体逻辑
         if content == "/memories":
@@ -1293,6 +1332,8 @@ class AgentLiteTuiApp(App[None]):
             self._memory_generate_enabled = bool(
                 resumed.get("memory_generate_enabled", False)
             )
+            self._permission_mode = str(resumed.get("permission_mode", "manual"))
+            self._collaboration_mode = str(resumed.get("collaboration_mode", "default"))
             self._memory_use_enabled = bool(resumed.get("memory_use_enabled", True))
             self._restore_session_stats(session_id, resumed.get("stats"))
             if old_session_id is not None and old_session_id != session_id:
@@ -1397,6 +1438,115 @@ class AgentLiteTuiApp(App[None]):
         except (IpcError, RuntimeError, OSError) as exc:
             self._append(Static(f"[red]memory settings error: {exc}[/red]", classes="log-line"))
 
+    # 切换计划模式，终端与编辑器共享同一会话状态。
+    async def _do_plan(self, command: str) -> None:
+        assert self._client is not None
+        self._busy = True
+        try:
+            params = {"session_id": self._session_id}
+            current = await self._client.send_command("session.collaboration", params)
+            mode = "default" if command == "/plan off" or (
+                command == "/plan" and current["mode"] == "plan"
+            ) else "plan"
+            await self._client.send_command("session.collaboration", {**params, "mode": mode})
+            self._collaboration_mode = mode
+            self._update_header(self._header_state)
+            self._append(Static(f"Mode: {mode}. /plan toggles planning.", markup=False))
+        except Exception as exc:
+            self._append(Static(f"plan mode error: {exc}", markup=False))
+        finally:
+            self._busy = False
+
+    # 按四项顺序循环，运行时跳过不能进入的 Plan。
+    def action_cycle_mode(self) -> None:
+        modes = ["manual", "edits", "plan", "auto"]
+        current = "plan" if self._collaboration_mode == "plan" else (
+            "edits" if self._permission_mode == "accept_edits" else self._permission_mode)
+        next_mode = modes[(modes.index(current) + 1) % len(modes)]
+        if next_mode == "plan" and (self._busy or self._subagent_start_times):
+            next_mode = "auto"
+        self.run_worker(self._do_mode(next_mode), name="mode", exclusive=False)
+
+    # 切换权限无需停止运行；涉及 Plan 时使用空闲状态下的原子 RPC。
+    async def _do_mode(self, value: str) -> None:
+        aliases = {"edits": "accept_edits", "manual": "manual", "auto": "auto",
+                   "accept_edits": "accept_edits", "plan": "plan"}
+        if not value:
+            current = (self._collaboration_mode if self._collaboration_mode == "plan"
+                       else self._permission_mode)
+            self._append(Static(f"Mode: {current}", markup=False))
+            return
+        if value not in aliases:
+            self._append(Static("Usage: /mode manual|edits|auto|plan", markup=False))
+            return
+        if self._client is None or self._session_id is None or self._mode_changing:
+            return
+        mode = aliases[value]
+        if (self._busy or self._subagent_start_times) and (
+            mode == "plan" or self._collaboration_mode == "plan"
+        ):
+            self._append(Static("Plan mode can only change while idle", markup=False))
+            return
+        self._mode_changing = True
+        try:
+            params: dict[str, Any] = {"session_id": self._session_id}
+            if mode == "plan":
+                await self._client.send_command("session.collaboration", {**params, "mode": "plan"})
+                self._collaboration_mode = "plan"
+            elif self._collaboration_mode == "plan":
+                await self._client.send_command("session.collaboration", {
+                    **params, "mode": "default", "permission_mode": mode,
+                })
+                self._collaboration_mode = "default"
+                self._permission_mode = mode
+            else:
+                result = await self._client.send_command(
+                    "session.permission_mode", {**params, "mode": mode},
+                )
+                self._permission_mode = str(result["mode"])
+            self._update_header(self._header_state)
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._append(Static(f"mode error: {exc}", markup=False))
+        finally:
+            self._mode_changing = False
+
+    # 将弹窗答案提交给等待中的运行，取消时停止当前任务。
+    async def _answer_plan(self, request_id: str, answers: dict[str, str] | None) -> None:
+        if answers is None:
+            await self.action_cancel_run()
+            return
+        assert self._client is not None
+        try:
+            await self._client.send_command("user_input.respond", {
+                "session_id": self._session_id, "request_id": request_id, "answers": answers,
+            })
+        except Exception as exc:
+            self._append(Static(f"answer error: {exc}", markup=False))
+
+    # 显示或修改推理强度。
+    async def _do_reasoning(self, argument: str) -> None:
+        assert self._client is not None
+        try:
+            params: dict[str, Any] = {"session_id": self._session_id}
+            if argument:
+                params["effort"] = "" if argument == "default" else argument
+            result = await self._client.send_command("session.reasoning", params)
+            if not result.get("supported"):
+                self._append(Static("Reasoning effort requires an OpenAI model.",
+                                    classes="log-line"))
+                return
+            current = result.get("effective_effort") or "model default"
+            choices = ", ".join(["default", *result.get("efforts", [])])
+            self._append(Static(f"Reasoning: {current}. /reasoning <{choices}>",
+                                classes="log-line", markup=False))
+        except Exception as exc:
+            self._append(Static(f"reasoning error: {exc}", classes="log-line", markup=False))
+        finally:
+            self._busy = False
+            prompt = self.query_one("#prompt", ChatTextArea)
+            prompt.disabled = False
+            prompt.focus()
+
     # 通过 slash command 管理长期记忆，不把管理指令发送给 Agent
     async def _do_memory_command(self, arguments: str) -> None:
         if self._client is None or self._session_id is None:
@@ -1456,6 +1606,8 @@ class AgentLiteTuiApp(App[None]):
                 "session.create", self._session_create_params()
             )
             self._session_id = str(created["session_id"])
+            self._permission_mode = str(created.get("permission_mode", "manual"))
+            self._collaboration_mode = "default"
             await self._subscribe_to_session(self._session_id)
             self._workspace_root = (
                 str(created["workspace_root"])
@@ -1747,6 +1899,10 @@ class AgentLiteTuiApp(App[None]):
         first_line += f"{session}  [{color}]{state}[/{color}]"
 
         second_line_parts: list[str] = []
+        mode = "Plan" if self._collaboration_mode == "plan" else {
+            "manual": "Manual", "accept_edits": "Edit automatically", "auto": "Auto",
+        }.get(self._permission_mode, "Manual")
+        second_line_parts.append(f"[dim]mode: {mode}[/dim]")
         if self._workspace_root is not None:
             second_line_parts.append(
                 f"[dim]workspace: {Path(self._workspace_root).resolve()}[/dim]"
@@ -1797,6 +1953,8 @@ class AgentLiteTuiApp(App[None]):
                     "session.create", self._session_create_params()
                 )
                 self._session_id = str(created["session_id"])
+                self._permission_mode = str(created.get("permission_mode", "manual"))
+                self._collaboration_mode = "default"
                 await self._subscribe_to_session(
                     self._session_id,
                     replay_from_run=self._replay_run_id,
@@ -1866,6 +2024,7 @@ class AgentLiteTuiApp(App[None]):
                 "llm.*",
                 "log.*",
                 "permission.*",
+                "user_input.*",
                 "context.*",
                 "subagent.*",
                 "task.*",
@@ -2156,6 +2315,31 @@ class AgentLiteTuiApp(App[None]):
                 classes="log-line",
             ))
 
+        elif t == "user_input.requested":
+            request_id = str(event["request_id"])
+            # 将弹窗回调转换为独立工作任务，避免阻塞事件消费。
+            def answer_plan(answers: dict[str, str] | None) -> None:
+                self.run_worker(self._answer_plan(request_id, answers), exclusive=False)
+
+            self.push_screen(PlanInputScreen(event["questions"]), answer_plan)
+
+        elif t == "user_input.resolved":
+            if isinstance(self.screen, PlanInputScreen):
+                self.screen.dismiss(None)
+
+        elif t == "session.mode_changed" and event.get("session_id") == self._session_id:
+            self._permission_mode = str(event.get("permission_mode", "manual"))
+            self._collaboration_mode = str(event.get("collaboration_mode", "default"))
+            self._update_header(self._header_state)
+
+        elif t == "permission.granted":
+            if event.get("decision") == "classifier_allow":
+                approved_tool = self._pending_tool_blocks.get(str(event.get("tool_use_id", "")))
+                if approved_tool is not None:
+                    approved_tool._auto_approved = True
+                    if approved_tool.children:
+                        approved_tool.query_one(".summary", Static).update(approved_tool._summary())
+
         elif t == "permission.requested":
             tool_use_id = str(event.get("tool_use_id", ""))
             tool_name = str(event.get("tool_name", ""))
@@ -2168,14 +2352,16 @@ class AgentLiteTuiApp(App[None]):
                 "permission.requested tool=%s id=%s  app.focused=%s",
                 tool_name, tool_use_id, _focused_repr,
             )
-            perm_block = PermissionBlock(tool_use_id, tool_name, param_preview)
+            perm_block = PermissionBlock(
+                tool_use_id, tool_name, param_preview, str(event.get("reason") or ""),
+            )
             self._pending_permission_blocks[tool_use_id] = perm_block
             prompt = self._prompt()
             if prompt is not None:
                 prompt.disabled = True
                 prompt.border_title = "permission required"
             self._append(perm_block)
-            select = PermissionSelect(tool_use_id)
+            select = PermissionSelect(tool_use_id, event.get("allowed_decisions"))
             self._mount_permission_select(select)
             log.debug("PermissionSelect mounted before #prompt  pending=%d",
                       len(self._pending_permission_blocks))

@@ -5,6 +5,41 @@ import { ChatSession, historyCards } from '../src/session';
 import { decisions, parsePageMessage } from '../src/protocol';
 import { waitFor } from './helpers';
 
+// 功能：停止时无模型回答也会产生带完成标记的活动摘要。
+// 设计：驱动真实 run.finished 事件，保证页面获得独立于回答卡片的折叠依据。
+test('cancelled run without an answer supplies a completed notice', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose()); Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+  session.event({ type: 'run.started', run_id: 'r', session_id: 'session' });
+  session.event({ type: 'tool.call_started', run_id: 'r', tool_use_id: 't', tool_name: 'read_file', params: {} });
+  session.event({ type: 'run.finished', run_id: 'r', status: 'failed', reason: 'cancelled' });
+  const notice = session.state.cards.find(card => card.kind === 'notice');
+  assert.equal(notice?.text, '已停止'); assert(notice?.completed); assert.equal(typeof notice?.workMs, 'number');
+  assert.equal(session.state.cards.find(card => card.kind === 'tool')?.status, '已取消');
+});
+
+// 功能：计划模式切换、问答和执行使用独立 RPC，防止重复回答。
+// 设计：驱动真实会话类，覆盖运行期间模式锁定、答案失败重试和计划执行转换。
+test('plan mode questions and implementation flow', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose());
+  Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+  await session.collaboration('plan'); assert.equal(session.state.collaborationMode, 'plan');
+  session.state.busy = true;
+  await session.collaboration('default'); assert.equal(session.state.collaborationMode, 'plan');
+  session.state.cards.push({ id: 'q', kind: 'question', text: '', status: 'pending', requestId: 'request' });
+  await session.answerQuestions('request', { scope: 'custom' });
+  await session.answerQuestions('request', { scope: 'custom' });
+  assert.equal(client.calls.filter(call => call === 'user_input.respond').length, 1);
+  session.state.busy = false;
+  session.state.cards.push({ id: 'p', kind: 'assistant', text: '<proposed_plan>\n# Plan\nImplement feature\n</proposed_plan>', completed: true });
+  await session.implementPlan('p');
+  assert.equal(session.state.collaborationMode, 'default');
+  assert(client.calls.includes('session.send_message'));
+  assert.equal(parsePageMessage({ type: 'answerQuestions', requestId: 'r', answers: { a: '' } }), undefined);
+  assert.equal(parsePageMessage({ type: 'collaboration', mode: 'invalid' }), undefined);
+});
+
 // 多模态工具历史只展示文字摘要，不将图片引用序列化为实现细节。
 test('history tool results render PDF text summaries', () => {
   const cards = historyCards([
@@ -31,6 +66,108 @@ class Client extends EventEmitter {
   // 记录关闭行为，供生命周期测试断言。
   close(): void { this.calls.push('client.close'); }
 }
+
+// 功能：文件引用使代理先读取指定相对路径，同时历史卡片只显示用户原文。
+// 设计：捕获真实会话发送参数并重放历史消息，覆盖引用提示与展示分离。
+test('workspace file references reach the agent and stay out of history cards', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose());
+  Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+  let sent = '';
+  client.request = async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'session.send_message') sent = String(params?.content);
+    return { accepted: true };
+  };
+  await session.send('请看 @src/main.ts @src/', [], ['src/main.ts', 'src/']);
+  assert.match(sent, /read_file/); assert.match(sent, /list_dir/);
+  assert.match(sent, /"src\/main.ts"/); assert.match(sent, /"src\/"/);
+  assert.equal(session.state.cards.find(card => card.kind === 'user')?.text, '请看 @src/main.ts @src/');
+  assert.deepEqual(session.state.cards.find(card => card.kind === 'user')?.references, ['src/main.ts', 'src/']);
+  assert.equal(historyCards([{ role: 'user', content: sent }])[0].text, '请看 @src/main.ts @src/');
+  assert.deepEqual(historyCards([{ role: 'user', content: sent }])[0].references, ['src/main.ts', 'src/']);
+});
+
+// 功能：推理档位读取和修改互斥执行，失败不覆盖已有选择。
+// 设计：延迟真实会话控制路径的 RPC 替身，覆盖重复点击、运行锁定与旧 core。
+test('reasoning reads, updates and rejects concurrent operations', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose());
+  Object.assign(session.state, { sessionId: 'session', connection: 'ready', reasoningEffort: 'medium' });
+  let finish!: (result: Record<string, unknown>) => void;
+  const calls: Record<string, unknown>[] = [];
+  client.request = async (method: string, params?: Record<string, unknown>) => {
+    assert.equal(method, 'session.reasoning'); calls.push(params!);
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const pending = session.reasoning('high');
+  await session.reasoning('low'); assert.equal(calls.length, 1); assert(session.state.sending);
+  assert.deepEqual(calls[0], { session_id: 'session', effort: 'high' });
+  finish({ effort: 'high', effective_effort: 'high', supported: true, model: 'test', efforts: ['low', 'high', 'untrusted'] }); await pending;
+  assert.deepEqual(session.state.reasoningOptions, { supported: true, model: 'test', efforts: ['low', 'high'], effectiveEffort: 'high' });
+  assert(!session.state.reasoningLoading);
+  assert.equal(session.state.reasoningEffort, 'high'); assert(!session.state.sending);
+  assert.equal(session.state.cards.length, 0);
+  session.state.busy = true; await session.reasoning('low'); assert.equal(calls.length, 1);
+  session.state.busy = false;
+  client.request = async () => { throw new Error('Method not found'); };
+  await session.reasoning('low'); assert(session.state.error?.includes('重启 core'));
+  assert.equal(session.state.reasoningEffort, 'high'); assert(!session.state.sending);
+  assert.deepEqual(parsePageMessage({ type: 'reasoning', effort: '' }), { type: 'reasoning', effort: '' });
+  assert.equal(parsePageMessage({ type: 'reasoning', effort: 'invalid' }), undefined);
+});
+
+// 功能：当前会话的记忆开关独立保存，失败时保留服务端已确认的状态。
+// 设计：拦截 session.set_memory 响应，覆盖并发点击、返回值同步和旧 core 报错。
+test('memory settings persist independently through the core', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose());
+  Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+  const calls: Record<string, unknown>[] = [];
+  let finish!: (result: Record<string, unknown>) => void;
+  client.request = async (method: string, params?: Record<string, unknown>) => {
+    assert.equal(method, 'session.set_memory'); calls.push(params!);
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const pending = session.setMemory('generate', true);
+  await session.setMemory('use', false);
+  assert.deepEqual(calls, [{ session_id: 'session', generate_enabled: true }]);
+  assert(session.state.memoryLoading && session.state.sending);
+  finish({ generate_enabled: true, use_enabled: true }); await pending;
+  assert.equal(session.state.memoryGenerateEnabled, true);
+  assert.equal(session.state.memoryUseEnabled, true);
+  assert(!session.state.memoryLoading && !session.state.sending);
+  client.request = async () => { throw new Error('Method not found'); };
+  await session.setMemory('use', false);
+  assert.equal(session.state.memoryUseEnabled, true);
+  assert(session.state.memoryError?.includes('重启 core'));
+  assert.deepEqual(parsePageMessage({ type: 'setMemory', setting: 'use', enabled: false }),
+    { type: 'setMemory', setting: 'use', enabled: false });
+  assert.equal(parsePageMessage({ type: 'setMemory', setting: 'use', enabled: 'false' }), undefined);
+});
+
+// 功能：空推理设置写入真实默认值，DeepSeek 只显示有效档位且不产生聊天提示。
+// 设计：模拟旧 core 返回通用七档，截获二次 RPC 验证默认设置确实保存。
+test('reasoning persists model defaults and narrows DeepSeek levels', async t => {
+  for (const [model, expected, levels] of [
+    ['gpt-6.1-sol', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']],
+    ['deepseek-flash', 'high', ['none', 'low', 'high', 'max']],
+  ] as const) {
+    const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+    t.after(() => session.dispose());
+    Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+    const calls: Record<string, unknown>[] = [];
+    client.request = async (_method: string, params?: Record<string, unknown>) => {
+      calls.push(params!);
+      return { model, supported: true, effort: params?.effort ?? '', effective_effort: params?.effort ?? '',
+        efforts: model.startsWith('deepseek') ? ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : [...levels] };
+    };
+    await session.reasoning();
+    assert.deepEqual(calls, [{ session_id: 'session' }, { session_id: 'session', effort: expected }]);
+    assert.equal(session.state.reasoningEffort, expected);
+    assert.deepEqual(session.state.reasoningOptions?.efforts, [...levels]);
+    assert.equal(session.state.cards.length, 0);
+  }
+});
 
 test('MCP state stays separate from chat errors, serializes changes and reports old cores', async t => {
   const client = new Client(); const session = new ChatSession('workspace', () => {});
@@ -162,7 +299,8 @@ test('resume restores transcript and model, filters stale events and persists re
     if (method === 'session.create') return { session_id: 'new' };
     if (method === 'session.list') return { sessions: [{ session_id: 'old', title: 'Old chat', updated_at: '2026-10-01' }] };
     if (method === 'model.list') return { models: [{ id: 'custom', model: 'test', protocol: 'openai' }], defaultModel: 'custom' };
-    if (method === 'session.resume') return { title: 'Old chat', model_id: 'custom' };
+    if (method === 'session.resume') return { title: 'Old chat', model_id: 'custom',
+      memory_generate_enabled: true, memory_use_enabled: false };
     if (method === 'session.get_history') return { messages: [
       { role: 'user', content: 'question' }, { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }
     ], last_usage: { context_pct: .62, context_window_estimated: true, total_input_tokens: 62000, output_tokens: 500 } };
@@ -173,6 +311,8 @@ test('resume restores transcript and model, filters stale events and persists re
   await session.resumeSession('old');
   assert.equal(session.state.sessionId, 'old');
   assert.equal(session.state.selectedModel, 'custom');
+  assert.equal(session.state.memoryGenerateEnabled, true);
+  assert.equal(session.state.memoryUseEnabled, false);
   assert.equal(session.state.contextPercent, 62);
   assert(session.state.contextEstimated); assert(session.state.usage.includes('上下文 ≈62.0%'));
   assert.deepEqual(session.state.cards.map(card => card.text), ['question', 'answer']);
@@ -345,6 +485,8 @@ test('webview message allowlist', () => {
   assert.equal(parsePageMessage({ type: 'core.shutdown' }), undefined);
   assert.equal(parsePageMessage({ type: 'permission', toolUseId: 'x', decision: 'allow_everything' }), undefined);
   assert.equal(parsePageMessage({ type: 'send', content: 'x'.repeat(1_000_001) }), undefined);
+  assert.equal(parsePageMessage({ type: 'send', content: '@file', references: ['x'.repeat(1025)] }), undefined);
+  assert.equal(parsePageMessage({ type: 'searchWorkspaceFiles', query: 'x'.repeat(201), requestId: 1 }), undefined);
   assert.deepEqual(parsePageMessage({ type: 'send', content: ' hello ' }), { type: 'send', content: 'hello' });
 });
 
@@ -366,4 +508,51 @@ test('usage displays normalized input and percentage of latest main request', as
   client.emit('event', { type: 'llm.usage', run_id: 'child', input_tokens: 100000, context_pct: 0.9 });
   assert.equal(session.state.usage, '输入 3000 · 输出 200 · 缓存 1500 · 上下文 ≈1.6%');
   await session.dispose();
+});
+
+
+// 功能：权限模式可在运行中切换，退出 Plan 使用一次原子 RPC，跨客户端事件同步模式。
+// 设计：捕获真实 ChatSession 的请求与状态，验证失败时不提前修改本地选择。
+test('permission mode updates while busy and exits plan atomically', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose());
+  Object.assign(session.state, { sessionId: 'session', connection: 'ready', busy: true, permissionMode: 'manual' });
+  const calls: { method: string; params?: Record<string, unknown> }[] = [];
+  client.request = async (method: string, params?: Record<string, unknown>) => {
+    calls.push({ method, params });
+    return { mode: params?.mode, permission_mode: params?.permission_mode };
+  };
+  await session.permissionMode('auto');
+  assert.equal(session.state.permissionMode, 'auto');
+  assert.equal(calls[0].method, 'session.permission_mode');
+  session.state.busy = false; await session.collaboration('plan');
+  await session.permissionMode('accept_edits');
+  assert.deepEqual(calls.at(-1), { method: 'session.collaboration', params: {
+    session_id: 'session', mode: 'default', permission_mode: 'accept_edits',
+  }});
+  session.event({ type: 'session.mode_changed', session_id: 'session', permission_mode: 'manual', collaboration_mode: 'plan' });
+  assert.equal(session.state.permissionMode, 'manual');
+  assert.equal(session.state.collaborationMode, 'plan');
+  client.request = async () => { throw new Error('busy'); };
+  await session.permissionMode('auto');
+  assert.equal(session.state.permissionMode, 'manual');
+  assert.equal(session.state.collaborationMode, 'plan');
+});
+
+// 功能：审批原因与限定选项保留在卡片上，自动批准标记显示在对应工具。
+// 设计：重放真实事件顺序并检查协议拒绝非法模式，兼容未知批准决策。
+test('auto approval events carry reasons, choices and tool badge', t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {}, client);
+  t.after(() => session.dispose()); session.state.sessionId = 'session';
+  session.event({ type: 'run.started', run_id: 'r', session_id: 'session' });
+  session.event({ type: 'tool.call_started', run_id: 'r', tool_use_id: 't', tool_name: 'shell', params: {} });
+  session.event({ type: 'permission.requested', run_id: 'r', tool_use_id: 't', tool_name: 'shell',
+    reason: '分类器超时', allowed_decisions: ['allow_once', 'deny_once', 'always_deny'] });
+  const card = session.state.cards.find(card => card.kind === 'permission')!;
+  assert.equal(card.approvalReason, '分类器超时');
+  assert(!card.allowedDecisions?.includes('always_allow'));
+  session.event({ type: 'permission.granted', run_id: 'r', tool_use_id: 't', decision: 'classifier_allow' });
+  assert(session.state.cards.find(card => card.kind === 'tool')?.autoApproved);
+  assert.deepEqual(parsePageMessage({ type: 'permissionMode', mode: 'auto' }), { type: 'permissionMode', mode: 'auto' });
+  assert.equal(parsePageMessage({ type: 'permissionMode', mode: 'plan' }), undefined);
 });

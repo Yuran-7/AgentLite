@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agent_lite.core.bus.envelope import INVALID_PARAMS, HandlerError
 from agent_lite.core.bus.events import (
@@ -13,6 +13,7 @@ from agent_lite.core.bus.events import (
     SessionClosedEvent,
     SessionCreatedEvent,
     SessionMessageReceivedEvent,
+    SessionModeChangedEvent,
     SessionResumedEvent,
     SessionWaitingForInputEvent,
     SessionWorkspaceSetEvent,
@@ -24,6 +25,7 @@ from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.images import ImageAttachment
 from agent_lite.core.memory.pipeline import MemoryPipeline, sanitize_transcript, transcript_hash
 from agent_lite.core.memory.store import MemoryStore
+from agent_lite.core.permissions.types import PermissionMode
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.ids import new_session_id
 from agent_lite.core.session.model import Session, SessionMode
@@ -93,7 +95,9 @@ class SessionManager:
         memory_max_rollout_age_days: int = 10,
         task_manager: SubagentTaskManager | None = None,
         provider_factory: Callable[[Session], LLMProvider] | None = None,
+        default_permission_mode: PermissionMode = "auto",
     ) -> None:
+        self._default_permission_mode = default_permission_mode
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
@@ -240,11 +244,13 @@ class SessionManager:
         mode: SessionMode,
         title: str = "",
         workspace_root: str | None = None,
+        permission_mode: PermissionMode | None = None,
     ) -> Session:
         sid = new_session_id()
         ts = _now()
         normalized_workspace = _normalize_workspace_root(workspace_root)
         session = Session(
+            permission_mode=permission_mode or self._default_permission_mode,
             id=sid,
             mode=mode,
             status="active",
@@ -326,8 +332,14 @@ class SessionManager:
 
     # 更新会话名称和独立模型选择，沿用运行锁及延迟持久化。
     async def update_metadata(
-        self, sid: str, *, title: str | None = None, model_id: str | None = None
+        self, sid: str, *, title: str | None = None, model_id: str | None = None,
+        reasoning_effort: str | None = None,
+        collaboration_mode: Literal["default", "plan"] | None = None,
+        permission_mode: PermissionMode | None = None,
     ) -> Session:
+        if (collaboration_mode is not None and self._task_manager is not None
+                and self._task_manager.has_running_session(sid)):
+            raise HandlerError(SESSION_BUSY, "session has running background agents")
         session = self._sessions.get(sid)
         if session is None:
             try:
@@ -344,7 +356,30 @@ class SessionManager:
                 session.title = title
             if model_id is not None:
                 session.model_id = model_id
+            if permission_mode is not None:
+                session.permission_mode = permission_mode
+            if collaboration_mode is not None:
+                session.collaboration_mode = collaboration_mode
+            if reasoning_effort is not None:
+                session.reasoning_effort = reasoning_effort
             self._persist_started_session(session)
+            if collaboration_mode is not None or permission_mode is not None:
+                await self._publish_mode(session)
+        return session
+
+    # 发布两种独立模式的统一快照供多个前端同步。
+    async def _publish_mode(self, session: Session) -> None:
+        await self._bus.publish(SessionModeChangedEvent(
+            session_id=session.id, permission_mode=session.permission_mode,
+            collaboration_mode=session.collaboration_mode, ts=_now(),
+        ))
+
+    # 权限模式更新不获取运行锁，后续工具检查读取同一会话实例。
+    async def set_permission_mode(self, sid: str, mode: PermissionMode) -> Session:
+        session = self._get_session(sid)
+        session.permission_mode = mode
+        self._persist_started_session(session)
+        await self._publish_mode(session)
         return session
 
     # 为未绑定工作区的 session 设置工作区；未开始对话时只更新内存
@@ -412,6 +447,7 @@ class SessionManager:
                     message_content.append({"type": "text", "text": content})
                 message_content.extend(image.block() for image in images)
             self._store.append_message(sid, "user", message_content)
+            self._store.append_permission_user(sid, content)
             await self._bus.publish(
                 SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
             )
@@ -434,10 +470,12 @@ class SessionManager:
                 parts = content[1:].split(None, 1)
                 skill_name = parts[0]
                 arguments = parts[1] if len(parts) > 1 else ""
-                skill = self._skill_loader.resolve(skill_name)
+                skill = self._skill_loader.resolve(skill_name, session.workspace_root)
                 if skill is not None:
                     goal = self._skill_loader.render_prompt(skill, arguments)
-                    system_prompt_override = skill.system_prompt_template
+                    system_prompt_override = (
+                        f"Skill file: {skill.path}\n\n{goal}" if skill.path else goal
+                    )
                     tool_whitelist = skill.allowed_tools or None
                     await self._bus.publish(
                         SkillInvokedEvent(

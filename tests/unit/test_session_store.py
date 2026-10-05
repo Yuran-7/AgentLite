@@ -55,7 +55,7 @@ def test_history_preserves_run_timing_without_changing_model_messages(tmp_path: 
     folder = store.session_dir(SESSION_ID)
     events = [
         {"type": "run.started", "run_id": "main", "ts": "2026-10-02T00:00:00+00:00"},
-        {"type": "run.finished", "run_id": "main", "ts": "2026-10-02T00:03:06+00:00"},
+        {"type": "run.finished", "run_id": "main", "ts": "2026-10-02T00:03:06+00:00", "reason": "cancelled"},
         {"type": "run.started", "run_id": "unfinished", "ts": "invalid"},
     ]
     (folder / "events.jsonl").write_text("broken\n" + "\n".join(json.dumps(event) for event in events), encoding="utf-8")
@@ -68,8 +68,10 @@ def test_history_preserves_run_timing_without_changing_model_messages(tmp_path: 
     history = store.read_history_messages(SESSION_ID)
     assert history[1]["run_id"] == "main"
     assert history[1]["work_ms"] == 186_000
+    assert history[1]["run_reason"] == "cancelled"
     assert history[1]["created_at"]
     assert history[2]["work_ms"] == 5000
+    assert "run_reason" not in history[2]
     assert "work_ms" not in history[3]
     assert all(set(message) == {"role", "content"} for message in store.read_messages(SESSION_ID))
 

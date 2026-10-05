@@ -42,6 +42,23 @@ class StepFinishedEvent(BaseModel):
     ts: str
 
 
+class UserInputRequestedEvent(BaseModel):
+    type: Literal["user_input.requested"] = "user_input.requested"
+    run_id: str
+    session_id: str
+    request_id: str
+    questions: list[dict[str, Any]]
+    ts: str
+
+
+class UserInputResolvedEvent(BaseModel):
+    type: Literal["user_input.resolved"] = "user_input.resolved"
+    run_id: str
+    session_id: str
+    request_id: str
+    ts: str
+
+
 class PlanItem(BaseModel):
     step: str
     status: Literal["pending", "in_progress", "completed"]
@@ -197,7 +214,19 @@ class ContextCompactedEvent(BaseModel):
     ts: str
 
 
+class SessionModeChangedEvent(BaseModel):
+    type: Literal["session.mode_changed"] = "session.mode_changed"
+    session_id: str
+    permission_mode: Literal["manual", "accept_edits", "auto"]
+    collaboration_mode: Literal["default", "plan"]
+    ts: str
+
+
 class PermissionRequestedEvent(BaseModel):
+    mode: Literal["manual", "accept_edits", "auto"] | None = None
+    reason_code: str | None = None
+    reason: str | None = None
+    allowed_decisions: list[str] | None = None
     type: Literal["permission.requested"] = "permission.requested"
     run_id: str
     tool_use_id: str
@@ -276,6 +305,8 @@ Event = Annotated[
     | RunFinishedEvent
     | StepStartedEvent
     | StepFinishedEvent
+    | UserInputRequestedEvent
+    | UserInputResolvedEvent
     | PlanUpdatedEvent
     | ToolCallStartedEvent
     | ToolCallFinishedEvent
@@ -293,6 +324,7 @@ Event = Annotated[
     | MemoryUpdatedEvent
     | MemoryDeletedEvent
     | ContextCompactedEvent
+    | SessionModeChangedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent
     | PermissionDeniedEvent

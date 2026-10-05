@@ -22,7 +22,7 @@ def test_builtin_skill_found() -> None:
 # 设计：参数化列举通用 skill 与两种多智能体工作流，防止打包时遗漏文件
 @pytest.mark.parametrize(
     "name",
-    ["init", "review"],
+    ["init", "review", "skill-creator"],
 )
 def test_all_builtin_skills_found(name: str) -> None:
     loader = SkillLoader()
@@ -123,3 +123,57 @@ def test_project_overrides_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert skill is not None
     assert skill.description == "local override"
     assert "local system prompt" in skill.system_prompt_template
+
+
+# 功能：指定工作区时只读取该工作区的 SKILL.md，并由项目版本覆盖内建版本。
+# 设计：在独立工作区建立目录式技能，验证元数据、来源、参数和名称匹配。
+def test_workspace_skill_directory(tmp_path: Path) -> None:
+    folder = tmp_path / ".agentlite" / "skills" / "review"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Workspace review\nallowed-tools: [read_file]\n"
+        "---\nCheck the code.\n", encoding="utf-8",
+    )
+    loader = SkillLoader()
+    skill = loader.resolve("review", tmp_path)
+    assert skill is not None
+    assert skill.description == "Workspace review"
+    assert skill.source == "workspace"
+    assert skill.allowed_tools == ["read_file"]
+    assert "User arguments: src" in loader.render_prompt(skill, "src")
+    assert loader.resolve("../review", tmp_path) is None
+
+
+# 功能：验证其他工具和共享目录的技能既不列出也不能解析，且不覆盖内建技能。
+# 设计：隔离用户目录与工作区，在各外部来源放入独有技能和同名覆盖文件以检测扫描泄漏。
+def test_external_skill_directories_are_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "repo"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for root in (home, workspace):
+        for directory in (".codex", ".claude", ".agents"):
+            folder = root / directory / "skills" / "external"
+            folder.mkdir(parents=True)
+            (folder / "SKILL.md").write_text(
+                "---\nname: external\ndescription: External skill\n---\nExternal prompt\n",
+                encoding="utf-8",
+            )
+            (folder.parent / "review.md").write_text(
+                "---\nname: review\ndescription: External override\n---\nExternal prompt\n",
+                encoding="utf-8",
+            )
+    folder = home / ".agentlite" / "skills" / "personal"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("Personal prompt\n", encoding="utf-8")
+    loader = SkillLoader()
+    assert set(loader.list_all(workspace)) == {"init", "review", "skill-creator", "personal"}
+    assert loader.resolve("external", workspace) is None
+    review = loader.resolve("review", workspace)
+    assert review is not None
+    assert review.source == "builtin"
+    personal = loader.resolve("personal", workspace)
+    assert personal is not None
+    assert personal.source == "user"

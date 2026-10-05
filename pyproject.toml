@@ -15,7 +15,7 @@ dependencies = [
     "pydantic>=2.0",       # 数据校验与序列化（含 JSON 模型等）
     "python-dotenv>=1.0",  # .env 文件解析
     "anthropic>=0.25",     # Anthropic LLM SDK（流式 + prompt caching）
-    "openai>=1.0",         # OpenAI-compatible Chat Completions SDK
+    "openai>=1.66.0",      # OpenAI-compatible Chat Completions and Responses SDK
     "textual>=0.75",       # 终端 UI 框架（lite-tui）
     "httpx[socks]>=0.28.1",
     "pyyaml>=6.0",
@@ -40,6 +40,7 @@ dev = [
     "mypy>=1.10",           # 静态类型检查
     "pytest>=8.0",          # 单元测试
     "pytest-asyncio>=0.23", # 异步测试支持
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 # ---- Ruff：统一代码风格 ----

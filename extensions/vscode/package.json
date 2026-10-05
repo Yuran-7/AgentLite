@@ -1,8 +1,9 @@
 {
   "name": "agentlite-vscode",
   "displayName": "AgentLite",
-  "description": "AgentLite core 的 VS Code 侧边栏客户端",
-  "version": "0.0.46",
+  "description": "AgentLite 是一款轻量级 AI 编程助手。",
+  "author": "Ryan Yu",
+  "version": "0.0.59",
   "icon": "media/icon.png",
   "publisher": "agentlite-local",
   "license": "MIT",

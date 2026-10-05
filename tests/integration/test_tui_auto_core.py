@@ -26,6 +26,7 @@ def isolated_core_processes(
         f'[logging]\nfile="{tmp_path.as_posix()}/core.log"\n', encoding="utf-8",
     )
     monkeypatch.setenv("AGENTLITE_CONFIG", str(config_path))
+    monkeypatch.setenv("AGENTLITE_LOG_FILE", str(tmp_path / "core.log"))
     monkeypatch.setenv("LLM_API_KEY", "local-test-only")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     processes: list[subprocess.Popen[bytes]] = []

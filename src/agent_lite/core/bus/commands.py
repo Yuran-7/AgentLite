@@ -5,7 +5,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Discriminator, Field
 
 from agent_lite.core.llm.images import ImageAttachment
+from agent_lite.core.llm.reasoning import ReasoningEffort
 from agent_lite.core.memory.model import MemoryRecord, MemoryScope
+from agent_lite.core.permissions.types import PermissionMode
 from agent_lite.core.session.model import SessionMode, SessionStatus
 
 
@@ -62,6 +64,7 @@ class FrontendUnregisterResult(BaseModel):
 
 
 class AgentRunCommand(BaseModel):
+    permission_mode: PermissionMode | None = None
     type: Literal["agent.run"] = "agent.run"
     goal: str
     workspace_root: str | None = None
@@ -84,6 +87,7 @@ class EventSubscribeResult(BaseModel):
 
 
 class SessionCreateCommand(BaseModel):
+    permission_mode: PermissionMode | None = None
     type: Literal["session.create"] = "session.create"
     mode: SessionMode = "chat"
     title: str = ""
@@ -91,6 +95,7 @@ class SessionCreateCommand(BaseModel):
 
 
 class SessionCreateResult(BaseModel):
+    permission_mode: PermissionMode = "manual"
     session_id: str
     status: SessionStatus
     workspace_root: str | None = None
@@ -139,8 +144,37 @@ class ModelListCommand(BaseModel):
     workspace_root: str | None = None
 
 
+class SessionPermissionModeCommand(BaseModel):
+    type: Literal["session.permission_mode"] = "session.permission_mode"
+    session_id: str
+    mode: PermissionMode | None = None
+
+
+class SessionCollaborationCommand(BaseModel):
+    permission_mode: PermissionMode | None = None
+    type: Literal["session.collaboration"] = "session.collaboration"
+    session_id: str
+    mode: Literal["default", "plan"] | None = None
+
+
+class UserInputRespondCommand(BaseModel):
+    type: Literal["user_input.respond"] = "user_input.respond"
+    session_id: str
+    request_id: str
+    answers: dict[str, str]
+
+
+class SessionReasoningCommand(BaseModel):
+    type: Literal["session.reasoning"] = "session.reasoning"
+    session_id: str
+    effort: ReasoningEffort | None = None  # Omitted reads; empty string resets override.
+
+
 class SessionResumeResult(BaseModel):
+    permission_mode: PermissionMode = "manual"
     model_id: str | None = None
+    reasoning_effort: str = ""
+    collaboration_mode: Literal["default", "plan"] = "default"
     session_id: str
     title: str
     status: SessionStatus
@@ -249,6 +283,22 @@ class McpListCommand(BaseModel):
     type: Literal["mcp.list"] = "mcp.list"
 
 
+class SkillListCommand(BaseModel):
+    type: Literal["skill.list"] = "skill.list"
+    workspace_root: str | None = None
+
+
+class SkillSummary(BaseModel):
+    name: str
+    description: str
+    source: str
+    path: str
+
+
+class SkillListResult(BaseModel):
+    skills: list[SkillSummary]
+
+
 class McpManageCommand(BaseModel):
     type: Literal["mcp.manage"] = "mcp.manage"
     action: Literal["reload", "reconnect", "set_enabled", "add", "configure"]
@@ -342,8 +392,13 @@ Command = Annotated[
     | SessionResumeCommand
     | SessionRenameCommand
     | SessionSetModelCommand
+    | SessionPermissionModeCommand
+    | SessionCollaborationCommand
+    | UserInputRespondCommand
+    | SessionReasoningCommand
     | ModelListCommand
     | McpListCommand
+    | SkillListCommand
     | McpManageCommand
     | SessionSetWorkspaceCommand
     | SessionSendMessageCommand

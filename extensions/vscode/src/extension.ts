@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ensureCore } from './core';
@@ -12,6 +12,7 @@ import { BookmarkStore } from './bookmarks';
 import { ArchiveStore } from './archives';
 import { codeBlocks } from './code-blocks';
 import { PreviewDocuments } from './preview-documents';
+import { gitWorkspacePaths, ripgrepWorkspacePaths, searchWorkspaceEntries, workspaceEntries, type WorkspaceEntry } from './workspace-files';
 
 let provider: ChatProvider | undefined;
 
@@ -25,14 +26,19 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand('agentLite.configureMcp', () => provider?.openMcpSettings()));
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(document => {
     if (document.uri.fsPath.endsWith('settings.json')) void provider?.refreshModels();
+    if (document.uri.fsPath.endsWith('.gitignore')) provider?.clearWorkspaceFiles();
     provider?.mcpSettingsSaved(document.uri.fsPath);
   }));
+  context.subscriptions.push(vscode.workspace.onDidCreateFiles(() => provider?.clearWorkspaceFiles()));
+  context.subscriptions.push(vscode.workspace.onDidDeleteFiles(() => provider?.clearWorkspaceFiles()));
+  context.subscriptions.push(vscode.workspace.onDidRenameFiles(() => provider?.clearWorkspaceFiles()));
 }
 
 // 卸载扩展时清理自己的任务和连接，保留共享 core。
 export async function deactivate(): Promise<void> { await provider?.shutdown(); provider = undefined; }
 
 class ChatProvider implements vscode.WebviewViewProvider {
+  clearWorkspaceFiles(): void { this.workspaceFiles = undefined; }
   mcpSettingsSaved(path: string): void {
     if (path === this.session?.state.mcpSettingsPath) this.session.mcpSettingsSaved();
   }
@@ -45,6 +51,8 @@ class ChatProvider implements vscode.WebviewViewProvider {
   private readonly bookmarks: BookmarkStore;
   private readonly archives: ArchiveStore;
   private readonly previews: PreviewDocuments;
+  private workspaceFiles?: Promise<WorkspaceEntry[]>;
+  private workspaceFilesAt = 0;
 
   // 保存插件资源和日志目录，不在页面中暴露进程控制能力。
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -89,6 +97,20 @@ class ChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (message.type === 'openLogs') { await this.openLogs(); return; }
+    if (message.type === 'searchWorkspaceFiles') {
+      if (!this.supported() || !this.session || this.session.state.connection !== 'ready') return;
+      const session = this.session;
+      try {
+        const files = await this.listWorkspaceEntries();
+        if (session !== this.session) return;
+        this.post({ type: 'workspaceFiles', requestId: message.requestId,
+          files: searchWorkspaceEntries(files, message.query) });
+      } catch (error) {
+        this.post({ type: 'workspaceFilesError', requestId: message.requestId,
+          message: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
     if (message.type === 'viewFileChanges' || message.type === 'undoFileChanges') {
       const session = this.session;
       if (!session) return;
@@ -137,17 +159,23 @@ class ChatProvider implements vscode.WebviewViewProvider {
       } catch (error) { this.session?.report(error); }
       return;
     }
-    if (message.type === 'copyAnswer' || message.type === 'openAnswer' || message.type === 'copyMessage') {
+    if (message.type === 'copyAnswer' || message.type === 'openAnswer' || message.type === 'copyMessage' || message.type === 'downloadPlan') {
       const card = this.session?.state.cards.find(item => item.id === message.cardId &&
         (message.type === 'copyMessage' ? item.kind === 'user' : item.kind === 'assistant'));
       if (!card?.text.trim()) return;
+      const plan = card.text.match(/<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/)?.[1];
+      const content = message.type === 'copyMessage' ? card.text : plan ?? card.text;
       try {
-        if (message.type !== 'openAnswer') {
-          await vscode.env.clipboard.writeText(card.text);
+        if (message.type === 'downloadPlan') {
+          if (!plan) return;
+          const uri = await vscode.window.showSaveDialog({ saveLabel: '保存计划', filters: { Markdown: ['md'] } });
+          if (uri) await vscode.workspace.fs.writeFile(uri, Buffer.from(plan, 'utf8'));
+        } else if (message.type !== 'openAnswer') {
+          await vscode.env.clipboard.writeText(content);
           vscode.window.setStatusBarMessage('已复制', 2000);
           this.post({ type: 'copied', cardId: card.id });
         } else {
-          await this.previews.open(`answer:${card.id}`, '回答.md', card.text, 'markdown');
+          await this.previews.open(`answer:${card.id}`, plan ? 'Plan.md' : '回答.md', content, 'markdown');
         }
       } catch (error) { this.session?.report(error); }
       return;
@@ -159,11 +187,36 @@ class ChatProvider implements vscode.WebviewViewProvider {
       } else if (message.type === 'newSession') {
         if (this.session?.state.connection === 'ready') await this.session.newSession();
       } else if (message.type === 'compactSession') await this.session?.compactSession();
-      else if (message.type === 'send') await this.session?.send(message.content, message.images);
+      else if (message.type === 'send') {
+        const entries = message.references?.length ? await this.listWorkspaceEntries() : [];
+        const byPath = new Map(entries.map(entry => [entry.path, entry]));
+        const references = message.references?.filter(path => byPath.has(path) &&
+          message.content.includes(/\s/.test(path) ? `@"${path}"` : `@${path}`)) ?? [];
+        if (message.references && references.length !== message.references.length) {
+          this.session?.report(new Error('引用的文件已不在当前工作区，请重新选择。')); return;
+        }
+        for (const path of references) {
+          const file = join(this.session!.state.workspace, ...path.split('/'));
+          const status = await stat(file).catch(() => undefined);
+          if (!status || (byPath.get(path)?.kind === 'directory' ? !status.isDirectory() : !status.isFile())) {
+            this.session?.report(new Error(`引用的文件已不可读取：${path}`)); return;
+          }
+        }
+        await this.session?.send(message.content, message.images, references);
+      }
       else if (message.type === 'refreshHistory') await this.session?.refreshHistory();
       else if (message.type === 'refreshModels') await this.session?.refreshModels();
+      else if (message.type === 'refreshSkills') {
+        this.post({ type: 'skills', skills: await this.session?.listSkills() ?? [] });
+      }
       else if (message.type === 'resumeSession') await this.session?.resumeSession(message.sessionId);
       else if (message.type === 'selectModel') await this.session?.selectModel(message.modelId);
+      else if (message.type === 'permissionMode') await this.session?.permissionMode(message.mode);
+      else if (message.type === 'collaboration') await this.session?.collaboration(message.mode);
+      else if (message.type === 'answerQuestions') await this.session?.answerQuestions(message.requestId, message.answers);
+      else if (message.type === 'implementPlan') await this.session?.implementPlan(message.cardId);
+      else if (message.type === 'reasoning') await this.session?.reasoning(message.effort);
+      else if (message.type === 'setMemory') await this.session?.setMemory(message.setting, message.enabled);
       else if (message.type === 'openSettings') await this.openSettings();
       else if (message.type === 'refreshMcp') await this.session?.refreshMcp();
       else if (message.type === 'reloadMcp') await this.session?.manageMcp('reload');
@@ -185,8 +238,26 @@ class ChatProvider implements vscode.WebviewViewProvider {
       else if (message.type === 'permission') await this.session?.permission(message.toolUseId, message.decision);
     } catch (error) {
       if (message.type === 'newSession') this.session?.fail(String(error));
+      else if (message.type === 'refreshSkills') this.post({ type: 'skillsError', message: String(error) });
       else this.session?.report(error);
     }
+  }
+
+  // 列出当前会话工作区的文件，并排除依赖和版本控制目录。
+  private async listWorkspaceEntries(): Promise<WorkspaceEntry[]> {
+    if (this.workspaceFiles && Date.now() - this.workspaceFilesAt > 10_000) this.workspaceFiles = undefined;
+    if (!this.workspaceFiles) {
+      const root = this.session?.state.workspace;
+      const folder = vscode.workspace.workspaceFolders?.find(item => item.uri.fsPath === root);
+      if (!folder) return [];
+      this.workspaceFilesAt = Date.now();
+      this.workspaceFiles = gitWorkspacePaths(root!).catch(() => ripgrepWorkspacePaths(root!)).catch(async () => {
+        const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), undefined, 10000);
+        return uris.map(uri => vscode.workspace.asRelativePath(uri, false));
+      }).then(workspaceEntries)
+        .catch(error => { this.workspaceFiles = undefined; throw error; });
+    }
+    return this.workspaceFiles;
   }
 
   async openSettings(): Promise<void> {
@@ -272,6 +343,7 @@ class ChatProvider implements vscode.WebviewViewProvider {
         return;
       }
       await this.session?.dispose();
+      this.workspaceFiles = undefined;
       const session = new ChatSession(folder.uri.fsPath, state => this.post({ type: 'state', state }));
       this.session = session; session.beginConnection();
       const config = vscode.workspace.getConfiguration('agentLite');

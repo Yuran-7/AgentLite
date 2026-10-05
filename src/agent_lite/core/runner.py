@@ -18,11 +18,15 @@ from agent_lite.core.events.bus import EventBus, EventHandler
 from agent_lite.core.events.writer import EventAppender, EventWriter
 from agent_lite.core.llm.base import LLMProvider
 from agent_lite.core.llm.factory import create_llm_provider
+from agent_lite.core.llm.reasoning import with_reasoning
 from agent_lite.core.llm.settings import resolve_model
 from agent_lite.core.loop import AgentLoop
 from agent_lite.core.mcp.server import McpServerManager
 from agent_lite.core.memory.loader import load_agent_context
-from agent_lite.core.permissions.manager import PermissionManager
+from agent_lite.core.permissions.classifier import AutoModeClassifier
+from agent_lite.core.permissions.manager import PermissionContext, PermissionManager
+from agent_lite.core.permissions.types import PermissionMode
+from agent_lite.core.planning import PLAN_PROMPT, RequestUserInputTool, UserInputManager
 from agent_lite.core.runs import new_run_id
 from agent_lite.core.session.model import Session
 from agent_lite.core.session.store import SessionStore
@@ -77,7 +81,9 @@ class AgentRunner:
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
         task_manager: SubagentTaskManager | None = None,
+        input_manager: UserInputManager | None = None,
     ) -> None:
+        self._input_manager = input_manager
         self._config = config
         self._bus = bus
         self._provider = provider
@@ -96,7 +102,9 @@ class AgentRunner:
             resolve_model(self._config.llm, session.model_id, session.workspace_root)
             if session is not None else self._config.llm
         )
-        provider = create_llm_provider(replace(config, default_model=model))
+        provider = create_llm_provider(with_reasoning(
+            replace(config, default_model=model), session.reasoning_effort if session else ""
+        ))
         if self._trace is not None:
             return TracingProvider(
                 provider,
@@ -119,6 +127,7 @@ class AgentRunner:
         agent_context: str = "",
         tool_whitelist: list[str] | None = None,
         file_read_context: FileReadContext | None = None,
+        permission_context: PermissionContext | None = None,
     ) -> ToolRegistry:
         allowed: set[str] | None = (
             {
@@ -132,7 +141,14 @@ class AgentRunner:
         def _ok(name: str) -> bool:
             return allowed is None or name in allowed
 
+        planning = session is not None and session.collaboration_mode == "plan"
+        if planning:
+            safe = {"read_file", "list_dir", "web_search", "web_fetch", "request_user_input"}
+            allowed = safe if allowed is None else allowed & safe
         registry = ToolRegistry()
+        if (planning and self._input_manager is not None and bus is not None
+                and run_id is not None and _ok("request_user_input")):
+            registry.register(RequestUserInputTool(self._input_manager, bus, run_id, session_id))
         directory = (store.session_dir(session.id)
                      if session is not None and store is not None else self._events_file.parent)
         files = FileOperationService(workspace_root, directory, file_read_context)
@@ -164,6 +180,7 @@ class AgentRunner:
                         parent_bus=bus,
                         parent_run_id=run_id,
                         permission_manager=self._permission_manager,
+                        permission_context=permission_context,
                         max_steps=self._config.agent.max_steps,
                         task_manager=self._task_manager,
                         session_id=session_id,
@@ -208,6 +225,7 @@ class AgentRunner:
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
         memory_context: str = "",
+        permission_mode: PermissionMode | None = None,
     ) -> RunOutcome:
         # 1. 确定本次运行的唯一 run_id、目录，以及需要回放的会话上下文
         run_id = run_id or new_run_id()
@@ -224,6 +242,8 @@ class AgentRunner:
             else None
         )
         agent_ctx = load_agent_context(workspace_root)
+        if session is not None and session.collaboration_mode == "plan":
+            agent_ctx += "\n\n" + PLAN_PROMPT
         scope = repr((workspace_root, session.model_id if session else None,
                       system_prompt_override, tool_whitelist, agent_ctx))
         file_read_context = (session_read_context(session_dir, scope)
@@ -276,17 +296,39 @@ class AgentRunner:
             cancelled = False
             registry: ToolRegistry | None = None
             try:
-                provider: LLMProvider = self._provider or create_llm_provider(
-                    resolve_model(self._config.llm, session.model_id, session.workspace_root)
-                    if session is not None else self._config.llm
-                )
+                effective_config = (with_reasoning(
+                    resolve_model(self._config.llm, session.model_id, session.workspace_root),
+                    session.reasoning_effort,
+                ) if session is not None and self._provider is None else self._config.llm)
+                provider: LLMProvider = self._provider or create_llm_provider(effective_config)
                 if self._trace is not None:
                     provider = TracingProvider(
                         provider,
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
-                session_id_str = session.id if session is not None else ""
+                session_id_str = session.id if session is not None else f"run:{run_id}"
+                # 独立解析分类模型完整配置，不复用主模型的连接或消息状态。
+                def classifier_provider() -> LLMProvider:
+                    selected = self._config.permission.classifier_model
+                    if selected:
+                        classifier_config = resolve_model(
+                            self._config.llm, selected, session.workspace_root if session else None,
+                        )
+                    else:
+                        classifier_config = replace(effective_config)
+                    return create_llm_provider(classifier_config)
+
+                permission_context = PermissionContext(
+                    mode_getter=(lambda: session.permission_mode) if session else (
+                        lambda: permission_mode or self._config.permission.default_mode),
+                    workspace_root=workspace_root,
+                    classifier=(AutoModeClassifier(
+                        classifier_provider, self._config.permission.classifier_timeout_s)
+                                if self._config.permission.classifier_enabled else None),
+                    user_messages_getter=(lambda: store.read_permission_users(session.id))
+                        if session is not None and store is not None else lambda: [goal],
+                )
                 registry = self._build_registry(  # 管理本次注册用的工具，工具注册表
                     session=session,
                     store=store,
@@ -298,11 +340,13 @@ class AgentRunner:
                     agent_context=agent_ctx,
                     tool_whitelist=tool_whitelist,
                     file_read_context=file_read_context,
+                    permission_context=permission_context,
                 )
                 compactor = Compactor(bus, session_dir, session_id_str) # 上下文压缩器
                 loop = AgentLoop(
                     provider, registry, bus,
                     permission_manager=self._permission_manager,
+                    permission_context=permission_context,
                     compactor=compactor,
                     compact_threshold=self._config.compaction.auto_threshold,
                     session_id=session_id_str,

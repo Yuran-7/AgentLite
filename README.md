@@ -74,7 +74,27 @@ MY_MODEL_API_KEY=替换为自己的密钥
 
 `protocol` 支持 `openai` 和 `anthropic`。使用 Anthropic 官方接口时，设置为 `anthropic`，填写对应模型名称并省略 `baseUrl`。模型窗口可以通过可选字段 `contextWindow` 指定，单位为 token。
 
-也可以先打开 VS Code 插件，点击输入框的“模型配置”齿轮创建并编辑 `settings.json`。后端可在没有密钥时启动，发送消息时才检查凭证。
+OpenAI 模型可通过 `apiMode` 选择接口：`"chat_completions"`（默认）或 `"responses"`。省略该字段时，已有配置继续使用 Chat Completions。该字段仅用于 `protocol: "openai"`。例如 RightCode 的 Responses 配置：
+
+```json
+{
+  "id": "rightcode-responses",
+  "name": "RightCode Responses",
+  "protocol": "openai",
+  "apiMode": "responses",
+  "model": "替换为账户可用模型",
+  "baseUrl": "https://www.rightapi.ai/codex/v1",
+  "apiKeyEnv": "MY_MODEL_API_KEY"
+}
+```
+
+将此对象加入 `models` 数组即可在模型列表中选择。也可为同一模型创建两个不同 `id` 的配置，分别选择两种接口。`baseUrl` 填到 `/v1`，不要包含 `/responses` 或 `/chat/completions`。Responses 使用本地会话历史（`store: false`），支持流式文本、函数工具调用和图片输入。修改配置后下一次请求生效；更新代码后需重启 core。
+
+OpenAI 模型可设置可选字段 `"reasoningEffort": "high"`，作为模型的默认推理强度。VS Code 中 `/reasoning` 打开档位选择，`/reasoning high` 直接设置，`/reasoning default` 恢复模型配置或服务商默认值。TUI 支持 `/reasoning` 查看当前值和可选档位，以及相同的参数命令。会话覆盖仅影响当前会话，从下一轮请求生效，并在恢复会话时保留；新会话使用模型默认值。主代理和子代理沿用该选择，切换不兼容模型时清除会话覆盖。
+
+Responses 使用 `reasoning.effort`，Chat Completions 使用 `reasoning_effort`。可用值取决于模型及中转站：已知 OpenAI 模型会限制选择范围；自定义模型名称由上游校验，不自动降档。Anthropic 暂不支持此设置。参见 [OpenAI 推理模型文档](https://developers.openai.com/api/docs/guides/reasoning)。
+
+也可以先打开 VS Code 插件，在输入框输入 `/settings` 创建并编辑 `settings.json`。后端可在没有密钥时启动，发送消息时才检查凭证。
 
 JSON 保存模型信息，密钥放在 `.env` 或进程环境变量中。系统环境变量优先于用户 `.env`；项目目录的 `.env` 不会被读取。修改模型 JSON 后下一次请求生效，修改已加载的密钥需要重启 core。
 
@@ -110,6 +130,8 @@ npm run package
 macOS/Linux 对应 `.venv/bin/python`。聊天会话使用当前打开的项目作为工作区，Python 后端和模型配置可以共用，无需每个项目都安装一份。
 
 打开聊天后直接输入任务，例如“解释这个项目的启动流程”。**Enter** 发送，**Shift+Enter** 换行；工具执行过程中可确认权限或取消任务。顶部可新建、恢复会话或查看收藏，输入框底部可选择模型。
+
+要引用当前工作区的文件或目录，在消息中输入 `@` 搜索名称，或点击输入框下方的 **+ → 引用工作区文件**。选中后会显示高亮引用标签，可点击 × 移除；发送时 AgentLite 会读取文件或查看目录。搜索遵守 `.gitignore`，默认只显示顶层。仅手动输入路径而未从列表选中时，它只是普通消息文字。
 
 在输入框开头输入 `/` 可查看快捷命令，已支持 `/new`、`/history`、`/model`、`/settings`、`/status`、`/logs` 和 `/mcp`。通过 `/mcp` 可查看、添加和管理工具服务器。
 
@@ -172,6 +194,22 @@ core 的 TOML 配置按“内建默认值 → 用户配置 → 启动目录的 `
 
 大工具结果的保存、预览预算与按需读取方式见 [工具结果存储说明](docs/tool-result-storage.md)。
 
+## 技能（Skills）
+
+在工作区的 `.agentlite/skills/<名称>/SKILL.md` 或用户目录的 `~/.agentlite/skills/<名称>/SKILL.md` 创建技能；也支持这些目录下的旧格式 `<名称>.md`。仅加载 AgentLite 内置技能和这两个专属目录，不扫描 `.codex/skills/`、`.claude/skills/` 或 `.agents/skills/`。同名技能以工作区版本优先。文件使用 YAML frontmatter 描述 `name`、`description`，正文写技能指令；可选 `allowed-tools` 列表限制工具。
+
+在 VS Code 聊天输入框输入 `/skills` 可浏览并选择技能，随后补充参数发送；也可直接发送 `/<名称> 参数`。正文中的 `$ARGUMENTS` 会替换为参数。TUI 同样支持斜杠调用。
+
+内置 `/skill-creator` 可创建或修改 AgentLite 技能，例如 `/skill-creator 创建一个解释 Python 代码的技能，包含执行流程和输入输出示例`。默认写入工作区 `.agentlite/skills/<名称>/SKILL.md`；明确要求跨项目使用时写入用户技能目录。
+
+```markdown
+---
+name: review
+description: 检查代码问题
+---
+请检查 $ARGUMENTS，报告具体文件和行号。
+```
+
 ## 常见问题
 
 **插件提示找不到 Python 或 AgentLite**：先在仓库执行 `uv sync`，然后将 `agentLite.pythonPath` 设置为仓库 `.venv` 中的 Python 3.12 解释器。
@@ -204,3 +242,56 @@ uv run mypy src
 ```
 
 插件检查在 `extensions/vscode` 执行 `npm run check` 和 `npm test`。真实模型测试单独运行，会产生 API 请求；具体步骤见 [插件文档](extensions/vscode/README.md)。
+
+
+# 计划模式
+
+VS Code 默认不显示模式标签。在 `/` 菜单选择 Plan 或输入 `/plan` 进入计划模式后，
+模型右侧显示“灯泡 + Plan”。悬停或键盘聚焦时灯泡变为叉号，点击标签退出计划模式。
+重复选择 `/plan` 保持开启；运行期间不能切换模式。
+计划模式先阅读代码，再通过弹窗逐题询问影响方案的偏好；每次只问一个问题，
+收到答案后模型重新思考，按需提出下一题。每题提供 2–3 个选项，可以直接点击选择、
+填写其他方案或 Skip 跳过。默认选项不会自动提交，
+等待回答不会因普通工具的超时限制而结束，取消任务会清理待回答请求。
+
+最终方案以独立 Plan 卡片展示，支持展开、复制、打开和下载 Markdown。
+点击“开始执行计划”会切换为执行模式并提交该计划；
+也可留在计划模式继续修改方案。协作模式随会话保存，恢复历史会话后仍然生效。
+TUI 使用 `/plan`、`/plan on`、`/plan off`，同样支持选择题弹窗；执行时先 `/plan off` 再发送执行指令。
+
+当前计划模式只提供文件读取、目录浏览和网页查询工具，文件写入、Shell、MCP 和子代理
+不开放，以保证规划期间不会执行修改。最终计划的质量和是否需要提问由所选模型决定。
+
+
+
+## 会话权限模式
+
+新会话默认使用 **Auto**；旧会话缺少权限字段时保持 **Manual**。
+TUI 用 `/mode manual|edits|auto|plan` 或 Shift+Tab 切换。VS Code 点击输入区的盾牌图标，展开 Manual、Edit automatically、Auto 三项权限菜单；Plan 通过 `/plan` 进入。
+CLI 支持 `lite chat --permission-mode manual` 和 `lite run --goal "任务" --permission-mode auto`。
+
+- **Manual**：沿用现有审批策略及长期授权记录。
+- **Edit automatically**：自动允许工作区普通文件编辑和能确认的只读命令；保护路径、危险操作和工作区外文件编辑需确认。
+- **Auto**：普通编辑和查询直接执行，其余操作由独立模型根据真实用户意图审批；模型不可用、超时或无法确定时询问用户。
+- **Plan**：只读探索和生成计划，保留此前权限模式；进入、退出 Plan 需运行空闲。
+
+Auto 不使用整工具级长期放行，也不提供“始终允许”；已有授权记录在 Manual 中继续有效。
+保护目录、敏感配置和已识别的高危操作始终要求确认。分类器的每次判断会产生一次额外模型请求，放行结果不缓存。
+用户意图独立保存在会话目录的 `permission_users.jsonl`，不会从压缩摘要、工具输出或子 agent 的任务提示推断授权。
+旧会话没有该日志时，未收到新的真实用户输入前，灰色操作会转人工确认。
+
+用户配置 `~/.agentlite/config.toml` 使用现有的单数配置节：
+
+```toml
+[permission]
+timeout_s = 60.0
+default_mode = "auto" # manual | accept_edits | auto，仅影响新会话
+classifier_enabled = true
+classifier_model = "" # 留空使用当前运行模型；非空填写 settings.json 中的模型 id
+classifier_timeout_s = 20.0
+```
+
+对应环境变量为 `AGENTLITE_PERMISSION_DEFAULT_MODE`、`AGENTLITE_PERMISSION_CLASSIFIER_ENABLED`、
+`AGENTLITE_PERMISSION_CLASSIFIER_MODEL` 和 `AGENTLITE_PERMISSION_CLASSIFIER_TIMEOUT_S`。
+关闭分类器后仍保留普通编辑和查询的快速通道，其余 Auto 操作转人工确认。
+运行中可以切换三种权限模式，切换对下一次权限检查生效；已经开始的分类和审批保持原模式。

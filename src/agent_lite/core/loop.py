@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,7 @@ from agent_lite.core.tools.result_storage import ToolResultStore
 
 if TYPE_CHECKING:
     from agent_lite.core.compact.compactor import Compactor
-    from agent_lite.core.permissions.manager import PermissionManager
+    from agent_lite.core.permissions.manager import PermissionContext, PermissionManager
     from agent_lite.core.subagent.registry import SubagentTaskManager
 
 
@@ -35,6 +36,7 @@ class AgentLoop:
         bus: EventBus,
         *,
         permission_manager: PermissionManager | None = None,
+        permission_context: PermissionContext | None = None,
         compactor: Compactor | None = None,
         compact_threshold: float = 0.80,
         session_id: str = "",
@@ -45,6 +47,7 @@ class AgentLoop:
         self._registry = registry
         self._bus = bus
         self._permission_manager = permission_manager
+        self._permission_context = permission_context
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
@@ -55,6 +58,9 @@ class AgentLoop:
     async def run(self, context: ExecutionContext) -> None:
         from agent_lite.core.tools.invocation import invoke_tool
 
+        calls: list[dict[str, object]] = []
+        permission_context = (replace(self._permission_context, tool_calls_getter=lambda: calls)
+                              if self._permission_context is not None else None)
         pending_deliveries: list[ToolResult] = []
         while not context.is_done():
             if self._task_manager is not None:
@@ -121,14 +127,27 @@ class AgentLoop:
                 budget = max(
                     1, self._result_store.batch_token_limit // max(1, len(response.tool_calls)),
                 )
+                input_requested = False
                 for tc in response.tool_calls:
+                    if tc.name == "request_user_input":
+                        if input_requested:
+                            context.add_tool_result(
+                                tc.id, "Ask only one question per model response. "
+                                "Reconsider the user's answer before asking another question.",
+                                is_error=True,
+                            )
+                            continue
+                        input_requested = True
                     result = await invoke_tool(
                         self._registry, tc, self._bus, context.run_id,
                         permission_manager=self._permission_manager,
+                        permission_context=permission_context,
                         session_id=self._session_id,
                         result_store=self._result_store,
                         token_budget=budget,
                     )
+                    calls.append({"tool_name": tc.name, "params": dict(tc.input)})
+                    calls[:] = calls[-10:]
                     context.add_tool_result(tc.id, result.model_content(), is_error=result.is_error)
                     pending_deliveries.append(result)
                     task = asyncio.current_task()

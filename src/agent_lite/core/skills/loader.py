@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 
 @dataclass
 class Skill:
@@ -11,126 +13,82 @@ class Skill:
     description: str
     system_prompt_template: str
     allowed_tools: list[str] = field(default_factory=list)
+    path: Path | None = None
+    source: str = ""
 
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+_VALID_NAME = re.compile(r"^[\w-]+$", re.UNICODE)
 
 
-# 解析 Markdown skill 文件，提取 frontmatter 和正文 system prompt
+# 解析 Codex/Claude 风格 SKILL.md 与旧版平铺 Markdown 文件。
 def _parse_skill_file(path: Path) -> Skill:
-    text = path.read_text(encoding="utf-8")
-    name = path.stem
-    description = ""
-    allowed_tools: list[str] = []
-    body = text
-
-    m = _FRONTMATTER_RE.match(text)
-    if m:
-        front = m.group(1)
-        body = text[m.end():]
-        lines = front.splitlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-            if stripped.startswith("name:"):
-                name = stripped[len("name:"):].strip().strip('"').strip("'")
-            elif stripped.startswith("description:"):
-                val = stripped[len("description:"):].strip().strip('"').strip("'")
-                # YAML 块标量：> (折叠) 或 | (保留换行)，后续缩进行是内容
-                if val in (">", "|"):
-                    fold = val == ">"
-                    parts: list[str] = []
-                    i += 1
-                    while i < len(lines) and (
-                        lines[i].startswith(" ") or lines[i].startswith("\t")
-                    ):
-                        parts.append(lines[i].strip())
-                        i += 1
-                    description = (" ".join(parts) if fold else "\n".join(parts)).strip()
-                    continue
-                else:
-                    description = val
-            elif stripped.startswith("allowed_tools:"):
-                pass
-            elif stripped.startswith("- "):
-                tool_name = stripped[2:].strip()
-                allowed_tools.append("shell" if tool_name == "bash" else tool_name)
-            i += 1
-
-    return Skill(
-        name=name,
-        description=description,
-        system_prompt_template=body.strip(),
-        allowed_tools=allowed_tools,
-    )
+    content = path.read_text(encoding="utf-8-sig")
+    match = _FRONTMATTER_RE.match(content)
+    metadata = yaml.safe_load(match.group(1)) if match else {}
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise ValueError("skill frontmatter must be a mapping")
+    name = path.parent.name if path.name == "SKILL.md" else path.stem
+    declared = metadata.get("name", name)
+    if not isinstance(declared, str) or not _VALID_NAME.fullmatch(declared):
+        raise ValueError("invalid skill name")
+    description = metadata.get("description", "")
+    if not isinstance(description, str):
+        raise ValueError("skill description must be text")
+    tools = metadata.get("allowed-tools", metadata.get("allowed_tools", []))
+    if isinstance(tools, str):
+        tools = tools.split()
+    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        raise ValueError("allowed tools must be a list")
+    body = (content[match.end():] if match else content).strip()
+    if not body:
+        raise ValueError("skill body is empty")
+    return Skill(declared, description.strip(), body,
+                 ["shell" if tool == "bash" else tool for tool in tools], path=path)
 
 
-# 按三级优先级（项目本地 > 用户全局 > 内建）查找并解析 skill
 class SkillLoader:
     _BUILTIN_DIR = Path(__file__).parent / "builtin"
 
-    # 按优先级查找 skill 文件；未找到返回 None
-    def resolve(self, name: str) -> Skill | None:
-        for path in self._search_paths(name):
-            if path.exists():
+    # 仅扫描内建和 AgentLite 专属目录，工作区覆盖用户及内建的同名 skill。
+    def _directories(self, workspace_root: str | Path | None = None) -> list[tuple[Path, str]]:
+        workspace = Path(workspace_root) if workspace_root else Path.cwd()
+        return [(self._BUILTIN_DIR, "builtin"),
+                (Path("~/.agentlite/skills").expanduser(), "user"),
+                (workspace / ".agentlite/skills", "workspace")]
+
+    # 读取当前工作区可见的 skill，并跳过损坏文件。
+    def list_all_skills(self, workspace_root: str | Path | None = None) -> list[Skill]:
+        found: dict[str, Skill] = {}
+        for directory, source in self._directories(workspace_root):
+            if not directory.is_dir():
+                continue
+            paths = sorted(directory.glob("*.md")) + sorted(directory.glob("*/SKILL.md"))
+            for path in paths:
                 try:
-                    return _parse_skill_file(path)
-                except Exception:
-                    return None
-        return None
+                    skill = _parse_skill_file(path)
+                    skill.source = source
+                    found[skill.name] = skill
+                except (OSError, UnicodeError, yaml.YAMLError, ValueError):
+                    continue
+        return sorted(found.values(), key=lambda skill: skill.name)
 
-    # 返回候选路径列表，同时支持扁平文件（name.md）和目录式（name/SKILL.md）两种格式
-    def _search_paths(self, name: str) -> list[Path]:
-        dirs = [
-            Path(".agentlite/skills"),
-            Path("~/.agentlite/skills").expanduser(),
-            self._BUILTIN_DIR,
-        ]
-        paths: list[Path] = []
-        for d in dirs:
-            paths.append(d / f"{name}.md")
-            paths.append(d / name / "SKILL.md")
-        return paths
+    # 按名称查找当前工作区可见的 skill。
+    def resolve(self, name: str, workspace_root: str | Path | None = None) -> Skill | None:
+        if not _VALID_NAME.fullmatch(name):
+            return None
+        return next((skill for skill in self.list_all_skills(workspace_root)
+                     if skill.name == name), None)
 
-    # 列出所有可用 skill 名称（内建 + 用户全局 + 项目本地，去重后以项目本地覆盖为准）
-    def list_all(self) -> list[str]:
-        seen: dict[str, None] = {}
-        for d in [
-            self._BUILTIN_DIR,
-            Path("~/.agentlite/skills").expanduser(),
-            Path(".agentlite/skills"),
-        ]:
-            if d.exists():
-                for f in sorted(d.glob("*.md")):
-                    seen[f.stem] = None
-                for f in sorted(d.glob("*/SKILL.md")):
-                    seen[f.parent.name] = None
-        return list(seen)
+    # 返回可供斜杠菜单展示的名称。
+    def list_all(self, workspace_root: str | Path | None = None) -> list[str]:
+        return [skill.name for skill in self.list_all_skills(workspace_root)]
 
-    # 列出所有可用 Skill 对象（含描述），项目本地覆盖同名内建
-    def list_all_skills(self) -> list[Skill]:
-        seen: dict[str, Skill] = {}
-        for d in [
-            self._BUILTIN_DIR,
-            Path("~/.agentlite/skills").expanduser(),
-            Path(".agentlite/skills"),
-        ]:
-            if d.exists():
-                for f in sorted(d.glob("*.md")):
-                    try:
-                        skill = _parse_skill_file(f)
-                        seen[skill.name] = skill
-                    except Exception:
-                        pass
-                for f in sorted(d.glob("*/SKILL.md")):
-                    try:
-                        skill = _parse_skill_file(f)
-                        seen[skill.name] = skill
-                    except Exception:
-                        pass
-        return list(seen.values())
-
-    # 将 $ARGUMENTS 替换为用户传入的参数字符串
+    # 展开调用参数，保留不带占位符的正文原样。
     def render_prompt(self, skill: Skill, arguments: str) -> str:
-        return skill.system_prompt_template.replace("$ARGUMENTS", arguments)
+        body = skill.system_prompt_template.replace("$ARGUMENTS", arguments)
+        if "$ARGUMENTS" not in skill.system_prompt_template and arguments:
+            body += f"\n\nUser arguments: {arguments}"
+        return body

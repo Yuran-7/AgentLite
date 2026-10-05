@@ -5,6 +5,7 @@ import sys
 from typing import Any
 
 from agent_lite.core.config import AgentLiteConfig
+from agent_lite.core.permissions.types import PermissionMode
 from agent_lite.core.transport.socket_client import IpcError, SocketClient
 
 _DECISION_MAP: dict[str, str] = {
@@ -19,6 +20,7 @@ class ChatPrinter:
     # 初始化 chat 模式的流式输出状态和待审批权限请求
     def __init__(self) -> None:
         self._inline = False
+        self.pending_decisions = set(_DECISION_MAP.values())
         self.pending_permission_id: str | None = None
 
     # 若当前 LLM token 尚未换行，则补一个换行
@@ -46,7 +48,11 @@ class ChatPrinter:
             param_preview = str(event.get("param_preview", ""))
             tool_use_id = str(event.get("tool_use_id", ""))
             print(f"[permission] {tool_name}  {param_preview}")
-            print("  y=allow once  a=always allow  n=deny once  d=always deny")
+            self.pending_decisions = set(event.get("allowed_decisions") or _DECISION_MAP.values())
+            if event.get("reason"):
+                print(f"  {event['reason']}")
+            print("  " + "  ".join(f"{key}={value}" for key, value in _DECISION_MAP.items()
+                                  if value in self.pending_decisions))
             self.pending_permission_id = tool_use_id
         elif t == "session.waiting_for_input":
             self._ensure_newline()
@@ -64,7 +70,10 @@ async def _readline(prompt: str) -> str:
 
 
 # 异步核心：创建 chat session，循环读取用户输入并发送到 daemon；权限请求时优先处理审批
-async def _chat_async(config: AgentLiteConfig, workspace_root: str | None = None) -> int:
+async def _chat_async(
+    config: AgentLiteConfig, workspace_root: str | None = None,
+    permission_mode: PermissionMode | None = None,
+) -> int:
     client = SocketClient(config.host, config.port)
     try:
         await client.connect()
@@ -87,6 +96,8 @@ async def _chat_async(config: AgentLiteConfig, workspace_root: str | None = None
         create_params: dict[str, Any] = {"mode": "chat"}
         if workspace_root is not None:
             create_params["workspace_root"] = workspace_root
+        if permission_mode is not None:
+            create_params["permission_mode"] = permission_mode
         created = await client.send_command("session.create", create_params)
         session_id = str(created["session_id"])
         print(f"[session: {session_id}]")
@@ -103,16 +114,15 @@ async def _chat_async(config: AgentLiteConfig, workspace_root: str | None = None
             # 有待审批的权限请求时，将用户输入解释为决策而非聊天消息
             if printer.pending_permission_id:
                 decision = _DECISION_MAP.get(content.lower())
-                if decision is None:
-                    print("  enter y (allow once), a (always allow), "
-                          "n (deny once), d (always deny)")
+                if decision is None or decision not in printer.pending_decisions:
+                    print("  choose an available approval option")
                     continue
                 tool_use_id = printer.pending_permission_id
-                printer.pending_permission_id = None
                 await client.send_command(
                     "permission.respond",
                     {"tool_use_id": tool_use_id, "decision": decision},
                 )
+                printer.pending_permission_id = None
                 continue
 
             await client.send_command(
@@ -135,9 +145,12 @@ async def _chat_async(config: AgentLiteConfig, workspace_root: str | None = None
 
 
 # 执行 lite chat 命令
-def cmd_chat(config: AgentLiteConfig, workspace_root: str | None = None) -> None:
+def cmd_chat(
+    config: AgentLiteConfig, workspace_root: str | None = None,
+    permission_mode: PermissionMode | None = None,
+) -> None:
     try:
-        exit_code = asyncio.run(_chat_async(config, workspace_root))
+        exit_code = asyncio.run(_chat_async(config, workspace_root, permission_mode))
     except KeyboardInterrupt:
         sys.exit(130)
     sys.exit(exit_code)

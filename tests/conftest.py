@@ -29,6 +29,7 @@ async def running_daemon(
     env["AGENTLITE_PORT"] = str(free_port)
     env["AGENTLITE_LOG_FILE"] = ""
     env["AGENTLITE_LOG_LEVEL"] = "WARNING"
+    env["AGENTLITE_TRACE_ENABLED"] = "false"
     env["AGENTLITE_SESSIONS_DIR"] = str(tmp_path / "sessions")
     env["AGENTLITE_MEMORY_DIR"] = str(tmp_path / "memory.db")
     env["AGENTLITE_MCP_SETTINGS"] = str(tmp_path / "mcp.json")

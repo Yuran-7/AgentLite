@@ -54,6 +54,7 @@ class AnthropicProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         context_window: int | None = None,
+        reasoning_effort: str = "",
     ) -> None:
         if client is None:
             resolved_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -69,6 +70,7 @@ class AnthropicProvider:
         else:
             self._client = client
         self._model = model
+        self._reasoning_effort = reasoning_effort
         if context_window is not None and (type(context_window) is not int or context_window <= 0):
             raise ValueError("context_window must be a positive integer")
         self._context_window = context_window or _context_window(model)
@@ -111,6 +113,8 @@ class AnthropicProvider:
         }
         if tools:
             kwargs["tools"] = tools
+        if self._reasoning_effort:
+            kwargs["output_config"] = {"effort": self._reasoning_effort}
 
         text_parts: list[str] = []
         final_message: Any = None

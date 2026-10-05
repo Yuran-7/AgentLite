@@ -20,6 +20,342 @@ function page() {
 const state = (): ChatState => ({ workspace: 'C:/workspace', connection: 'ready', origin: 'reused',
   busy: false, sending: false, cancelling: false, model: 'demo', usage: '', cards: [] });
 
+// 功能：计划模式入口不显示占位标记并真正发送模式切换操作。
+// 设计：驱动打包页面的斜杠菜单和发送按钮，覆盖用户截图中的入口路径。
+test('plan slash entry is implemented and only enters plan mode', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); fixture.render(snapshot);
+  const input = fixture.document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '/plan'; input.dispatchEvent(new fixture.dom.window.Event('input'));
+  assert.equal(fixture.document.querySelector('#slash-plan .slash-badge'), null);
+  fixture.document.getElementById('send')!.click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'collaboration', mode: 'plan' });
+  snapshot.collaborationMode = 'plan'; fixture.render(snapshot);
+  input.value = '/plan'; input.dispatchEvent(new fixture.dom.window.Event('input'));
+  fixture.document.getElementById('send')!.click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'collaboration', mode: 'plan' });
+});
+
+// 功能：计划标签仅在计划模式出现，紧邻模型且可以取消，运行时保持锁定。
+// 设计：重放默认、恢复会话及运行快照，驱动原生按钮覆盖标签生命周期。
+test('plan badge visibility placement cancellation and busy lock', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); fixture.render(snapshot);
+  const badge = fixture.document.querySelector('.plan-mode-toggle') as HTMLButtonElement;
+  assert(badge.hidden); assert.equal(badge.textContent?.trim(), 'Plan');
+  assert.equal(fixture.document.querySelector('.model-control')!.nextElementSibling, badge);
+  assert(badge.querySelector('.plan-bulb')); assert(badge.querySelector('.plan-dismiss'));
+  snapshot.collaborationMode = 'plan'; fixture.render(snapshot);
+  assert(!badge.hidden); assert(!badge.disabled);
+  badge.focus(); assert.equal(fixture.document.activeElement, badge);
+  badge.click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'collaboration', mode: 'default' });
+  snapshot.collaborationMode = 'default'; fixture.render(snapshot); assert(badge.hidden);
+  snapshot.collaborationMode = 'plan'; snapshot.busy = true; fixture.render(snapshot);
+  const count = fixture.messages.length; badge.click();
+  assert(!badge.hidden); assert(badge.disabled); assert.equal(fixture.messages.length, count);
+  snapshot.busy = false; snapshot.sending = true; fixture.render(snapshot); assert(badge.disabled);
+});
+
+// 功能：弹窗默认选项需要显式提交，流式刷新保留填写内容并支持其他方案。
+// 设计：加载真实打包脚本，仅补齐 jsdom 的原生 dialog API，断言宿主收到完整答案。
+test('plan question dialog preserves input and submits explicit answers', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const { document, dom, messages } = fixture;
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+  const snapshot = state(); snapshot.busy = true; snapshot.collaborationMode = 'plan';
+  snapshot.cards = [{ id: 'question', kind: 'question', text: '', status: 'pending', requestId: 'r', questions: [{
+    id: 'scope', header: 'Scope', question: 'Which scope?', options: [
+      { label: 'Full (Recommended)', description: 'All features' }, { label: 'Small', description: 'Core only' }
+    ]
+  }] }];
+  fixture.render(snapshot);
+  assert(document.querySelector('dialog[open]'));
+  assert(!messages.some(message => message.type === 'answerQuestions'));
+  const text = document.querySelector('dialog textarea') as HTMLTextAreaElement;
+  text.value = 'Custom scope'; fixture.render({ ...snapshot, model: 'updated' });
+  assert.equal((document.querySelector('dialog textarea') as HTMLTextAreaElement).value, 'Custom scope');
+  document.querySelector('dialog form')!.dispatchEvent(new dom.window.Event('submit', { cancelable: true }));
+  assert.deepEqual(parsePageMessage(messages.at(-1)), { type: 'answerQuestions', requestId: 'r', answers: { scope: 'Custom scope' } });
+  snapshot.cards[0].status = 'answered'; fixture.render(snapshot);
+  assert(!document.querySelector('dialog[open]'));
+  snapshot.busy = false; snapshot.cards = [{ id: 'plan', kind: 'assistant', text: '<proposed_plan>\n# Plan\nSteps\n</proposed_plan>', completed: true }];
+  fixture.render(snapshot);
+  const execute = [...document.querySelectorAll('button')].find(button => button.textContent === '开始执行计划')!;
+  assert(execute); execute.click();
+  assert.deepEqual(parsePageMessage(messages.at(-1)), { type: 'implementPlan', cardId: 'plan' });
+  const panel = document.querySelector('.proposed-plan')!;
+  assert(panel); assert(!panel.classList.contains('expanded'));
+  (panel.querySelector('.proposed-plan-expand') as HTMLButtonElement).click();
+  assert(panel.classList.contains('expanded'));
+  fixture.render({ ...snapshot, model: 'refresh' });
+  assert(document.querySelector('.proposed-plan')!.classList.contains('expanded'));
+  (document.querySelector('[aria-label="下载计划"]') as HTMLButtonElement).click();
+  assert.deepEqual(parsePageMessage(messages.at(-1)), { type: 'downloadPlan', cardId: 'plan' });
+});
+
+// 功能：没有模型回答的停止任务也会折叠工具和问答记录，并保留展开入口。
+// 设计：复现只读工具及提问后停止的快照，覆盖之前依赖最终回答才能折叠的缺口。
+test('stopped runs without assistant text collapse tools and questions', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state();
+  snapshot.cards = [
+    { id: 'u', kind: 'user', text: 'plan this', runId: 'stopped' },
+    { id: 't1', kind: 'tool', text: '', title: 'read_file', status: 'success', runId: 'stopped' },
+    { id: 't2', kind: 'tool', text: '', title: 'request_user_input', status: '已取消', runId: 'stopped' },
+    { id: 'q', kind: 'question', text: 'How to proceed?', status: '已取消', runId: 'stopped' },
+    { id: 'n', kind: 'notice', text: '已停止', completed: true, workMs: 2500, runId: 'stopped' },
+  ];
+  fixture.render(snapshot);
+  const articles = [...fixture.document.querySelectorAll<HTMLElement>('#cards > article')];
+  assert.deepEqual(articles.map(article => article.hidden), [false, true, true, true, false]);
+  const summary = fixture.document.querySelector('.work-summary') as HTMLDetailsElement;
+  assert(summary); assert(!summary.open); assert.equal(summary.querySelector('summary')!.textContent, 'Worked for 2s');
+  assert.equal(summary.querySelectorAll('.work-activity > article').length, 3);
+  assert.equal(fixture.document.querySelector('#cards > .workflow .work-status')?.textContent, '用户已暂停');
+  assert(fixture.document.querySelector('#cards > .notice.workflow'));
+  summary.open = true; fixture.render({ ...snapshot, model: 'updated' });
+  assert((fixture.document.querySelector('.work-summary') as HTMLDetailsElement).open);
+  snapshot.busy = true; snapshot.runId = 'next';
+  snapshot.cards.push({ id: 'next', kind: 'tool', text: '', title: 'list_dir', status: 'running', runId: 'next' });
+  fixture.render(snapshot); assert(!(fixture.document.querySelector('#cards > article:last-of-type') as HTMLElement).hidden);
+});
+
+// 功能：停止后的过程文字也收进整轮摘要，不作为最终回答展示。
+// 设计：构造工具之后生成部分文字再取消的情况，验证顶层没有残留过程正文。
+test('cancelled partial assistant text is hidden inside workflow', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.cards = [
+    { id: 't', kind: 'tool', text: '', title: 'read_file', status: 'success', runId: 'r' },
+    { id: 'a', kind: 'assistant', text: '检查中，准备修改…', completed: true, status: 'cancelled', workMs: 59000, runId: 'r' },
+    { id: 'n', kind: 'notice', text: '已停止', completed: true, runId: 'r' },
+  ];
+  fixture.render(snapshot);
+  assert.equal(fixture.document.querySelector('#cards > .assistant > .markdown'), null);
+  const article = [...fixture.document.querySelectorAll<HTMLElement>('#cards > article')].find(node => !node.hidden)!;
+  const summary = article.querySelector('.work-summary') as HTMLDetailsElement;
+  assert(!summary.open); assert.equal(summary.querySelector('summary')!.textContent, 'Worked for 59s');
+  assert(summary.querySelector('.work-activity')!.textContent?.includes('检查中，准备修改'));
+  assert.equal(article.querySelector('.work-status')?.textContent, '用户已暂停');
+});
+
+// 功能：恢复仅有工具调用的历史时，整轮流程隐藏在一条 Worked for 摘要中。
+// 设计：用真实历史转换器复现停止后的存档，确认所有独立工具行隐藏且可以整体展开。
+test('restored tool-only execution collapses its entire workflow', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state();
+  snapshot.cards = historyCards([
+    { role: 'user', run_id: 'stopped', run_reason: 'cancelled', content: 'implement MCP UI' },
+    { role: 'assistant', run_id: 'stopped', work_ms: 59000, content: [
+      { type: 'tool_use', id: 't1', name: 'list_dir', input: {} },
+      { type: 'tool_use', id: 't2', name: 'read_file', input: { path: 'main.ts' } },
+    ] },
+    { role: 'user', run_id: 'stopped', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'directory' },
+      { type: 'tool_result', tool_use_id: 't2', content: 'code' },
+    ] },
+    { role: 'assistant', run_id: 'stopped', work_ms: 59000, content: [
+      { type: 'tool_use', id: 't3', name: 'request_user_input', input: { questions: [{ question: 'What layout?' }] } },
+    ] },
+  ]);
+  fixture.render(snapshot);
+  const visible = [...fixture.document.querySelectorAll<HTMLElement>('#cards > article')].filter(node => !node.hidden);
+  assert.equal(visible.length, 2);
+  assert(visible[0].classList.contains('user'));
+  const summary = visible[1].querySelector('.work-summary') as HTMLDetailsElement;
+  assert(!summary.open); assert.equal(summary.querySelector('summary')!.textContent, 'Worked for 59s');
+  assert.equal(summary.querySelectorAll('.work-activity > article').length, 3);
+  assert.equal(visible[1].querySelector('.work-status')?.textContent, '用户已暂停');
+  summary.open = true; assert(summary.querySelector('.work-activity')!.textContent?.includes('request_user_input'));
+});
+
+// 功能：流程详情保持左对齐，原始参数与目录输出保留缩进并允许横向滚动。
+// 设计：渲染真实停止流程并加载样式，验证嵌套输出的计算样式和原始文本。
+test('workflow tool output styles preserve alignment and indentation', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const style = fixture.document.createElement('style');
+  style.textContent = readFileSync('media/chat.css', 'utf8'); fixture.document.head.append(style);
+  const snapshot = state(); snapshot.cards = [
+    { id: 't', kind: 'tool', text: '', title: 'list_dir', params: { path: '.' },
+      output: 'root/\n  ├── src/\n  └── tests/', status: 'success', runId: 'r' },
+    { id: 'n', kind: 'notice', text: '已停止', completed: true, workMs: 202000, runId: 'r' },
+  ];
+  fixture.render(snapshot);
+  const summary = fixture.document.querySelector('.work-summary') as HTMLDetailsElement; summary.open = true;
+  const pre = summary.querySelectorAll('pre')[1];
+  const computed = fixture.dom.window.getComputedStyle(pre);
+  assert.equal(computed.textAlign, 'left'); assert.equal(computed.whiteSpace, 'pre');
+  assert.equal(computed.overflowWrap, 'normal'); assert.equal(computed.overflowX, 'auto');
+  assert.equal(pre.textContent, snapshot.cards[0].output);
+  assert.equal(fixture.dom.window.getComputedStyle(fixture.document.querySelector('.workflow')!).textAlign, 'left');
+  assert.equal(fixture.dom.window.getComputedStyle(fixture.document.querySelector('.work-status')!).fontSize, '10px');
+});
+
+// 功能：单题选项直接提交，重复点击不会重发，模型产生下一题后才显示新内容。
+// 设计：重放两次独立请求事件，确认同一弹窗不会提前列出下一题。
+test('plan options answer one question before a new request', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const { document, dom } = fixture;
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+  const snapshot = state(); snapshot.busy = true;
+  const question = { id: 'scope', header: 'Scope', question: 'First question?', options: [
+    { label: 'Full', description: 'All features' }, { label: 'Small', description: 'Core only' }
+  ] };
+  snapshot.cards = [{ id: 'q1', kind: 'question', text: '', status: 'pending', requestId: 'r1', questions: [question] }];
+  fixture.render(snapshot);
+  assert.equal(document.querySelectorAll('dialog h3').length, 1);
+  const choice = document.querySelector('.plan-question-option') as HTMLButtonElement;
+  choice.click(); const count = fixture.messages.length; choice.click(); assert.equal(fixture.messages.length, count);
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'answerQuestions', requestId: 'r1', answers: { scope: 'Full' } });
+  snapshot.cards[0].status = 'answered'; fixture.render(snapshot); assert(!document.querySelector('dialog[open]'));
+  snapshot.cards.push({ id: 'q2', kind: 'question', text: '', status: 'pending', requestId: 'r2', questions: [{ ...question, id: 'next', question: 'Next based on Full?' }] });
+  fixture.render(snapshot); assert.equal(document.querySelector('dialog h3')!.textContent, 'Next based on Full?');
+});
+
+// 功能：普通点击清除聊天文本的旧选区，Shift 点击和右键保留选区。
+// 设计：在真实打包页面中创建文本选区，并向空白区域派发指针事件覆盖三种操作。
+test('chat selection clears on ordinary pointer down', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const { document, dom } = fixture;
+  const notice = document.createElement('div'); notice.textContent = '运行失败：llm_error';
+  document.getElementById('cards')!.append(notice);
+  const selection = dom.window.getSelection()!;
+  const selectNotice = () => { const range = document.createRange(); range.selectNodeContents(notice);
+    selection.removeAllRanges(); selection.addRange(range); };
+  const pointerDown = (button: number, shiftKey = false) =>
+    document.body.dispatchEvent(new dom.window.MouseEvent('pointerdown', { bubbles: true, button, shiftKey }));
+  selectNotice(); pointerDown(0); assert.equal(selection.rangeCount, 0);
+  selectNotice(); pointerDown(0, true); assert.equal(selection.toString(), notice.textContent);
+  selectNotice(); pointerDown(2); assert.equal(selection.toString(), notice.textContent);
+});
+
+// 功能：/reasoning 打开选择或直接设置档位，非法值不会作为模型提示发送。
+// 设计：驱动实际打包 Webview 的输入与发送按钮，验证宿主消息及忙碌禁用。
+test('reasoning slash command dispatches picker, level and reset without model prompts', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+  fixture.render(snapshot);
+  const input = fixture.document.getElementById('input') as HTMLTextAreaElement;
+  const submit = (text: string) => {
+    input.value = text; input.dispatchEvent(new fixture.dom.window.Event('input'));
+    fixture.document.getElementById('send')!.click();
+  };
+  submit('/reasoning'); assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning' });
+  assert(!fixture.document.getElementById('model-menu')!.hidden);
+  submit('/reasoning high'); assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning', effort: 'high' });
+  submit('/reasoning default'); assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning', effort: '' });
+  const count = fixture.messages.length; submit('/reasoning wrong'); assert.equal(fixture.messages.length, count);
+  assert(!fixture.document.getElementById('command-detail')!.hidden);
+  assert(!fixture.messages.some(message => message.type === 'send'));
+  snapshot.busy = true; fixture.render(snapshot); submit('/reasoning low');
+  assert.equal(fixture.messages.length, count);
+});
+
+// 功能：面板显示模型允许的档位及选中标记，支持键盘、关闭和运行锁定。
+// 设计：驱动实际打包页面，覆盖加载状态、有效列表与失败后保留原选择。
+test('model menu effort slider previews, saves and preserves selection', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+  snapshot.sessionId = 'session'; snapshot.selectedModel = 'model';
+  snapshot.models = [{ id: 'model', model: 'gpt-6.1-sol', protocol: 'openai' }]; fixture.render(snapshot);
+  const { document, dom } = fixture;
+  assert.equal(document.getElementById('effort-label')!.textContent, 'Effort (Medium)');
+  assert.equal(document.getElementById('model-effort')!.textContent, 'Medium');
+  const input = document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '/reasoning'; input.dispatchEvent(new dom.window.Event('input')); document.getElementById('send')!.click();
+  assert(!document.getElementById('model-menu')!.hidden);
+  snapshot.reasoningOptions = { supported: true, model: 'gpt-6.1-sol',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], effectiveEffort: 'medium' };
+  snapshot.reasoningEffort = 'medium'; fixture.render(snapshot);
+  const slider = document.getElementById('effort-slider') as HTMLInputElement;
+  assert.equal(slider.value, '1'); assert.equal(slider.max, '4'); assert.equal(document.querySelectorAll('#effort-dots span').length, 5);
+  assert.equal(document.getElementById('effort-label')!.textContent, 'Effort (Medium)');
+  assert.equal(document.getElementById('model-effort')!.textContent, 'Medium');
+  slider.focus(); const count = fixture.messages.length;
+  slider.value = '3'; slider.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  assert.equal(document.getElementById('effort-label')!.textContent, 'Effort (Extra High)');
+  assert.equal(fixture.messages.length, count);
+  slider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning', effort: 'xhigh' });
+  snapshot.sending = true; snapshot.reasoningLoading = true; fixture.render(snapshot);
+  assert(slider.disabled); assert(!document.getElementById('model-menu')!.hidden);
+  snapshot.sending = false; snapshot.reasoningLoading = false; snapshot.reasoningEffort = 'xhigh'; fixture.render(snapshot);
+  assert.equal(document.getElementById('model-effort')!.textContent, 'Extra High'); assert.equal(document.activeElement, slider);
+  assert.equal(document.getElementById('effort-default'), null);
+  snapshot.reasoningError = 'error'; fixture.render(snapshot); assert(slider.disabled);
+  assert.equal(document.getElementById('effort-message')!.textContent, 'error');
+  snapshot.reasoningError = undefined; fixture.render(snapshot);
+  slider.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert(document.getElementById('model-menu')!.hidden);
+  document.getElementById('model-toggle')!.click(); document.getElementById('cards')!.click();
+  assert(document.getElementById('model-menu')!.hidden);
+});
+
+// 功能：切换模型时统一面板保持打开并读取新模型的推理档位。
+// 设计：模拟模型切换 RPC 的前后快照，覆盖 Anthropic 隐藏滑杆和运行中关闭菜单。
+test('model switch refreshes effort and hides unsupported controls', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+  snapshot.sessionId = 's'; snapshot.selectedModel = 'a';
+  snapshot.models = [{ id: 'a', model: 'openai-model', protocol: 'openai' },
+    { id: 'b', model: 'claude-model', protocol: 'anthropic' }];
+  snapshot.reasoningOptions = { supported: true, model: 'openai-model', efforts: ['low','high'], effectiveEffort: 'high' };
+  fixture.render(snapshot);
+  const { document } = fixture;
+  document.getElementById('model-toggle')!.click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning' });
+  (document.querySelectorAll('.model-option')[1] as HTMLButtonElement).click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'selectModel', modelId: 'b' });
+  snapshot.modelChanging = true; snapshot.sending = true; fixture.render(snapshot);
+  assert(!document.getElementById('model-menu')!.hidden);
+  snapshot.modelChanging = false; snapshot.sending = false; snapshot.selectedModel = 'b';
+  snapshot.reasoningOptions = undefined; fixture.render(snapshot);
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning' });
+  snapshot.reasoningOptions = { supported: false, model: 'claude-model', efforts: [], effectiveEffort: '' }; fixture.render(snapshot);
+  assert(document.getElementById('effort-control')!.hidden); assert(document.getElementById('model-effort')!.hidden);
+  snapshot.busy = true; fixture.render(snapshot); assert(document.getElementById('model-menu')!.hidden);
+});
+
+// 功能：Opus 显示五档滑杆与默认 Medium 标签，修改发送真实设置消息。
+// 设计：使用 Anthropic 模型快照驱动实际页面，防止协议限制再次隐藏控制。
+test('Opus effort is visible and selectable on Anthropic profiles', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+  snapshot.sessionId = 's'; snapshot.selectedModel = 'opus';
+  snapshot.models = [{ id: 'opus', model: 'claude-opus-5-5', protocol: 'anthropic' }];
+  fixture.render(snapshot);
+  const { document, dom } = fixture;
+  assert(!document.getElementById('model-effort')!.hidden);
+  assert.equal(document.getElementById('model-effort')!.textContent, 'Medium');
+  snapshot.reasoningOptions = { supported: true, model: 'claude-opus-5-5',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], effectiveEffort: 'medium' };
+  fixture.render(snapshot); document.getElementById('model-toggle')!.click();
+  assert(!document.getElementById('effort-control')!.hidden);
+  const slider = document.getElementById('effort-slider') as HTMLInputElement;
+  assert(!slider.disabled); assert.equal(slider.max, '4'); assert.equal(slider.value, '1');
+  slider.value = '4'; slider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning', effort: 'max' });
+});
+
+// 功能：方舟模型切换后显示合法的 Effort 档位并发送用户选择。
+// 设计：驱动实际页面覆盖四个 Anthropic 配置，防止型号过滤隐藏滑杆。
+test('Ark effort controls expose the supported levels', t => {
+  for (const model of ['glm-5.3', 'glm-5.3-flash', 'kimi-k3', 'deepseek-v4.1-flash']) {
+    const fixture = page(); t.after(() => fixture.dom.window.close()); const snapshot = state();
+    const levels = model.startsWith('deepseek') ? ['none', 'low', 'high', 'max'] : ['low', 'high', 'max'];
+    snapshot.sessionId = 's'; snapshot.selectedModel = 'ark';
+    snapshot.models = [{ id: 'ark', model, protocol: 'anthropic' }];
+    fixture.render(snapshot);
+    assert(!fixture.document.getElementById('model-effort')!.hidden);
+    snapshot.reasoningOptions = { supported: true, model, efforts: levels, effectiveEffort: 'max' };
+    fixture.render(snapshot); fixture.document.getElementById('model-toggle')!.click();
+    assert(!fixture.document.getElementById('effort-control')!.hidden);
+    const slider = fixture.document.getElementById('effort-slider') as HTMLInputElement;
+    assert(!slider.disabled); assert.equal(slider.max, String(levels.length - 1));
+    slider.value = String(levels.indexOf('low'));
+    slider.dispatchEvent(new fixture.dom.window.Event('change', { bubbles: true }));
+    assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'reasoning', effort: 'low' });
+  }
+});
+
 // 功能：文件汇总始终可见，前三行可展开并发送查看与撤销操作，运行时禁止撤销。
 // 设计：驱动真实打包页面，覆盖完成回答的折叠规则、恶意文件名和心跳重绘后的展开状态。
 test('file change cards expand, dispatch actions and remain outside collapsed work', t => {
@@ -57,14 +393,21 @@ test('image upload, remove, send, restore and edit preserve attachments', async 
   const picker = document.getElementById('image-picker') as HTMLInputElement;
   const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
   const file = new dom.window.File([Buffer.from(data, 'base64')], 'test.png', { type: 'image/png' });
+  // 等待实际图片预览出现，避免固定延时在并发测试时提前关闭页面。
+  const waitForPreview = async () => {
+    for (let attempt = 0; attempt < 100 && !document.querySelector('#image-attachments img'); attempt++) {
+      await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    }
+    assert.equal(document.querySelectorAll('#image-attachments img').length, 1);
+  };
   Object.defineProperty(picker, 'files', { configurable: true, value: [file] });
   picker.dispatchEvent(new dom.window.Event('change'));
-  await new Promise(resolve => dom.window.setTimeout(resolve, 30));
+  await waitForPreview();
   assert.equal(document.querySelectorAll('#image-attachments img').length, 1);
   (document.querySelector('#image-attachments button') as HTMLButtonElement).click();
   assert(document.getElementById('image-attachments')!.hidden);
   picker.dispatchEvent(new dom.window.Event('change'));
-  await new Promise(resolve => dom.window.setTimeout(resolve, 30));
+  await waitForPreview();
   (document.getElementById('send') as HTMLButtonElement).click();
   const message = parsePageMessage(fixture.messages.at(-1));
   assert(message?.type === 'send'); assert.equal(message.content, ''); assert.equal(message.images?.[0].data, data);
@@ -176,6 +519,24 @@ test('slash menu filters, navigates and dispatches existing commands without sen
   assert(!fixture.messages.some(message => message.type === 'send'));
 });
 
+// 功能：技能入口展示 core 返回的列表，并将所选技能填入输入框。
+// 设计：驱动真实 webview 消息路径，检查点击列表不会提前提交模型任务。
+test('skills slash command lists available skills and fills the composer', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); fixture.render(state());
+  const { document, dom } = fixture;
+  const input = document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '/skills'; input.dispatchEvent(new dom.window.Event('input'));
+  assert(!document.getElementById('slash-skills')!.textContent?.includes('待实现'));
+  document.getElementById('slash-skills')!.click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'refreshSkills' });
+  dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'skills', skills: [
+    { name: 'review', description: '检查代码', source: 'workspace', path: 'C:/repo/.agentlite/skills/review/SKILL.md' }
+  ] } }));
+  (document.querySelector('#command-body button') as HTMLButtonElement).click();
+  assert.equal(input.value, '/review ');
+  assert(!fixture.messages.some(message => message.type === 'send'));
+});
+
 test('slash placeholders and status have dismissible details and never create model tasks', t => {
   const fixture = page(); t.after(() => fixture.dom.window.close());
   const snapshot = state(); snapshot.sessionId = 'session-123'; snapshot.usage = '输入 100 · 输出 30'; fixture.render(snapshot);
@@ -191,6 +552,36 @@ test('slash placeholders and status have dismissible details and never create mo
   assert(detail.textContent?.includes('session-123')); assert(detail.textContent?.includes(snapshot.usage));
   assert(!fixture.messages.some(message => message.type === 'send'));
   document.getElementById('cards')!.click(); assert(detail.hidden);
+});
+
+// 功能：/memories 打开当前会话两个独立开关，并按 core 回传值刷新状态。
+// 设计：使用打包 Webview 派发点击和状态快照，验证命令不进入模型提示。
+test('memories slash command controls session memory settings', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.sessionId = 'session';
+  snapshot.memoryGenerateEnabled = false; snapshot.memoryUseEnabled = true;
+  fixture.render(snapshot);
+  const { document, dom } = fixture;
+  const input = document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '/memories'; input.dispatchEvent(new dom.window.Event('input'));
+  assert(!document.getElementById('slash-memories')!.textContent?.includes('待实现'));
+  document.getElementById('slash-memories')!.click();
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>('.memory-setting')];
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[0].getAttribute('aria-pressed'), 'false');
+  assert.equal(buttons[1].getAttribute('aria-pressed'), 'true');
+  buttons[0].click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)),
+    { type: 'setMemory', setting: 'generate', enabled: true });
+  snapshot.sending = true; snapshot.memoryLoading = true; fixture.render(snapshot);
+  assert(buttons.every(button => button.disabled));
+  snapshot.sending = false; snapshot.memoryLoading = false;
+  snapshot.memoryGenerateEnabled = true; fixture.render(snapshot);
+  assert.equal(buttons[0].getAttribute('aria-pressed'), 'true');
+  buttons[1].click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)),
+    { type: 'setMemory', setting: 'use', enabled: false });
+  assert(!fixture.messages.some(message => message.type === 'send'));
 });
 
 test('slash dismissal, ordinary text, composition and busy state preserve composer behavior', t => {
@@ -397,7 +788,9 @@ test('shared tooltips cover all controls and dynamic titles safely', async () =>
   assert.equal(document.querySelectorAll('[title]').length, 0);
   assert.equal(document.getElementById('attach')!.dataset.tooltip, '添加上下文');
   assert.equal(document.getElementById('attachment-tooltip'), null);
-  for (const id of ['attach', 'settings', 'connection-toggle', 'model-toggle',
+  const modelToggle = document.getElementById('model-toggle')!;
+  hover(modelToggle); assert(tooltip.hidden); assert.equal(modelToggle.dataset.tooltip, undefined);
+  for (const id of ['attach', 'permission-toggle', 'connection-toggle',
     'bookmark', 'history-toggle', 'new', 'history-refresh', 'send', 'bookmarks-close']) {
     const target = document.getElementById(id)!;
     if (target.closest('[hidden]') || target.hidden) continue;
@@ -533,10 +926,10 @@ test('auto growing composer and keyboard accessible model menu', () => {
   toggle.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   assert.equal(fixture.document.activeElement?.getAttribute('aria-selected'), 'true');
   fixture.document.getElementById('model-menu')!.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-  assert.equal(fixture.document.activeElement?.textContent, 'Model Banthropic · model-b');
+  assert.equal(fixture.document.activeElement?.textContent, 'Model Bmodel-b');
   (fixture.document.activeElement as HTMLButtonElement).click();
   assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'selectModel', modelId: 'b' });
-  assert(fixture.document.getElementById('model-menu')!.hidden);
+  assert(!fixture.document.getElementById('model-menu')!.hidden);
   snapshot.busy = true; fixture.render(snapshot); assert(toggle.disabled);
   fixture.dom.window.close();
 });
@@ -674,7 +1067,7 @@ test('model controls sit inside composer and show real names without default con
   snapshot.fallbackModel = { id: '', name: 'existing-model', model: 'existing-model', protocol: 'anthropic' };
   fixture.render(snapshot);
   const shell = fixture.document.querySelector('.composer-shell')!;
-  for (const id of ['input', 'model-select', 'send', 'stop', 'settings']) assert(shell.contains(fixture.document.getElementById(id)));
+  for (const id of ['input', 'model-select', 'send', 'stop', 'permission-toggle']) assert(shell.contains(fixture.document.getElementById(id)));
   assert.equal(fixture.document.querySelector('#model-select option')!.textContent, 'existing-model');
   assert(!fixture.document.body.textContent!.includes('默认配置'));
   snapshot.models = [{ id: 'custom', name: 'My model', model: 'test', protocol: 'openai' }];
@@ -684,7 +1077,8 @@ test('model controls sit inside composer and show real names without default con
   assert(!send.hidden); assert(stop.hidden);
   snapshot.busy = true; snapshot.runId = 'run'; fixture.render(snapshot);
   assert(send.hidden); assert(!stop.hidden);
-  fixture.document.getElementById('settings')!.click(); assert.equal(fixture.messages.at(-1).type, 'openSettings');
+  fixture.document.getElementById('permission-toggle')!.click(); assert(!fixture.document.getElementById('permission-menu')!.hidden);
+  assert.equal(fixture.document.getElementById('settings'), null);
   fixture.dom.window.close();
 });
 
@@ -748,10 +1142,140 @@ test('composer keyboard and busy / permission controls', () => {
   fixture.dom.window.close();
 });
 
+// 功能：@ 搜索结果可用键盘选中，工作区文件引用随消息发送并可从附件入口添加。
+// 设计：驱动打包页面与宿主消息，确认输入位置替换、引用路径和按钮入口。
+test('workspace file mentions select and send references', async t => {
+  const fixture = page(); const snapshot = state(); fixture.render(snapshot);
+  t.after(() => fixture.dom.window.close());
+  const input = fixture.document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '看看 @main'; input.selectionStart = input.selectionEnd = input.value.length;
+  input.dispatchEvent(new fixture.dom.window.Event('input'));
+  assert.equal(fixture.document.getElementById('file-mention-menu')!.hidden, false);
+  assert.match(fixture.document.getElementById('file-mention-empty')!.textContent || '', /正在搜索/);
+  await new Promise(resolve => fixture.dom.window.setTimeout(resolve, 150));
+  const request = fixture.messages.findLast(message => message.type === 'searchWorkspaceFiles');
+  assert(request); assert.equal(request.query, 'main');
+  fixture.dom.window.dispatchEvent(new fixture.dom.window.MessageEvent('message', {
+    data: { type: 'workspaceFiles', requestId: request.requestId, files: [
+      { path: 'src/main.ts', kind: 'file' }, { path: 'src/main.test.ts', kind: 'file' }
+    ] }
+  }));
+  assert.equal(fixture.document.querySelectorAll('.file-mention-icon svg').length, 2);
+  input.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+  assert.equal(input.value, '看看 ');
+  assert.equal(fixture.document.querySelector('.file-reference-chip span:last-child')?.textContent, 'main.ts');
+  fixture.document.getElementById('send')!.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(parsePageMessage(fixture.messages.at(-1)))), {
+    type: 'send', content: '看看 @src/main.ts', references: ['src/main.ts']
+  });
+  fixture.document.getElementById('reference-workspace-file')!.click();
+  assert.equal(fixture.messages.at(-1).type, 'searchWorkspaceFiles');
+  assert.equal(fixture.messages.at(-1).query, '');
+  assert.equal(fixture.document.getElementById('file-mention-menu')!.hidden, false);
+  const search = fixture.document.getElementById('file-mention-search') as HTMLInputElement;
+  assert.equal(fixture.document.activeElement, search);
+  search.value = '设计'; search.dispatchEvent(new fixture.dom.window.Event('input'));
+  await new Promise(resolve => fixture.dom.window.setTimeout(resolve, 150));
+  const pickerRequest = fixture.messages.at(-1);
+  assert.equal(pickerRequest.query, '设计');
+  fixture.dom.window.dispatchEvent(new fixture.dom.window.MessageEvent('message', {
+    data: { type: 'workspaceFiles', requestId: pickerRequest.requestId, files: [
+      { path: 'docs/', kind: 'directory' }, { path: 'docs/设计 说明.md', kind: 'file' }
+    ] }
+  }));
+  assert.equal(fixture.document.querySelectorAll('.file-mention-icon svg').length, 2);
+  search.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', cancelable: true }));
+  search.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+  assert.equal(input.value, '');
+  assert.equal(fixture.document.querySelector('.file-reference-chip span:last-child')?.textContent, '设计 说明.md');
+  fixture.document.getElementById('send')!.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(parsePageMessage(fixture.messages.at(-1)))), {
+    type: 'send', content: '@"docs/设计 说明.md"', references: ['docs/设计 说明.md']
+  });
+  fixture.document.getElementById('reference-workspace-file')!.click();
+  const directoryRequest = fixture.messages.at(-1);
+  fixture.dom.window.dispatchEvent(new fixture.dom.window.MessageEvent('message', {
+    data: { type: 'workspaceFiles', requestId: directoryRequest.requestId, files: [{ path: 'docs/', kind: 'directory' }] }
+  }));
+  (fixture.document.getElementById('file-mention-search') as HTMLInputElement).dispatchEvent(
+    new fixture.dom.window.KeyboardEvent('keydown', { key: 'Enter', cancelable: true }));
+  fixture.document.getElementById('send')!.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(parsePageMessage(fixture.messages.at(-1)))), {
+    type: 'send', content: '@docs/', references: ['docs/']
+  });
+});
+
+// 功能：已选目录显示为蓝色图标和名称，点击或退格可移除引用。
+// 设计：鼠标选择目录后检查独立引用项、状态刷新与移除动作。
+test('selected workspace reference is highlighted and removable', async t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close()); fixture.render(state());
+  const input = fixture.document.getElementById('input') as HTMLTextAreaElement;
+  input.value = '@docs'; input.selectionStart = input.selectionEnd = input.value.length;
+  input.dispatchEvent(new fixture.dom.window.Event('input'));
+  await new Promise(resolve => fixture.dom.window.setTimeout(resolve, 150));
+  const request = fixture.messages.at(-1);
+  fixture.dom.window.dispatchEvent(new fixture.dom.window.MessageEvent('message', {
+    data: { type: 'workspaceFiles', requestId: request.requestId, files: [{ path: 'docs/', kind: 'directory' }] }
+  }));
+  (fixture.document.querySelector('.file-mention-row') as HTMLButtonElement).click();
+  assert.equal(input.value, '');
+  assert.equal(fixture.document.querySelector('.file-reference-chip span:last-child')?.textContent, 'docs');
+  assert.equal(fixture.document.querySelectorAll('.file-reference-chip svg').length, 1);
+  fixture.render({ ...state(), sessionId: 'new-session' });
+  assert.equal(fixture.document.querySelector('.file-reference-chip span:last-child')?.textContent, 'docs');
+  assert.equal((fixture.document.getElementById('send') as HTMLButtonElement).disabled, false);
+  input.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'Backspace', cancelable: true }));
+  assert.equal(fixture.document.querySelector('.file-reference-chip'), null);
+  assert.equal((fixture.document.getElementById('send') as HTMLButtonElement).disabled, true);
+});
+
 // 功能：主题外观使用宿主变量，而不是硬编码明暗颜色。
 // 设计：检查实际样式对输入框、按钮、背景和焦点的主题绑定，并验证无外部资源导入。
 test('styles adapt to VS Code themes without remote resources', () => {
   const css = readFileSync('media/chat.css', 'utf8');
   for (const variable of ['--vscode-foreground', '--vscode-sideBar-background', '--vscode-button-secondaryBackground', '--vscode-input-background', '--vscode-focusBorder']) assert(css.includes(variable));
   assert(!css.includes('@import')); assert(!css.includes('http'));
+});
+
+
+// 功能：安全图标展开三项权限菜单，恢复服务端选择并按限定选项渲染审批。
+// 设计：驱动真实打包页面，检查菜单消息、权限原因及隐藏的长期放行入口。
+test('permission selector and auto approval options follow server state', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.permissionMode = 'auto'; snapshot.busy = true;
+  snapshot.cards = [{ id: 'p', kind: 'permission', text: 'shell', status: 'pending', toolUseId: 't',
+    approvalReason: '分类器超时，需人工确认', allowedDecisions: ['allow_once', 'deny_once', 'always_deny'] }];
+  fixture.render(snapshot);
+  const toggle = fixture.document.getElementById('permission-toggle') as HTMLButtonElement;
+  const menu = fixture.document.getElementById('permission-menu')!;
+  assert.equal(toggle.textContent?.trim(), ''); assert(menu.hidden);
+  assert.equal(menu.querySelectorAll('button').length, 3);
+  assert.equal(menu.querySelector('[aria-checked="true"]')?.getAttribute('data-permission-mode'), 'auto');
+  assert.equal(menu.querySelector('[data-permission-mode="plan"]'), null);
+  toggle.click(); assert(!menu.hidden); assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  (menu.querySelector('[data-permission-mode="manual"]') as HTMLButtonElement).click();
+  assert(menu.hidden);
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'permissionMode', mode: 'manual' });
+  const actions = fixture.document.querySelector('.permission-actions')!;
+  assert.equal(actions.querySelectorAll('button').length, 3);
+  assert(fixture.document.body.textContent?.includes('分类器超时'));
+  snapshot.collaborationMode = 'plan'; fixture.render(snapshot); assert(toggle.disabled);
+});
+
+// 功能：权限菜单支持键盘导航、关闭并恢复焦点，选择状态只随宿主确认变化。
+// 设计：从恢复的 Edit 模式驱动箭头、回车和 Escape，检查提交消息与外部点击关闭。
+test('permission menu keyboard navigation and dismissal preserve server selection', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.permissionMode = 'accept_edits'; fixture.render(snapshot);
+  const toggle = fixture.document.getElementById('permission-toggle') as HTMLButtonElement;
+  const menu = fixture.document.getElementById('permission-menu')!;
+  const key = (target: Element, value: string) => target.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: value, bubbles: true }));
+  key(toggle, 'ArrowDown'); assert.equal(fixture.document.activeElement?.getAttribute('data-permission-mode'), 'accept_edits');
+  key(fixture.document.activeElement!, 'ArrowDown'); assert.equal(fixture.document.activeElement?.getAttribute('data-permission-mode'), 'auto');
+  (fixture.document.activeElement as HTMLButtonElement).click();
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'permissionMode', mode: 'auto' });
+  assert.equal(menu.querySelector('[aria-checked="true"]')?.getAttribute('data-permission-mode'), 'accept_edits');
+  toggle.click(); key(fixture.document.activeElement!, 'Escape'); assert(menu.hidden); assert.equal(fixture.document.activeElement, toggle);
+  toggle.click(); fixture.document.getElementById('input')!.click(); assert(menu.hidden);
+  toggle.click(); snapshot.connection = 'error'; fixture.render(snapshot); assert(menu.hidden); assert(toggle.disabled);
 });

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from rich.markdown import Markdown
 from textual.app import App, ComposeResult
@@ -36,6 +36,31 @@ class _ContextStatusHarness(AgentLiteTuiApp):
     # 跳过 socket worker，隔离状态栏测试与外部服务
     def on_mount(self) -> None:
         return None
+
+
+# 功能：TUI 的推理指令只调用会话设置接口，完成后恢复输入。
+# 设计：挂载真实 TUI 并注入 IPC 替身，验证查询、设置及 default 重置参数。
+async def test_tui_reasoning_command() -> None:
+    app = _ContextStatusHarness()
+    async with app.run_test(size=(100, 24)):
+        client = AsyncMock()
+        client.send_command.return_value = {
+            "supported": True, "effective_effort": "high", "efforts": ["low", "high"],
+        }
+        app._client = client
+        app._session_id = "session"
+        await app._do_reasoning("high")
+        client.send_command.assert_awaited_with(
+            "session.reasoning", {"session_id": "session", "effort": "high"}
+        )
+        await app._do_reasoning("default")
+        client.send_command.assert_awaited_with(
+            "session.reasoning", {"session_id": "session", "effort": ""}
+        )
+        await app._do_reasoning("")
+        client.send_command.assert_awaited_with("session.reasoning", {"session_id": "session"})
+        assert not app._busy
+        assert not app.query_one("#prompt").disabled
 
 
 # 功能：验证 _preview 超出长度时截断并追加省略号
@@ -167,8 +192,8 @@ def test_slash_items_put_new_session_first() -> None:
 def test_slash_menu_separates_general_commands_and_skills() -> None:
     app = AgentLiteTuiApp("127.0.0.1", 9999)
     items = app._build_slash_items()  # type: ignore[attr-defined]
-    assert [item[2] for item in items[:4]] == [False, False, False, False]
-    assert all(item[2] for item in items[4:])
+    assert [item[2] for item in items[:7]] == [False] * 7
+    assert all(item[2] for item in items[7:])
 
     popup = SlashCompleteWidget(items)
     popup._redraw()  # type: ignore[attr-defined]
@@ -812,3 +837,47 @@ def test_unknown_event_silently_ignored() -> None:
 
     app._handle_event({"type": "some.unknown.type", "run_id": "r", "ts": "t"})
     assert appended == []
+
+
+# 功能：模式快捷键切换与退出 Plan 保持独立权限字段，运行时拒绝进入 Plan。
+# 设计：挂载真实 TUI 并捕获 IPC，验证四项循环与原子退出的用户操作。
+async def test_tui_permission_mode_cycle() -> None:
+    app = _ContextStatusHarness()
+    async with app.run_test(size=(100, 24)) as pilot:
+        client = AsyncMock()
+        client.send_command.return_value = {"mode": "accept_edits"}
+        app._client = client
+        app._session_id = "session"
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        client.send_command.assert_awaited_with(
+            "session.permission_mode", {"session_id": "session", "mode": "accept_edits"},
+        )
+        await app._do_mode("plan")
+        assert app._permission_mode == "accept_edits"
+        assert app._collaboration_mode == "plan"
+        await app._do_mode("manual")
+        client.send_command.assert_awaited_with("session.collaboration", {
+            "session_id": "session", "mode": "default", "permission_mode": "manual",
+        })
+        app._busy = True
+        count = client.send_command.await_count
+        await app._do_mode("plan")
+        assert client.send_command.await_count == count
+        await app._do_mode("auto")
+        assert client.send_command.await_count == count + 1
+
+
+# 功能：Auto 权限控件隐藏始终允许且其快捷键不能绕过服务端选项。
+# 设计：直接检查控件渲染与发布消息，覆盖鼠标菜单之外的键盘授权入口。
+def test_tui_auto_approval_options() -> None:
+    from unittest.mock import Mock
+
+    from agent_lite.tui.app import PermissionSelect
+    select = PermissionSelect("t", ["allow_once", "deny_once", "always_deny"])
+    select.post_message = Mock()
+    assert "Always allow" not in select._render_ui()
+    select._pick("always_allow")
+    select.post_message.assert_not_called()
+    select._pick("allow_once")
+    select.post_message.assert_called_once()

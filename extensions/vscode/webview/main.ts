@@ -1,18 +1,28 @@
-import type { Card, ChatState } from '../src/session';
+import type { Card, ChatState, SkillSummary } from '../src/session';
 import type { PageMessage } from '../src/protocol';
 import { decisions } from '../src/protocol';
 import { markdown } from './markdown';
 import { decorateCodeBlocks } from './code-blocks';
 import { installTooltips } from './tooltips';
+import { installPlanInput } from './plan-input';
+import { renderPlanCard } from './plan-card';
 import { installSlashCommands } from './slash-commands';
 import { installImages } from './images';
+import { installFileMentions } from './file-mentions';
+import type { WorkspaceEntry } from '../src/workspace-files';
 import { installMcpPanel } from './mcp-panel';
+import { effortLabels, installEffortControl } from './effort-control';
+import { claudeEfforts, modelEffort } from '../src/reasoning';
 import { renderFileChanges } from './file-changes';
 
 declare function acquireVsCodeApi(): { postMessage(message: PageMessage): void };
 const api = acquireVsCodeApi();
 installTooltips();
 const cards = document.getElementById('cards')!;
+// 普通点击先收起上一次的文本选区，空白区域也能取消高亮。
+document.addEventListener('pointerdown', event => {
+  if (event.button === 0 && !event.shiftKey) window.getSelection()?.removeAllRanges();
+});
 const input = document.getElementById('input') as HTMLTextAreaElement;
 const send = document.getElementById('send') as HTMLButtonElement;
 const stop = document.getElementById('stop') as HTMLButtonElement;
@@ -30,9 +40,16 @@ const attachmentMenu = document.getElementById('attachment-menu')!;
 const attach = document.getElementById('attach') as HTMLButtonElement;
 const connectionToggle = document.getElementById('connection-toggle') as HTMLButtonElement;
 const connectionMenu = document.getElementById('connection-menu')!;
-const imageInput = installImages(input, () => { send.disabled = input.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length); });
+const permissionToggle = document.getElementById('permission-toggle') as HTMLButtonElement;
+const permissionMenu = document.getElementById('permission-menu')!;
+const imageInput = installImages(input, () => updateSendDisabled());
+const fileMentions = installFileMentions(input, post, () => {
+  updateSendDisabled();
+  resizeInput();
+});
 const mcpPanel = installMcpPanel(input, post);
-const slash = installSlashCommands(input, id => {
+const effortControl = installEffortControl(post);
+const slash = installSlashCommands(input, (id, argument) => {
   closeMenus();
   if (id === 'new') fresh.click();
   else if (id === 'history') {
@@ -44,10 +61,21 @@ const slash = installSlashCommands(input, id => {
   } else if (id === 'settings') post({ type: 'openSettings' });
   else if (id === 'mcp') mcpPanel.open();
   else if (id === 'logs') post({ type: 'openLogs' });
+  else if (id === 'plan') post({ type: 'collaboration', mode: 'plan' });
   else if (id === 'compact') post({ type: 'compactSession' });
+  else if (id === 'memories') openMemorySettings();
+  else if (id === 'skills') {
+    slash.showDetail('可用技能', '正在读取…');
+    post({ type: 'refreshSkills' });
+  }
+  else if (id === 'reasoning') {
+    if (argument !== undefined) post({ type: 'reasoning', effort: argument });
+    else effortControl.open();
+  }
   else if (id === 'status') slash.showDetail('当前状态', [
     `会话：${latest?.title || '新会话'}`, `会话 ID：${latest?.sessionId || '尚未创建'}`,
     `模型：${document.getElementById('model-label')!.textContent || '尚未选择'}`,
+    `推理强度：${latest?.reasoningEffort || latest?.models?.find(model => model.id === latest?.selectedModel)?.reasoningEffort || (!latest?.selectedModel ? latest?.fallbackModel?.reasoningEffort : '') || '模型默认'}`,
     `连接：${document.getElementById('connection')!.textContent}`, `工作区：${latest?.workspace || '未知'}`,
     latest?.usage || '暂无用量统计',
   ].join('\n'));
@@ -68,21 +96,91 @@ const labels: Record<string, string> = { running: '运行中', pending: '等待�
   deny_once: '拒绝一次', always_deny: '始终拒绝', auto_deny: '已自动拒绝', auto_allow: '已自动允许',
   timeout: '确认超时，已拒绝', run_cancelled: '任务已取消' };
 
+// 在斜杠菜单的详情面板中展示当前会话的两个独立记忆开关。
+function openMemorySettings(): void {
+  slash.showDetail('记忆设置', '');
+  const body = document.getElementById('command-body')!;
+  body.replaceChildren();
+  body.append(element('p', '仅作用于当前会话。生成记忆会在会话闲置后处理；使用已有记忆从下一轮对话生效。', 'memory-help'));
+  for (const [setting, label] of [['generate', '生成记忆'], ['use', '使用已有记忆']] as const) {
+    const button = document.createElement('button'); button.type = 'button';
+    button.className = 'memory-setting'; button.dataset.memorySetting = setting;
+    button.append(element('span', label), element('span', '', 'memory-setting-state'));
+    button.addEventListener('click', () => {
+      const enabled = setting === 'generate' ? latest?.memoryGenerateEnabled : latest?.memoryUseEnabled;
+      post({ type: 'setMemory', setting, enabled: !enabled });
+    });
+    body.append(button);
+  }
+  body.append(element('div', '', 'memory-error'));
+  if (latest) renderMemorySettings(latest);
+}
+
+// 在命令详情里列出技能，点击后将调用语法填入输入框。
+function renderSkills(skills: SkillSummary[]): void {
+  if (document.getElementById('command-detail')!.hidden ||
+      document.getElementById('command-title')!.textContent !== '可用技能') return;
+  slash.showDetail('可用技能', '');
+  const body = document.getElementById('command-body')!;
+  body.replaceChildren();
+  if (!skills.length) {
+    body.textContent = '当前没有可用技能。在工作区 .agentlite/skills/ 下添加 <名称>/SKILL.md。';
+    return;
+  }
+  for (const skill of skills) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'memory-setting';
+    button.append(element('span', `/${skill.name} · ${skill.description || '无描述'}`));
+    button.title = skill.path;
+    button.addEventListener('click', () => {
+      document.getElementById('command-detail')!.hidden = true;
+      input.value = `/${skill.name} `;
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+    });
+    body.append(button);
+  }
+}
+
+// 用服务端确认的值刷新开关，并在保存期间锁定操作。
+function renderMemorySettings(state: ChatState): void {
+  const body = document.getElementById('command-body')!;
+  for (const button of body.querySelectorAll<HTMLButtonElement>('[data-memory-setting]')) {
+    const enabled = button.dataset.memorySetting === 'generate' ? state.memoryGenerateEnabled === true : state.memoryUseEnabled !== false;
+    button.setAttribute('aria-pressed', String(enabled));
+    button.querySelector('.memory-setting-state')!.textContent = enabled ? '已开启' : '已关闭';
+    button.disabled = state.connection !== 'ready' || !state.sessionId || state.busy || state.sending;
+  }
+  const error = body.querySelector<HTMLElement>('.memory-error');
+  if (error) { error.textContent = state.memoryError || (state.memoryLoading ? '正在保存…' : ''); error.hidden = !error.textContent; }
+}
+
 // 将用户操作发送到扩展宿主，不在页面中访问 core。
 function post(message: PageMessage): void { api.postMessage(message); }
+// 根据文字、图片和已选工作区引用统一控制发送按钮。
+function updateSendDisabled(): void {
+  send.disabled = input.disabled || imageInput.loading() ||
+    (!input.value.trim() && !imageInput.get().length && !fileMentions.references().length);
+}
 // 在宿主可接受新任务时发送输入。
 function submit(): void {
-  if (send.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length)) return;
-  if (slash.submit()) return;
+  const references = fileMentions.references();
+  if (send.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length && !references.length)) return;
+  if (!references.length && slash.submit()) return;
   slash.close();
-  post({ type: 'send', content: input.value, ...(imageInput.get().length ? { images: imageInput.get() } : {}) }); imageInput.clear(); input.value = ''; resizeInput(); send.disabled = true;
+  const content = [input.value.trim(), ...references.map(path => /\s/.test(path) ? `@"${path}"` : `@${path}`)]
+    .filter(Boolean).join(' ');
+  post({ type: 'send', content, ...(imageInput.get().length ? { images: imageInput.get() } : {}),
+    ...(references.length ? { references } : {}) });
+  imageInput.clear(); input.value = ''; fileMentions.clear(); resizeInput(); send.disabled = true;
 }
 send.addEventListener('click', event => { event.stopPropagation(); submit(); });
 input.addEventListener('keydown', event => {
+  if (fileMentions.handleKey(event)) return;
   if (slash.handleKey(event)) return;
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
 });
-input.addEventListener('input', () => { send.disabled = input.disabled || imageInput.loading() || (!input.value.trim() && !imageInput.get().length); resizeInput(); });
+input.addEventListener('input', () => { updateSendDisabled(); resizeInput(); });
 stop.addEventListener('click', () => post({ type: 'cancel' }));
 fresh.addEventListener('click', () => post({ type: 'newSession' }));
 sessionTitle.addEventListener('click', () => {
@@ -90,7 +188,6 @@ sessionTitle.addEventListener('click', () => {
 });
 retry.addEventListener('click', () => post({ type: 'retry' }));
 document.getElementById('logs')!.addEventListener('click', () => post({ type: 'openLogs' }));
-document.getElementById('settings')!.addEventListener('click', () => post({ type: 'openSettings' }));
 document.getElementById('history-refresh')!.addEventListener('click', () => post({ type: 'refreshHistory' }));
 historyToggle.addEventListener('click', () => {
   historyPanel.hidden = !historyPanel.hidden;
@@ -158,7 +255,6 @@ function renderBookmarks(state: ChatState): void {
 }
 modelSelect.addEventListener('change', () => {
   post({ type: 'selectModel', modelId: modelSelect.value }); modelSelect.disabled = true; modelToggle.disabled = true;
-  closeMenus();
 });
 
 // 输入随文本和侧栏宽度增高，删减或发送后恢复单行高度。
@@ -177,34 +273,39 @@ if (typeof ResizeObserver !== 'undefined') {
 }
 
 // 同一时刻只打开一个菜单，保留按钮的无障碍展开状态。
-function closeMenus(preserveConnection = false, preserveSlash = false): void {
+function closeMenus(preserveConnection = false, preserveSlash = false, preserveModel = false): void {
   if (!preserveSlash) slash.close();
-  modelMenu.hidden = true; attachmentMenu.hidden = true;
-  modelToggle.setAttribute('aria-expanded', 'false'); attach.setAttribute('aria-expanded', 'false');
+  if (!preserveSlash) fileMentions.close();
+  if (!preserveModel) { modelMenu.hidden = true; modelToggle.setAttribute('aria-expanded', 'false'); }
+  attachmentMenu.hidden = true; attach.setAttribute('aria-expanded', 'false');
+  permissionMenu.hidden = true; permissionToggle.setAttribute('aria-expanded', 'false');
   if (!preserveConnection) { connectionMenu.hidden = true; connectionToggle.setAttribute('aria-expanded', 'false'); }
 }
 modelToggle.addEventListener('click', () => {
   const open = modelMenu.hidden; closeMenus();
-  modelMenu.hidden = !open; modelToggle.setAttribute('aria-expanded', String(open));
+  if (open) effortControl.open(false);
   if (open) (modelMenu.querySelector('[aria-selected="true"]') ?? modelMenu.querySelector('button'))?.scrollIntoView?.({ block: 'nearest' });
 });
 attach.addEventListener('click', () => {
   const open = attachmentMenu.hidden; closeMenus();
   attachmentMenu.hidden = !open; attach.setAttribute('aria-expanded', String(open));
 });
+document.getElementById('reference-workspace-file')!.addEventListener('click', () => {
+  attachmentMenu.hidden = true; attach.setAttribute('aria-expanded', 'false');
+});
 connectionToggle.addEventListener('click', () => {
   const open = connectionMenu.hidden; closeMenus();
   connectionMenu.hidden = !open; connectionToggle.setAttribute('aria-expanded', String(open));
 });
 document.addEventListener('click', event => {
-  if (!(event.target as Element).closest('.model-control, .attachment-control, .connection-control')) closeMenus(false, event.target === input);
+  if (!(event.target as Element).closest('.model-control, .attachment-control, .connection-control, .permission-control, .file-mention-menu')) closeMenus(false, event.target === input);
   if (!historyPanel.hidden && !historyPanel.contains(event.target as Node) && !historyToggle.contains(event.target as Node)) {
     historyPanel.hidden = true; historyToggle.setAttribute('aria-expanded', 'false');
   }
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && (!modelMenu.hidden || !attachmentMenu.hidden || !connectionMenu.hidden)) {
-    const target = !modelMenu.hidden ? modelToggle : !attachmentMenu.hidden ? attach : connectionToggle;
+  if (event.key === 'Escape' && (!modelMenu.hidden || !attachmentMenu.hidden || !connectionMenu.hidden || !permissionMenu.hidden)) {
+    const target = !permissionMenu.hidden ? permissionToggle : !modelMenu.hidden ? modelToggle : !attachmentMenu.hidden ? attach : connectionToggle;
     closeMenus(); target.focus();
   } else if (event.key === 'Escape' && !historyPanel.hidden) {
     historyPanel.hidden = true; historyToggle.setAttribute('aria-expanded', 'false'); historyToggle.focus();
@@ -212,11 +313,12 @@ document.addEventListener('keydown', event => {
 });
 modelToggle.addEventListener('keydown', event => {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault(); closeMenus(); modelMenu.hidden = false; modelToggle.setAttribute('aria-expanded', 'true');
+    event.preventDefault(); closeMenus(); effortControl.open(false);
     (modelMenu.querySelector('[aria-selected="true"]') as HTMLElement ?? modelMenu.querySelector('button'))?.focus();
   }
 });
 modelMenu.addEventListener('keydown', event => {
+  if ((event.target as HTMLElement).closest('#effort-control')) return;
   const options = [...modelMenu.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)')];
   let index = options.indexOf(document.activeElement as HTMLButtonElement);
   if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
@@ -357,7 +459,7 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     const workMs = answers.find(item => item.workMs !== undefined)?.workMs;
     const completed = !card.runId || answers.some(item => item.completed || item.workMs !== undefined);
     const runCards = latest?.cards.filter(item => item.runId === card.runId) ?? [];
-    const finalAnswer = completed && (!card.runId || runCards.findLastIndex(item => item.kind === 'assistant') >
+    const finalAnswer = completed && !['cancelled', 'failed'].includes(card.status ?? '') && (!card.runId || runCards.findLastIndex(item => item.kind === 'assistant') >
       runCards.findLastIndex(item => item.kind === 'tool'));
     if (!activityOnly && card.runId && completed) {
       const work = document.createElement('details'); work.className = 'work-summary'; work.open = wasOpen;
@@ -370,14 +472,27 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       }
       if (!activity.childElementCount) activity.append(element('div', '推理与生成已完成'));
       work.append(activity); container.append(work);
+      if (runCards.some(item => item.status === 'cancelled' || item.kind === 'notice' && item.text === '已停止')) {
+        container.append(element('div', '用户已暂停', 'work-status'));
+      }
     } else if (!activityOnly && card.runId && answers[0]?.id === card.id) {
       const progress = element('div', '', 'work-progress');
       progress.dataset.workingSummary = 'true';
       container.append(progress);
     }
     if (activityOnly || !completed || finalAnswer) {
-      const body = element('div', '', 'markdown'); body.innerHTML = markdown(card.text); container.append(body);
-      decorateCodeBlocks(body, (blockIndex, type) => post({ type, cardId: card.id, blockIndex }));
+      const match = card.text.match(/<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/);
+      if (match && !activityOnly) {
+        const before = card.text.slice(0, match.index).trim();
+        const after = card.text.slice((match.index ?? 0) + match[0].length).trim();
+        if (before) { const intro = element('div', '', 'markdown'); intro.innerHTML = markdown(before); container.append(intro); }
+        container.append(renderPlanCard(card, match[1], markdown, post, latest));
+        if (after) { const outro = element('div', '', 'markdown'); outro.innerHTML = markdown(after); container.append(outro); }
+      } else {
+        const body = element('div', '', 'markdown');
+        body.innerHTML = markdown(card.text.replace(/<\/?proposed_plan>/g, '')); container.append(body);
+        decorateCodeBlocks(body, (blockIndex, type) => post({ type, cardId: card.id, blockIndex }));
+      }
     }
     if (!activityOnly && finalAnswer && card.text.trim()) {
       const actions = element('div', '', 'answer-actions');
@@ -422,7 +537,8 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     copy.dataset.copy = 'true';
     const edit = iconButton('编辑并再次提问', '<path d="m14 5 5 5M4 20l5-1L20 8a2 2 0 0 0-5-5L4 14z"/>', () => {
       if (input.disabled) return;
-      input.value = card.text; imageInput.restore(card.images ?? []); resizeInput(); send.disabled = !input.value.trim() && !imageInput.get().length; input.focus();
+      input.value = fileMentions.restore(card.text, card.references); imageInput.restore(card.images ?? []);
+      fileMentions.refresh(); resizeInput(); updateSendDisabled(); input.focus();
     });
     edit.dataset.edit = 'true'; edit.disabled = input.disabled;
     actions.append(copy, edit); container.append(actions);
@@ -433,20 +549,36 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     details.append(element('summary', `${card.title} · ${labels[card.status ?? ''] ?? card.status ?? ''}${card.elapsedMs !== undefined ? ` · ${card.elapsedMs}ms` : ''}`));
     output(JSON.stringify(card.params ?? {}, null, 2), details);
     if (card.output !== undefined) output(card.output, details); container.append(details);
+    if (card.autoApproved) container.append(element('span', 'auto-approved', 'muted'));
   } else if (card.kind === 'permission') {
     container.append(element('div', `权限确认 · ${card.title}`, 'role'));
     if (card.text) container.append(element('div', card.text, 'plain'));
     if (card.params) output(JSON.stringify(card.params, null, 2), container);
     container.append(element('div', labels[card.status ?? ''] ?? card.status ?? '', 'muted'));
     const actions = element('div', '', 'permission-actions');
-    for (const decision of decisions) {
+    if (card.approvalReason) container.append(element('div', card.approvalReason, 'plain'));
+    for (const decision of card.allowedDecisions ?? decisions) {
       const button = document.createElement('button'); button.textContent = labels[decision]; button.disabled = card.status !== 'pending';
       button.addEventListener('click', () => post({ type: 'permission', toolUseId: card.toolUseId!, decision })); actions.append(button);
     }
     container.append(actions);
+  } else if (card.kind === 'question') {
+    container.append(element('div', '计划问答', 'role'));
+    container.append(element('div', card.text || (card.questions ?? []).map(question => question.question).join('\n'), 'plain'));
   } else if (card.kind === 'plan') {
     container.append(element('div', '执行计划', 'role'), element('div', card.text));
     for (const item of card.plan ?? []) container.append(element('div', `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '◉' : '○'} ${item.step}`, 'plan-step'));
+  } else if (!activityOnly && card.kind === 'notice' && card.runId && (card.completed || card.text === '已停止' || card.text.startsWith('运行失败：')) &&
+      !latest?.cards.some(item => item.runId === card.runId && item.kind === 'assistant' && (item.completed || item.workMs !== undefined))) {
+    container.classList.add('workflow');
+    const work = document.createElement('details'); work.className = 'work-summary'; work.open = wasOpen;
+    work.append(element('summary', card.workMs === undefined ? 'Worked for · 耗时未记录' : `Worked for ${duration(card.workMs)}`));
+    const activity = element('div', '', 'work-activity');
+    for (const item of latest?.cards.filter(item => item.runId === card.runId && item.kind !== 'user' && item.kind !== 'files' && item.id !== card.id) ?? []) {
+      const entry = element('article'); renderCard(item, entry, true); activity.append(entry);
+    }
+    work.append(activity); container.append(work);
+    if (card.status === 'cancelled' || card.text === '已停止') container.append(element('div', '用户已暂停', 'work-status'));
   } else {
     container.append(element('div', card.kind === 'subagent' ? `子 Agent · ${card.text} · ${labels[card.status ?? ''] ?? card.status}` : card.text));
   }
@@ -479,10 +611,70 @@ function orderedCards(all: Card[]): Card[] {
 }
 
 // 恢复完整宿主快照，普通状态更新只重绘发生变化的卡片。
+const renderPlanInput = installPlanInput(post);
+const modeToggle = document.createElement('button'); modeToggle.className = 'plan-mode-toggle';
+modeToggle.type = 'button'; modeToggle.hidden = true;
+modeToggle.setAttribute('aria-label', '退出计划模式'); modeToggle.dataset.tooltip = '退出计划模式';
+modeToggle.innerHTML = `<span class="plan-mode-icon" aria-hidden="true">
+  <svg class="plan-bulb" viewBox="0 0 24 24"><path d="M9 17h6M10 20h4M9 17v-2a5 5 0 1 1 6 0v2M12 2v1M5 5l1 1M3 10h1M20 10h1M18 6l1-1"/></svg>
+  <svg class="plan-dismiss" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 9 6 6m0-6-6 6"/></svg>
+</span><span>Plan</span>`;
+modeToggle.addEventListener('click', () => post({ type: 'collaboration', mode: 'default' }));
+modelToggle.parentElement!.after(modeToggle);
+for (const [value, label, description, icon] of [
+  ['manual', 'Manual', '遵循现有审批策略，执行操作前请求确认。', '<path d="M8 13V6a2 2 0 0 1 4 0v7M12 12V4a2 2 0 0 1 4 0v9M16 12V7a2 2 0 0 1 4 0v9c0 4-3 6-7 6-3 0-5-2-7-5l-3-4a2 2 0 0 1 3-3l2 3"/>'],
+  ['accept_edits', 'Edit automatically', '自动编辑工作区普通文件，其他操作遵循审批策略。', '<path d="m7 6-6 6 6 6m10-12 6 6-6 6M14 3l-4 18"/>'],
+  ['auto', 'Auto', '自动批准安全且符合用户意图的操作，风险或不确定操作请求确认。', '<path d="m13 2-10 12h8l-1 8 11-13h-8z"/>'],
+] as const) {
+  const button = document.createElement('button'); button.type = 'button';
+  button.dataset.permissionMode = value; button.setAttribute('role', 'menuitemradio');
+  button.innerHTML = `<svg class="permission-option-icon" viewBox="0 0 24 24" aria-hidden="true">${icon}</svg><span class="permission-option-copy"><span class="permission-option-label">${label}</span><span class="permission-option-description">${description}</span></span><svg class="permission-option-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>`;
+  button.addEventListener('click', () => {
+    if (button.disabled) return;
+    post({ type: 'permissionMode', mode: value }); closeMenus(); permissionToggle.focus();
+  });
+  permissionMenu.append(button);
+}
+// 展开权限菜单，并将键盘焦点放在当前选项。
+function openPermissionMenu(): void {
+  closeMenus(); permissionMenu.hidden = false; permissionToggle.setAttribute('aria-expanded', 'true');
+  (permissionMenu.querySelector('[aria-checked="true"]') as HTMLButtonElement ?? permissionMenu.querySelector('button'))?.focus();
+}
+permissionToggle.addEventListener('click', () => {
+  if (permissionMenu.hidden) openPermissionMenu(); else closeMenus();
+});
+permissionToggle.addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openPermissionMenu(); }
+});
+permissionMenu.addEventListener('keydown', event => {
+  const options = [...permissionMenu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+  const index = options.indexOf(document.activeElement as HTMLButtonElement);
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+    event.preventDefault();
+    options[event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+      : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length]?.focus();
+  } else if (event.key === 'Tab') closeMenus();
+});
+// 同步界面与问答弹窗。
 function render(state: ChatState): void {
+  renderPlanInput(state);
+  modeToggle.hidden = state.collaborationMode !== 'plan';
+  const modeBusy = state.busy || state.sending || state.cards.some(card => card.kind === 'subagent' && card.status === 'running');
+  permissionToggle.disabled = state.connection !== 'ready' || !!state.modeChanging || (state.collaborationMode === 'plan' && modeBusy);
+  for (const button of permissionMenu.querySelectorAll<HTMLButtonElement>('button')) {
+    button.setAttribute('aria-checked', String(button.dataset.permissionMode === (state.permissionMode ?? 'manual')));
+    button.disabled = permissionToggle.disabled;
+  }
+  const modeLabel = permissionMenu.querySelector('[aria-checked="true"] .permission-option-label')!.textContent;
+  permissionToggle.dataset.tooltip = `权限模式 · ${modeLabel}`;
+  permissionToggle.setAttribute('aria-label', `权限模式 · ${modeLabel}`);
+  if (permissionToggle.disabled) { permissionMenu.hidden = true; permissionToggle.setAttribute('aria-expanded', 'false'); }
+  modeToggle.disabled = modeBusy || state.connection !== 'ready';
   if (latest?.sessionId !== state.sessionId) imageInput.clear();
   latest = state;
   mcpPanel.render(state);
+  effortControl.render(state);
+  renderMemorySettings(state);
   sessionTitle.textContent = state.title || '新会话';
   sessionTitle.setAttribute('aria-label', `${state.title || '新会话'} · 点击重命名`);
   document.getElementById('workspace')!.textContent = state.workspace;
@@ -520,7 +712,12 @@ function render(state: ChatState): void {
   modelToggle.disabled = locked;
   const currentModel = modelSelect.selectedOptions[0] ?? modelSelect.options[0];
   document.getElementById('model-label')!.textContent = currentModel?.textContent || state.model || '选择模型';
-  modelToggle.dataset.tooltip = currentModel?.textContent || '选择模型';
+  const profile = state.models?.find(model => model.id === state.selectedModel) ?? state.fallbackModel;
+  const effort = modelEffort(state.reasoningOptions?.model || profile?.model || '', state.reasoningEffort || state.reasoningOptions?.effectiveEffort || profile?.reasoningEffort);
+  const effortBadge = document.getElementById('model-effort')!;
+  effortBadge.hidden = profile?.protocol !== 'openai' &&
+    !(profile?.protocol === 'anthropic' && claudeEfforts(profile.model).length > 0);
+  effortBadge.textContent = effortLabels[effort] || effort;
   const options = document.getElementById('model-options')!;
   const signature = JSON.stringify([nextModelSignature, locked]);
   if (options.dataset.signature !== signature) {
@@ -531,7 +728,7 @@ function render(state: ChatState): void {
       button.disabled = locked || option.disabled;
       const description = element('span', '', 'model-description');
       const profile = state.models?.find(model => model.id === option.value) ?? state.fallbackModel;
-      description.textContent = profile ? `${profile.protocol} · ${profile.model}` : '当前模型';
+      description.textContent = profile && profile.model !== option.textContent ? profile.model : 'Custom model';
       const label = element('span', '', 'model-option-label'); label.append(element('span', option.textContent || ''), description);
       button.append(label, element('span', option === currentModel ? '✓' : '', 'model-check'));
       button.addEventListener('click', () => {
@@ -539,10 +736,10 @@ function render(state: ChatState): void {
       }); options.append(button);
     }
   }
-  if (locked) closeMenus(true);
+  if (locked) closeMenus(true, false, !!state.reasoningLoading || !!state.modelChanging);
   const nextHistorySignature = JSON.stringify([state.history, state.archivedSessionIds, state.sessionId, locked]);
   if (historySignature !== nextHistorySignature) { renderHistory(state); historySignature = nextHistorySignature; }
-  input.disabled = locked; slash.refresh(); imageInput.render(); send.disabled = locked || imageInput.loading() || (!input.value.trim() && !imageInput.get().length);
+  input.disabled = locked; slash.refresh(); fileMentions.refresh(); imageInput.render(); updateSendDisabled();
   for (const record of rendered.values()) {
     const edit = record.element.querySelector<HTMLButtonElement>('[data-edit]'); if (edit) edit.disabled = locked;
   }
@@ -567,14 +764,17 @@ function render(state: ChatState): void {
     if (!record) { record = { element: element('article'), signature: '' }; rendered.set(card.id, record); cards.append(record.element); }
     if (record.element !== position) cards.insertBefore(record.element, position);
     position = record.element.nextElementSibling;
-    const runCards = card.kind === 'assistant' && card.runId ? state.cards.filter(item => item.runId === card.runId) : undefined;
-    const signature = JSON.stringify([card, runCards, state.bookmarkCardIds?.[card.id], state.busy, state.sending, state.connection]);
+    const runCards = (card.kind === 'assistant' || card.kind === 'notice') && card.runId ? state.cards.filter(item => item.runId === card.runId) : undefined;
+    const signature = JSON.stringify([card, runCards, state.bookmarkCardIds?.[card.id], state.busy, state.sending, state.connection, state.collaborationMode, state.permissionMode]);
     const answers = card.runId ? state.cards.filter(answer => answer.kind === 'assistant' && answer.runId === card.runId) : [];
     const completed = answers.some(answer => answer.completed || answer.workMs !== undefined);
     const visibleAnswer = completed ? answers.at(-1) : undefined;
+    const terminalNotice = card.runId ? state.cards.findLast(item => item.runId === card.runId && item.kind === 'notice' &&
+      (item.completed || item.text === '已停止' || item.text.startsWith('运行失败：'))) : undefined;
+    const summaryCard = visibleAnswer ?? terminalNotice;
     if (signature !== record.signature) { renderCard(card, record.element, card.kind === 'assistant' && !!visibleAnswer && card.id !== visibleAnswer.id); record.signature = signature; }
-    record.element.hidden = !!visibleAnswer && card.kind !== 'user' && card.kind !== 'files' &&
-      (card.kind === 'assistant' ? card.id !== visibleAnswer.id : !(card.kind === 'permission' && card.status === 'pending'));
+    record.element.hidden = !!summaryCard && card.kind !== 'user' && card.kind !== 'files' &&
+      card.id !== summaryCard.id && !(card.kind === 'permission' && card.status === 'pending');
   }
   cards.append(document.getElementById('run-status')!);
   updateWorking();
@@ -589,6 +789,22 @@ function render(state: ChatState): void {
 window.addEventListener('message', event => {
   const message = event.data;
   if (message?.type === 'state') render(message.state as ChatState);
+  else if (message?.type === 'skills' && Array.isArray(message.skills)) renderSkills(message.skills as SkillSummary[]);
+  else if (message?.type === 'skillsError' &&
+      document.getElementById('command-title')!.textContent === '可用技能') {
+    document.getElementById('command-body')!.textContent = `读取技能失败：${String(message.message)}`;
+  }
+  else if (message?.type === 'workspaceFiles' && typeof message.requestId === 'number' && Array.isArray(message.files)) {
+    fileMentions.receive(message.requestId, message.files.filter((entry: unknown): entry is WorkspaceEntry => {
+      if (!entry || typeof entry !== 'object') return false;
+      const value = entry as Record<string, unknown>;
+      return typeof value.path === 'string' && value.path.length <= 1024 &&
+        (value.kind === 'file' || value.kind === 'directory');
+    }));
+  }
+  else if (message?.type === 'workspaceFilesError' && typeof message.requestId === 'number') {
+    fileMentions.failed(message.requestId, `读取工作区文件失败：${String(message.message || '未知错误')}`);
+  }
   else if (message?.type === 'bookmarksSettled') {
     for (const button of document.querySelectorAll<HTMLButtonElement>('[data-bookmark]')) {
       button.disabled = !latest?.sessionId || !!latest?.busy || !!latest?.sending;
@@ -610,6 +826,7 @@ window.addEventListener('message', event => {
     }
   }
   else if (message?.type === 'unavailable') {
+    closeMenus();
     if (latest) mcpPanel.render({ ...latest, connection: 'error', mcpBusy: false, mcpLoading: false });
     error.hidden = false; error.textContent = message.message;
     input.disabled = true; send.disabled = true; fresh.disabled = true; stop.disabled = true; retry.disabled = false;

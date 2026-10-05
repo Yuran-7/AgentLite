@@ -58,3 +58,15 @@ def test_factory_rejects_unknown_protocol() -> None:
 
     with pytest.raises(SystemExit, match="llm.protocol"):
         factory.create_llm_provider(config)
+
+
+# 功能：OpenAI 模式选择 Responses Provider，并拒绝未知模式。
+# 设计：替换构造器验证路由，避免依赖真实 API 或密钥。
+def test_factory_responses_mode(monkeypatch):
+    constructor = MagicMock()
+    monkeypatch.setattr(factory, "OpenAIResponsesProvider", constructor)
+    config = LlmConfig(protocol="openai", api_mode="responses", default_model="test")
+    assert factory.create_llm_provider(config) is constructor.return_value
+    config.api_mode = "invalid"
+    with pytest.raises(SystemExit, match="api_mode"):
+        factory.create_llm_provider(config)

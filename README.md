@@ -8,6 +8,16 @@ AgentLite 是一个本地运行的 AI Agent 项目。它通过大模型理解任
 
 可以用它理解代码库、定位问题、实现功能或执行开发任务。模型通过 Anthropic 或 OpenAI-compatible API 调用；会话与工具记录保存在本机。
 
+## 目录
+
+- [主要功能](#主要功能)
+- [环境要求](#环境要求)
+- [快速开始](#快速开始)
+- [日常使用](#日常使用)
+- [配置与维护](#配置与维护)
+- [常见问题](#常见问题)
+- [项目结构与开发](#项目结构与开发)
+
 ## 主要功能
 
 - **多轮对话**：流式回复、历史会话恢复、会话改名和模型切换。
@@ -164,37 +174,61 @@ uv run lite run --goal "检查当前项目的目录结构并解释主要模块"
 
 CLI 将运行命令时的当前目录作为任务工作区。已安装到 Python 环境后，可以在目标项目中直接运行 `lite chat` 或 `lite run --goal "..."`。
 
-## 后台服务与重启
+## 日常使用
 
-VS Code 和 TUI 默认自动启动并共享 core。最后一个前端退出后，core 等待 15 秒再自动停止；仅隐藏聊天面板不算退出。
+安装并配置模型后，可根据任务选择权限模式、先制定计划，或调用技能。
 
-| 命令（仓库根目录执行） | 用途 |
-| --- | --- |
-| `uv run lite core status` | 查看后台状态 |
-| `uv run lite core start` | 启动常驻服务，或将已有自动服务转为常驻 |
-| `uv run lite core stop` | 停止共享后台服务 |
-| `uv run lite ping` | 检查连接 |
-| `uv run lite-core` | 在当前终端前台运行服务，方便调试 |
-| `uv run lite trace` | 查看运行跟踪记录 |
+### 会话权限模式
 
-修改 Python 后端代码或已加载的密钥后，等待任务结束，执行 `uv run lite core stop`，再重连 VS Code 或重新打开 TUI。原会话可以继续使用。更新插件后执行 VS Code 的 **开发人员: 重新加载窗口**。
+新会话默认使用 **Auto**；旧会话缺少权限字段时保持 **Manual**。
+TUI 用 `/mode manual|edits|auto|plan` 或 Shift+Tab 切换。VS Code 点击输入区的盾牌图标，展开 Manual、Edit automatically、Auto 三项权限菜单；Plan 通过 `/plan` 进入。
+CLI 支持 `lite chat --permission-mode manual` 和 `lite run --goal "任务" --permission-mode auto`。
 
-## 配置与本地数据
+- **Manual**：沿用现有审批策略及长期授权记录。
+- **Edit automatically**：自动允许工作区普通文件编辑和能确认的只读命令；保护路径、危险操作和工作区外文件编辑需确认。
+- **Auto**：普通编辑和查询直接执行，其余操作由独立模型根据真实用户意图审批；模型不可用、超时或无法确定时询问用户。
+- **Plan**：只读探索和生成计划，保留此前权限模式；进入、退出 Plan 需运行空闲。
 
-| 路径 | 内容 |
-| --- | --- |
-| `~/.agentlite/settings.json` | 模型列表与默认模型 |
-| `~/.agentlite/.env` | API key 与环境配置 |
-| `~/.agentlite/config.toml` | core、工具、权限、上下文等配置 |
-| `~/.agentlite/mcp.json` | MCP 服务器配置 |
-| `~/.agentlite/sessions/` | 会话消息、事件和独立工具结果文件 |
-| `~/.agentlite/logs/` | 默认日志目录 |
+Auto 不使用整工具级长期放行，也不提供“始终允许”；已有授权记录在 Manual 中继续有效。
+保护目录、敏感配置和已识别的高危操作始终要求确认。分类器的每次判断会产生一次额外模型请求，放行结果不缓存。
+用户意图独立保存在会话目录的 `permission_users.jsonl`，不会从压缩摘要、工具输出或子 agent 的任务提示推断授权。
+旧会话没有该日志时，未收到新的真实用户输入前，灰色操作会转人工确认。
 
-core 的 TOML 配置按“内建默认值 → 用户配置 → 启动目录的 `.agentlite/config.toml` → 环境变量”覆盖。设置 `AGENTLITE_CONFIG` 后只读取指定的 TOML 文件。模型 JSON 始终从用户目录读取。
+用户配置 `~/.agentlite/config.toml` 使用现有的单数配置节：
 
-大工具结果的保存、预览预算与按需读取方式见 [工具结果存储说明](docs/tool-result-storage.md)。
+```toml
+[permission]
+timeout_s = 60.0
+default_mode = "auto" # manual | accept_edits | auto，仅影响新会话
+classifier_enabled = true
+classifier_model = "" # 留空使用当前运行模型；非空填写 settings.json 中的模型 id
+classifier_timeout_s = 20.0
+```
 
-## 技能（Skills）
+对应环境变量为 `AGENTLITE_PERMISSION_DEFAULT_MODE`、`AGENTLITE_PERMISSION_CLASSIFIER_ENABLED`、
+`AGENTLITE_PERMISSION_CLASSIFIER_MODEL` 和 `AGENTLITE_PERMISSION_CLASSIFIER_TIMEOUT_S`。
+关闭分类器后仍保留普通编辑和查询的快速通道，其余 Auto 操作转人工确认。
+运行中可以切换三种权限模式，切换对下一次权限检查生效；已经开始的分类和审批保持原模式。
+
+### 计划模式
+
+VS Code 默认不显示模式标签。在 `/` 菜单选择 Plan 或输入 `/plan` 进入计划模式后，
+模型右侧显示“灯泡 + Plan”。悬停或键盘聚焦时灯泡变为叉号，点击标签退出计划模式。
+重复选择 `/plan` 保持开启；运行期间不能切换模式。
+计划模式先阅读代码，再通过弹窗逐题询问影响方案的偏好；每次只问一个问题，
+收到答案后模型重新思考，按需提出下一题。每题提供 2–3 个选项，可以直接点击选择、
+填写其他方案或 Skip 跳过。默认选项不会自动提交，
+等待回答不会因普通工具的超时限制而结束，取消任务会清理待回答请求。
+
+最终方案以独立 Plan 卡片展示，支持展开、复制、打开和下载 Markdown。
+点击“开始执行计划”会切换为执行模式并提交该计划；
+也可留在计划模式继续修改方案。协作模式随会话保存，恢复历史会话后仍然生效。
+TUI 使用 `/plan`、`/plan on`、`/plan off`，同样支持选择题弹窗；执行时先 `/plan off` 再发送执行指令。
+
+当前计划模式只提供文件读取、目录浏览和网页查询工具，文件写入、Shell、MCP 和子代理
+不开放，以保证规划期间不会执行修改。最终计划的质量和是否需要提问由所选模型决定。
+
+### 技能（Skills）
 
 在工作区的 `.agentlite/skills/<名称>/SKILL.md` 或用户目录的 `~/.agentlite/skills/<名称>/SKILL.md` 创建技能；也支持这些目录下的旧格式 `<名称>.md`。仅加载 AgentLite 内置技能和这两个专属目录，不扫描 `.codex/skills/`、`.claude/skills/` 或 `.agents/skills/`。同名技能以工作区版本优先。文件使用 YAML frontmatter 描述 `name`、`description`，正文写技能指令；可选 `allowed-tools` 列表限制工具。
 
@@ -209,6 +243,38 @@ description: 检查代码问题
 ---
 请检查 $ARGUMENTS，报告具体文件和行号。
 ```
+
+## 配置与维护
+
+### 配置与本地数据
+
+| 路径 | 内容 |
+| --- | --- |
+| `~/.agentlite/settings.json` | 模型列表与默认模型 |
+| `~/.agentlite/.env` | API key 与环境配置 |
+| `~/.agentlite/config.toml` | core、工具、权限、上下文等配置 |
+| `~/.agentlite/mcp.json` | MCP 服务器配置 |
+| `~/.agentlite/sessions/` | 会话消息、事件和独立工具结果文件 |
+| `~/.agentlite/logs/` | 默认日志目录 |
+
+core 的 TOML 配置按“内建默认值 → 用户配置 → 启动目录的 `.agentlite/config.toml` → 环境变量”覆盖。设置 `AGENTLITE_CONFIG` 后只读取指定的 TOML 文件。模型 JSON 始终从用户目录读取。
+
+大工具结果的保存、预览预算与按需读取方式见 [工具结果存储说明](docs/tool-result-storage.md)。
+
+### 后台服务与重启
+
+VS Code 和 TUI 默认自动启动并共享 core。最后一个前端退出后，core 等待 15 秒再自动停止；仅隐藏聊天面板不算退出。
+
+| 命令（仓库根目录执行） | 用途 |
+| --- | --- |
+| `uv run lite core status` | 查看后台状态 |
+| `uv run lite core start` | 启动常驻服务，或将已有自动服务转为常驻 |
+| `uv run lite core stop` | 停止共享后台服务 |
+| `uv run lite ping` | 检查连接 |
+| `uv run lite-core` | 在当前终端前台运行服务，方便调试 |
+| `uv run lite trace` | 查看运行跟踪记录 |
+
+修改 Python 后端代码或已加载的密钥后，等待任务结束，执行 `uv run lite core stop`，再重连 VS Code 或重新打开 TUI。原会话可以继续使用。更新插件后执行 VS Code 的 **开发人员: 重新加载窗口**。
 
 ## 常见问题
 
@@ -242,56 +308,3 @@ uv run mypy src
 ```
 
 插件检查在 `extensions/vscode` 执行 `npm run check` 和 `npm test`。真实模型测试单独运行，会产生 API 请求；具体步骤见 [插件文档](extensions/vscode/README.md)。
-
-
-# 计划模式
-
-VS Code 默认不显示模式标签。在 `/` 菜单选择 Plan 或输入 `/plan` 进入计划模式后，
-模型右侧显示“灯泡 + Plan”。悬停或键盘聚焦时灯泡变为叉号，点击标签退出计划模式。
-重复选择 `/plan` 保持开启；运行期间不能切换模式。
-计划模式先阅读代码，再通过弹窗逐题询问影响方案的偏好；每次只问一个问题，
-收到答案后模型重新思考，按需提出下一题。每题提供 2–3 个选项，可以直接点击选择、
-填写其他方案或 Skip 跳过。默认选项不会自动提交，
-等待回答不会因普通工具的超时限制而结束，取消任务会清理待回答请求。
-
-最终方案以独立 Plan 卡片展示，支持展开、复制、打开和下载 Markdown。
-点击“开始执行计划”会切换为执行模式并提交该计划；
-也可留在计划模式继续修改方案。协作模式随会话保存，恢复历史会话后仍然生效。
-TUI 使用 `/plan`、`/plan on`、`/plan off`，同样支持选择题弹窗；执行时先 `/plan off` 再发送执行指令。
-
-当前计划模式只提供文件读取、目录浏览和网页查询工具，文件写入、Shell、MCP 和子代理
-不开放，以保证规划期间不会执行修改。最终计划的质量和是否需要提问由所选模型决定。
-
-
-
-## 会话权限模式
-
-新会话默认使用 **Auto**；旧会话缺少权限字段时保持 **Manual**。
-TUI 用 `/mode manual|edits|auto|plan` 或 Shift+Tab 切换。VS Code 点击输入区的盾牌图标，展开 Manual、Edit automatically、Auto 三项权限菜单；Plan 通过 `/plan` 进入。
-CLI 支持 `lite chat --permission-mode manual` 和 `lite run --goal "任务" --permission-mode auto`。
-
-- **Manual**：沿用现有审批策略及长期授权记录。
-- **Edit automatically**：自动允许工作区普通文件编辑和能确认的只读命令；保护路径、危险操作和工作区外文件编辑需确认。
-- **Auto**：普通编辑和查询直接执行，其余操作由独立模型根据真实用户意图审批；模型不可用、超时或无法确定时询问用户。
-- **Plan**：只读探索和生成计划，保留此前权限模式；进入、退出 Plan 需运行空闲。
-
-Auto 不使用整工具级长期放行，也不提供“始终允许”；已有授权记录在 Manual 中继续有效。
-保护目录、敏感配置和已识别的高危操作始终要求确认。分类器的每次判断会产生一次额外模型请求，放行结果不缓存。
-用户意图独立保存在会话目录的 `permission_users.jsonl`，不会从压缩摘要、工具输出或子 agent 的任务提示推断授权。
-旧会话没有该日志时，未收到新的真实用户输入前，灰色操作会转人工确认。
-
-用户配置 `~/.agentlite/config.toml` 使用现有的单数配置节：
-
-```toml
-[permission]
-timeout_s = 60.0
-default_mode = "auto" # manual | accept_edits | auto，仅影响新会话
-classifier_enabled = true
-classifier_model = "" # 留空使用当前运行模型；非空填写 settings.json 中的模型 id
-classifier_timeout_s = 20.0
-```
-
-对应环境变量为 `AGENTLITE_PERMISSION_DEFAULT_MODE`、`AGENTLITE_PERMISSION_CLASSIFIER_ENABLED`、
-`AGENTLITE_PERMISSION_CLASSIFIER_MODEL` 和 `AGENTLITE_PERMISSION_CLASSIFIER_TIMEOUT_S`。
-关闭分类器后仍保留普通编辑和查询的快速通道，其余 Auto 操作转人工确认。
-运行中可以切换三种权限模式，切换对下一次权限检查生效；已经开始的分类和审批保持原模式。

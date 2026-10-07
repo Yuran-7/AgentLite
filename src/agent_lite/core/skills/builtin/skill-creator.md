@@ -3,7 +3,8 @@ name: skill-creator
 description: 创建或修改 AgentLite 技能，将用户的任务流程整理为可复用的 SKILL.md
 allowed_tools:
   - read_file
-  - list_dir
+  - glob
+  - grep
   - write_file
   - edit_file
   - shell

@@ -13,7 +13,7 @@ export function webviewHtml(nonce: string, source: string, script: string, style
     </div></div></header>
     <section id="history-panel" hidden aria-label="历史会话"><div class="history-heading"><strong id="history-heading">历史聊天</strong><div class="history-heading-actions"><button id="history-archives" aria-pressed="false" aria-label="查看已归档会话">已归档</button><button id="history-refresh" data-tooltip="刷新历史">刷新</button></div></div>
     <input id="history-search" type="search" placeholder="搜索会话名称…" aria-label="搜索历史会话"><div id="history-list"></div></section>
-    <div class="chat-layout"><div class="chat-main"><div id="error" role="alert" hidden></div><main id="cards" data-logo="${logo}" aria-label="聊天记录"><div id="run-status" role="status" hidden><span class="working-dot" aria-hidden="true"></span><span id="run-label"></span></div></main>
+    <div class="chat-layout"><div class="chat-main"><div id="error" role="alert" hidden></div><main id="cards" data-logo="${logo}" aria-label="聊天记录"><div id="run-status" role="status" hidden><span id="run-label"></span></div><div id="idle-thinking" role="status" hidden><span class="progress-shimmer">Processing</span></div></main>
     <footer>
     <div class="composer-shell">
     <section id="mcp-panel" class="popover mcp-panel" hidden role="dialog" aria-labelledby="mcp-title">

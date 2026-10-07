@@ -11,7 +11,7 @@ from agent_lite.core.tools.builtin.bash import (
     _shell_argv,
     _shell_description,
 )
-from agent_lite.core.tools.builtin.list_dir import ListDirTool
+from agent_lite.core.tools.builtin.glob import GlobTool
 from agent_lite.core.tools.builtin.write_file import WriteFileTool
 
 # ── shell ─────────────────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ async def test_write_file_creates_and_returns_size(tmp_path: Path) -> None:
     assert target.read_text() == "hello world"
 
 
-# 功能：验证 write_file 和 list_dir 都从注入工作目录解析相对路径
+# 功能：验证 write_file 和 glob 都从注入工作目录解析相对路径
 # 设计：先相对写入再相对列目录，以一个闭环覆盖两个工具共享的工作区路径解析规则
 @pytest.mark.asyncio
 async def test_file_tools_use_working_directory(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ async def test_file_tools_use_working_directory(tmp_path: Path) -> None:
     written = await WriteFileTool(workspace).invoke(
         {"path": "src/new.py", "content": "value = 1"}
     )
-    listed = await ListDirTool(workspace).invoke({"path": "src"})
+    listed = await GlobTool(workspace).invoke({"path": "src", "pattern": "*.py"})
 
     assert not written.is_error
     assert (workspace / "src" / "new.py").read_text() == "value = 1"
@@ -183,47 +183,3 @@ async def test_write_file_rejects_traversal() -> None:
         await WriteFileTool().invoke({"path": "../secret.txt", "content": "x"})
 
 
-# ── list_dir ──────────────────────────────────────────────────────────────────
-
-# 功能：验证 list_dir 输出包含目录中的文件名
-# 设计：在 tmp_path 创建已知结构，断言文件名出现在 content 中；不约束格式细节
-@pytest.mark.asyncio
-async def test_list_dir_shows_files(tmp_path: Path) -> None:
-    (tmp_path / "foo.py").write_text("x")
-    (tmp_path / "bar.md").write_text("y")
-    result = await ListDirTool().invoke({"path": str(tmp_path)})
-    assert not result.is_error
-    assert "foo.py" in result.content
-    assert "bar.md" in result.content
-
-
-# 功能：验证 list_dir 按 max_depth 限制递归深度（depth=1 时不展示孙级目录内容）
-# 设计：创建 parent/child/grandchild 三层，depth=1 时 grandchild 不应出现在输出中
-@pytest.mark.asyncio
-async def test_list_dir_respects_max_depth(tmp_path: Path) -> None:
-    child = tmp_path / "child"
-    child.mkdir()
-    grandchild = child / "grandchild"
-    grandchild.mkdir()
-    (grandchild / "deep.txt").write_text("x")
-
-    result = await ListDirTool().invoke({"path": str(tmp_path), "max_depth": 1})
-    assert not result.is_error
-    assert "child" in result.content
-    assert "deep.txt" not in result.content
-
-
-# 功能：验证对不存在的路径 list_dir 抛出 FileNotFoundError
-# 设计：直接传入不存在的路径字符串，预期抛出标准异常（invocation.py 捕获后返回 error ToolResult）
-@pytest.mark.asyncio
-async def test_list_dir_missing_path_raises() -> None:
-    with pytest.raises(FileNotFoundError):
-        await ListDirTool().invoke({"path": "/this/does/not/exist"})
-
-
-# 功能：验证 list_dir 拒绝包含 .. 的路径
-# 设计：与 read_file 和 write_file 保持一致的安全规则
-@pytest.mark.asyncio
-async def test_list_dir_rejects_traversal() -> None:
-    with pytest.raises(PermissionError):
-        await ListDirTool().invoke({"path": "../"})

@@ -14,6 +14,7 @@ class UsageStats:
     context_tokens: int = 0
     context_window: int = 0
     context_window_estimated: bool = False
+    reasoning_output_tokens: int | None = None
 
 
 @dataclass
@@ -31,3 +32,4 @@ class LlmResponse:
     usage: UsageStats | None = None
     # thinking blocks from extended thinking — must be preserved verbatim in conversation history
     thinking_blocks: list[dict[str, object]] = field(default_factory=list)
+    content_blocks: list[dict[str, object]] | None = None  # 保留 Anthropic 原始块顺序

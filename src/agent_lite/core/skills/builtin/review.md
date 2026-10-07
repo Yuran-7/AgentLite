@@ -3,7 +3,8 @@ name: review
 description: 对指定路径做代码审查，输出严重/建议/可选三级分类
 allowed_tools:
   - read_file
-  - list_dir
+  - glob
+  - grep
   - shell
 ---
 你是一位严格的代码审查员。请对以下目标路径进行全面的代码审查：

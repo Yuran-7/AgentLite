@@ -19,7 +19,8 @@ from agent_lite.core.tools.base import BaseTool, ToolResult
 from agent_lite.core.tools.builtin.bash import ShellTool
 from agent_lite.core.tools.builtin.cosil_localize import CosilLocalizeTool
 from agent_lite.core.tools.builtin.edit_file import EditFileTool
-from agent_lite.core.tools.builtin.list_dir import ListDirTool
+from agent_lite.core.tools.builtin.glob import GlobTool
+from agent_lite.core.tools.builtin.grep import GrepTool
 from agent_lite.core.tools.builtin.read_file import ReadFileTool
 from agent_lite.core.tools.builtin.update_plan import UpdatePlanTool
 from agent_lite.core.tools.builtin.web_fetch import WebFetchTool
@@ -92,7 +93,7 @@ class SpawnAgentTool(BaseTool):
                 "shell",
                 "write_file",
                 "edit_file",
-                "list_dir",
+                "glob", "grep",
                 "update_plan",
                 "spawn_agent",
             ]
@@ -331,7 +332,8 @@ class SpawnAgentTool(BaseTool):
             ShellTool(self._workspace_root),
             WriteFileTool(self._workspace_root, files),
             EditFileTool(self._workspace_root, files),
-            ListDirTool(self._workspace_root),
+            GlobTool(self._workspace_root),
+            GrepTool(self._workspace_root),
         ]
         if self._workspace_root is not None:
             tools.append(CosilLocalizeTool(provider, child_bus, child_run_id, self._workspace_root))

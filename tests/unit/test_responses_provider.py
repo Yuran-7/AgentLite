@@ -157,3 +157,25 @@ async def test_real_sdk_transport():
     assert json.loads(requests[0].content)["input"] == [{"role": "user", "content": "hi"}]
     assert result.text == "hello"
     assert result.usage.cache_read_input_tokens == 5
+
+
+# 功能：Responses 推理摘要和加密内容无损接收并按轮次回传。
+# 设计：真实 SDK 推理项覆盖加密字段保留和无服务器状态的历史输入。
+async def test_responses_reasoning_roundtrip():
+    from openai.types.responses import ResponseReasoningItem
+    reasoning = ResponseReasoningItem(id="rs_1", type="reasoning",
+        summary=[{"type": "summary_text", "text": "checking"}], encrypted_content="cipher")
+    event = terminal(output=[reasoning])
+    event.response.usage.output_tokens_details = NS(reasoning_tokens=7)
+    result, events, client = await run([Stream([
+        NS(type="response.reasoning_summary_text.delta", delta="checking"), event])])
+    expected = reasoning.model_dump(mode="json", exclude_none=True)
+    assert result.thinking_blocks == [{"type": "responses_reasoning", "item": expected}]
+    assert [e.token for e in events if e.type == "llm.thinking" and e.block is None] == ["checking"]
+    assert result.usage.reasoning_output_tokens == 7
+    assert client.responses.create.await_args.kwargs["include"] == ["reasoning.encrypted_content"]
+    items = _convert_input([{"role": "user", "content": "hi"},
+                            {"role": "assistant", "content": result.thinking_blocks +
+                             [{"type": "text", "text": "answer"}]}])
+    assert items == [{"role": "user", "content": "hi"}, expected,
+                     {"role": "assistant", "content": "answer"}]

@@ -14,11 +14,22 @@ import { installMcpPanel } from './mcp-panel';
 import { effortLabels, installEffortControl } from './effort-control';
 import { claudeEfforts, modelEffort } from '../src/reasoning';
 import { renderFileChanges } from './file-changes';
+import { toolPresentation } from '../src/tool-presentation';
 
 declare function acquireVsCodeApi(): { postMessage(message: PageMessage): void };
 const api = acquireVsCodeApi();
 installTooltips();
 const cards = document.getElementById('cards')!;
+// 兼容升级后保留的旧页面，状态节点由脚本补齐并持有稳定引用。
+function statusNode(id: string, labelId: string, text: string, className = ''): HTMLElement {
+  const node = document.getElementById(id) ?? document.createElement('div');
+  node.id = id; node.setAttribute('role', 'status'); node.hidden = true;
+  const label = document.createElement('span'); label.id = labelId; label.textContent = text; label.className = className;
+  node.replaceChildren(label); cards.append(node); return node;
+}
+const runStatus = statusNode('run-status', 'run-label', '');
+const runLabel = runStatus.firstElementChild as HTMLElement;
+const idleProgress = statusNode('idle-thinking', 'idle-thinking-label', 'Processing', 'progress-shimmer');
 // 普通点击先收起上一次的文本选区，空白区域也能取消高亮。
 document.addEventListener('pointerdown', event => {
   if (event.button === 0 && !event.shiftKey) window.getSelection()?.removeAllRanges();
@@ -335,16 +346,35 @@ function duration(ms: number): string {
   const hours = Math.floor(seconds / 3600); const minutes = Math.floor(seconds / 60) % 60;
   return hours ? `${hours}h ${minutes}m ${seconds % 60}s` : minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
 }
-// 首段内容出现前显示 Thinking，之后仅保留当前聊天中的运行状态与耗时。
+// 记录当前轮最近一次执行进展，避免设置刷新重置等待计时。
+let activityRun: string | undefined;
+let activitySignature = '';
+let activityUpdatedAt = 0;
+
+// 初次等待与连续五秒没有执行进展时显示Processing，等待用户确认时隐藏提示。
 function updateWorking(): void {
-  const hasRunSummary = !!latest?.runId && latest.cards.some(card => card.kind === 'assistant' && card.runId === latest?.runId);
-  document.getElementById('run-status')!.hidden = (!latest?.busy && !latest?.compacting) || hasRunSummary;
-  document.getElementById('run-label')!.textContent = latest?.cancelling ? 'Stopping…'
-    : latest?.compacting ? '正在压缩上下文…' : 'Thinking…';
-  for (const summary of document.querySelectorAll<HTMLElement>('[data-working-summary]')) {
-    summary.textContent = latest?.cancelling ? 'Stopping…'
-      : latest?.workStartedAt ? `Working for ${duration(Date.now() - latest.workStartedAt)}` : 'Working…';
+  const activity = latest?.cards.filter(card => (card.runId === latest?.runId || card.parentRunId === latest?.runId) &&
+    !!latest?.runId && !['user', 'files'].includes(card.kind)) ?? [];
+  const waitingForUser = latest?.cards.some(card => ['permission', 'question'].includes(card.kind) &&
+    ['pending', 'responding'].includes(card.status ?? '')) ?? false;
+  const signature = JSON.stringify([waitingForUser, activity.map(card => [card.id, card.text, card.output, card.status, card.plan])]);
+  if (activityRun !== latest?.runId || activitySignature !== signature) {
+    activityRun = latest?.runId; activitySignature = signature; activityUpdatedAt = Date.now();
   }
+  const hasContent = activity.some(card => card.text.trim() || card.kind === 'thinking' && card.encryptedThinking ||
+    ['tool', 'subagent', 'permission', 'question', 'plan'].includes(card.kind));
+  const completed = !!latest?.runId && latest.cards.some(card => card.runId === latest?.runId &&
+    ['assistant', 'notice'].includes(card.kind) && (card.completed || card.workMs !== undefined));
+  runStatus.hidden = !latest?.compacting && (!latest?.busy || completed);
+  const label = runLabel;
+  const initialWaiting = !!latest?.busy && !hasContent && !latest.cancelling && !latest.compacting && !waitingForUser;
+  label.classList.toggle('progress-shimmer', initialWaiting);
+  label.textContent = latest?.cancelling ? 'Stopping…'
+    : latest?.compacting ? '正在压缩上下文…'
+    : initialWaiting ? 'Processing'
+    : latest?.workStartedAt !== undefined ? `Working for ${duration(Date.now() - latest.workStartedAt)}` : 'Working…';
+  idleProgress.hidden = !latest?.busy || completed || !hasContent || waitingForUser ||
+    !!latest.cancelling || !!latest.compacting || Date.now() - activityUpdatedAt < 5000;
 }
 window.setInterval(updateWorking, 1000);
 
@@ -448,11 +478,74 @@ function output(text: string, container: HTMLElement): void {
   }
 }
 
+// 按真实可见区域检测溢出，只有被裁剪的工具内容才允许打开完整文档。
+function updateToolPreviews(): void {
+  for (const row of cards.querySelectorAll<HTMLElement>('.tool-preview-row')) {
+    const pre = row.querySelector('pre')!;
+    const overflow = row.dataset.truncated === 'true' || (pre.clientWidth > 0 &&
+      (pre.scrollWidth > pre.clientWidth + 1 || pre.scrollHeight > pre.clientHeight + 1));
+    row.classList.toggle('overflowing', overflow);
+    row.tabIndex = overflow ? 0 : -1;
+    if (overflow) { row.setAttribute('role', 'button'); row.setAttribute('aria-label', `查看完整 ${row.dataset.section}`); }
+    else { row.removeAttribute('role'); row.removeAttribute('aria-label'); }
+  }
+}
+cards.addEventListener('toggle', updateToolPreviews, true);
+window.addEventListener('resize', updateToolPreviews);
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(updateToolPreviews).observe(cards);
+
+// 默认显示输入输出预览，点击或键盘操作只在内容溢出时打开编辑器。
+function toolPreview(card: Card, section: 'input' | 'output', text: string, container: HTMLElement, labelled = true): void {
+  const row = element('div', '', 'tool-preview-row');
+  row.dataset.section = section === 'input' ? 'IN' : 'OUT';
+  row.dataset.truncated = String(text.length > 12000);
+  if (labelled) row.append(element('span', row.dataset.section, 'tool-preview-label'));
+  row.append(element('pre', text.slice(0, 12000)));
+  const open = () => {
+    if (row.classList.contains('overflowing') && !window.getSelection()?.toString())
+      post({ type: 'openToolContent', cardId: card.id, section });
+  };
+  row.addEventListener('click', open);
+  row.addEventListener('keydown', event => {
+    if (row.classList.contains('overflowing') && ['Enter', ' '].includes(event.key)) { event.preventDefault(); open(); }
+  });
+  container.append(row);
+}
+
+// 空推理不进入执行记录，只有可读正文或明确的加密标记才生成节点。
+function hasThinkingContent(card: Card): boolean {
+  return card.kind !== 'thinking' || !!card.text.trim() || !!card.encryptedThinking;
+}
+
+// 根据父子运行归属筛选可展示的执行记录。
+function activityCards(runId: string): Card[] {
+  return (latest?.cards ?? []).filter(card => (card.kind === 'subagent' ? card.parentRunId === runId : card.runId === runId) &&
+    card.kind !== 'user' && card.kind !== 'files' && hasThinkingContent(card) && !(card.kind === 'tool' && card.childRunId));
+}
+
+// 回传事件和不同运行之间断开时间线，避免跨越独立事件继续连线。
+function chainEnd(card: Card, next?: Card): boolean {
+  const owner = (item: Card) => item.kind === 'subagent' ? item.parentRunId : item.runId;
+  return !next || next.kind === 'subagent_result' || owner(card) !== owner(next) ||
+    !['assistant', 'thinking', 'tool', 'plan', 'subagent'].includes(next.kind);
+}
+
+// 在折叠区内复用独立事件边界和父子运行归属。
+function renderActivity(items: Card[], container: HTMLElement): void {
+  items.forEach((item, index) => {
+    const entry = element('article'); renderCard(item, entry, true);
+    entry.classList.toggle('chain-last', chainEnd(item, items[index + 1])); container.append(entry);
+  });
+}
+
 // 增量更新稳定卡片，并保留工具折叠状态与流式滚动位置。
 function renderCard(card: Card, container: HTMLElement, activityOnly = false): void {
+  const detailStates = new Map([...container.querySelectorAll<HTMLDetailsElement>('details[data-detail-id]')]
+    .map(details => [details.dataset.detailId!, details.open]));
   const wasOpen = container.querySelector('details')?.open ?? false;
   container.replaceChildren();
   container.className = `card ${card.kind}`;
+  if (activityOnly && ['assistant', 'thinking', 'tool', 'plan', 'subagent'].includes(card.kind)) container.classList.add('chain-node');
   if (card.kind === 'assistant') {
     container.setAttribute('aria-label', '模型回答');
     const answers = card.runId ? latest?.cards.filter(item => item.kind === 'assistant' && item.runId === card.runId) ?? [] : [card];
@@ -463,22 +556,17 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       runCards.findLastIndex(item => item.kind === 'tool'));
     if (!activityOnly && card.runId && completed) {
       const work = document.createElement('details'); work.className = 'work-summary'; work.open = wasOpen;
+      work.dataset.detailId = `work:${card.runId}`;
       const summary = element('summary', workMs === undefined ? 'Worked for · 耗时未记录' : `Worked for ${duration(workMs)}`);
       work.append(summary);
       const activity = element('div', '', 'work-activity');
-      for (const item of latest?.cards.filter(item => item.runId === card.runId && item.kind !== 'user' &&
-        item.kind !== 'files' && !(finalAnswer && item.id === card.id) && !(item.kind === 'permission' && item.status === 'pending')) ?? []) {
-        const entry = element('article'); renderCard(item, entry, true); activity.append(entry);
-      }
+      renderActivity(activityCards(card.runId).filter(item => !(finalAnswer && item.id === card.id) &&
+        !(item.kind === 'permission' && item.status === 'pending')), activity);
       if (!activity.childElementCount) activity.append(element('div', '推理与生成已完成'));
       work.append(activity); container.append(work);
       if (runCards.some(item => item.status === 'cancelled' || item.kind === 'notice' && item.text === '已停止')) {
         container.append(element('div', '用户已暂停', 'work-status'));
       }
-    } else if (!activityOnly && card.runId && answers[0]?.id === card.id) {
-      const progress = element('div', '', 'work-progress');
-      progress.dataset.workingSummary = 'true';
-      container.append(progress);
     }
     if (activityOnly || !completed || finalAnswer) {
       const match = card.text.match(/<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/);
@@ -515,6 +603,16 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       actions.append(bookmark);
       container.append(actions);
     }
+  } else if (card.kind === 'thinking') {
+    container.setAttribute('aria-label', '模型推理');
+    if (card.text.trim() || card.encryptedThinking) {
+      const details = document.createElement('details'); details.className = 'thinking-details';
+      details.dataset.detailId = `thinking:${card.id}`; details.open = wasOpen;
+      details.append(element('summary', card.text.trim() ? 'Thinking' : 'Thinking · 已加密'));
+      if (card.text.trim()) details.append(element('div', card.text, 'thinking-content plain'));
+      else details.append(element('div', '模型返回了加密推理，无法展示原文。', 'thinking-unavailable'));
+      container.append(details);
+    }
   } else if (card.kind === 'user') {
     container.setAttribute('aria-label', '用户消息');
     if (card.images?.length) {
@@ -544,11 +642,58 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
     actions.append(copy, edit); container.append(actions);
   } else if (card.kind === 'files') {
     renderFileChanges(card, container, latest, post);
+  } else if (card.kind === 'subagent' || card.kind === 'tool' && card.title === 'spawn_agent') {
+    container.classList.add('subagent'); container.dataset.status = card.status ?? '';
+    const params = card.params && typeof card.params === 'object' ? card.params as Record<string, unknown> : {};
+    const title = card.kind === 'subagent' ? card.text : String(params.description ?? '子任务');
+    container.setAttribute('aria-label', `子 Agent：${title}`);
+    const heading = element('div', '', 'tool-heading');
+    heading.append(element('strong', 'Agent:'), element('span', title, 'subagent-title'));
+    const status = element('span', labels[card.status ?? ''] ?? card.status ?? '', 'tool-status');
+    status.setAttribute('role', 'status'); heading.append(status); container.append(heading);
+    const preview = element('div', '', 'tool-preview');
+    toolPreview(card, 'input', typeof params.prompt === 'string' ? params.prompt : title, preview);
+    container.append(preview);
+    const children = card.kind === 'subagent' && card.runId ? activityCards(card.runId) : [];
+    if (children.length) {
+      const details = document.createElement('details'); details.className = 'subagent-activity';
+      details.dataset.detailId = `agent:${card.id}`;
+      const tools = children.filter(item => item.kind === 'tool').length;
+      details.append(element('summary', `${card.agentType ?? 'general-purpose'} · ${tools} 次工具调用 · 查看执行过程`));
+      const activity = element('div', '', 'work-activity'); renderActivity(children, activity);
+      details.append(activity); container.append(details);
+    }
+    if (card.kind === 'tool' && card.output) {
+      const details = document.createElement('details'); details.dataset.detailId = `agent-output:${card.id}`;
+      details.append(element('summary', '查看返回结果')); output(card.output, details); container.append(details);
+    }
+  } else if (card.kind === 'subagent_result') {
+    container.setAttribute('aria-label', `子 Agent 回传：${card.title}`);
+    if (card.text) {
+      const details = document.createElement('details'); details.className = 'subagent-report';
+      details.dataset.detailId = `report:${card.id}`;
+      const summary = element('summary');
+      summary.append(element('span', `Message from @${card.agentType ?? 'Agent'}: ${card.text.replace(/\s+/g, ' ').slice(0, 180)}`));
+      details.append(summary);
+      const body = element('div', '', 'markdown'); body.innerHTML = markdown(card.text);
+      details.append(body); container.append(details);
+    }
+    const status = card.status === 'success' ? 'finished' : card.status === 'cancelled' ? 'cancelled' : 'failed';
+    container.append(element('div', `Agent "${card.title}" ${status}${card.elapsedMs === undefined ? '' : ` · ${duration(card.elapsedMs)}`}`, 'subagent-completion'));
   } else if (card.kind === 'tool') {
-    const details = document.createElement('details'); details.open = wasOpen;
-    details.append(element('summary', `${card.title} · ${labels[card.status ?? ''] ?? card.status ?? ''}${card.elapsedMs !== undefined ? ` · ${card.elapsedMs}ms` : ''}`));
-    output(JSON.stringify(card.params ?? {}, null, 2), details);
-    if (card.output !== undefined) output(card.output, details); container.append(details);
+    const info = toolPresentation(card);
+    const heading = element('div', '', 'tool-heading');
+    heading.append(element('strong', info.name), element('span', info.subject, 'tool-subject'));
+    heading.append(element('span', labels[card.status ?? ''] ?? card.status ?? '', 'tool-status'));
+    container.append(heading);
+    if (info.lines !== undefined) container.append(element('div', `${info.lines} lines`, 'tool-line-count'));
+    if (info.layout !== 'read') {
+      const preview = element('div', '', 'tool-preview');
+      toolPreview(card, 'input', info.input, preview, info.layout === 'io');
+      if (card.output !== undefined && (info.layout === 'io' || card.status === 'failed'))
+        toolPreview(card, 'output', info.output ?? card.output, preview, info.layout === 'io');
+      container.append(preview);
+    }
     if (card.autoApproved) container.append(element('span', 'auto-approved', 'muted'));
   } else if (card.kind === 'permission') {
     container.append(element('div', `权限确认 · ${card.title}`, 'role'));
@@ -572,22 +717,25 @@ function renderCard(card: Card, container: HTMLElement, activityOnly = false): v
       !latest?.cards.some(item => item.runId === card.runId && item.kind === 'assistant' && (item.completed || item.workMs !== undefined))) {
     container.classList.add('workflow');
     const work = document.createElement('details'); work.className = 'work-summary'; work.open = wasOpen;
+    work.dataset.detailId = `work:${card.runId}`;
     work.append(element('summary', card.workMs === undefined ? 'Worked for · 耗时未记录' : `Worked for ${duration(card.workMs)}`));
     const activity = element('div', '', 'work-activity');
-    for (const item of latest?.cards.filter(item => item.runId === card.runId && item.kind !== 'user' && item.kind !== 'files' && item.id !== card.id) ?? []) {
-      const entry = element('article'); renderCard(item, entry, true); activity.append(entry);
-    }
+    renderActivity(activityCards(card.runId).filter(item => item.id !== card.id), activity);
     work.append(activity); container.append(work);
     if (card.status === 'cancelled' || card.text === '已停止') container.append(element('div', '用户已暂停', 'work-status'));
   } else {
-    container.append(element('div', card.kind === 'subagent' ? `子 Agent · ${card.text} · ${labels[card.status ?? ''] ?? card.status}` : card.text));
+    container.append(element('div', card.text));
   }
   if (card.runId) container.dataset.runId = card.runId;
+  for (const details of container.querySelectorAll<HTMLDetailsElement>('details[data-detail-id]')) {
+    const open = detailStates.get(details.dataset.detailId!);
+    if (open !== undefined) details.open = open;
+  }
 }
 
 // 整轮完成后把所有回答文字集中放到活动记录后面，保留各段稳定标识与原始顺序。
 function orderedCards(all: Card[]): Card[] {
-  const source = all.filter(card => card.kind !== 'files');
+  const source = all.filter(card => card.kind !== 'files' && hasThinkingContent(card));
   const completed = new Set(source.filter(card => card.kind === 'assistant' && (card.completed || card.workMs !== undefined) && card.runId).map(card => card.runId!));
   const last = new Map<string, number>();
   const answers = new Map<string, Card[]>();
@@ -747,6 +895,10 @@ function render(state: ChatState): void {
   stop.disabled = !state.busy || !state.runId || state.cancelling;
   stop.hidden = !state.busy; send.hidden = state.busy;
   const atBottom = cards.scrollHeight - cards.scrollTop - cards.clientHeight < 80;
+  // 清理旧脚本直接 append 空值留下的裸文本，保留卡片内的正常消息内容。
+  for (const node of [...cards.childNodes]) {
+    if (node.nodeType === Node.TEXT_NODE && /^(?:null)+$/.test(node.textContent ?? '')) node.remove();
+  }
   const ids = new Set(state.cards.map(card => card.id));
   for (const [id, record] of rendered) if (!ids.has(id)) { record.element.remove(); rendered.delete(id); }
   if (!state.cards.length) {
@@ -758,26 +910,41 @@ function render(state: ChatState): void {
       cards.append(welcome);
     }
   } else cards.querySelector('.empty')?.remove();
+  const childRuns = new Set(state.cards.filter(card => card.kind === 'subagent').map(card => card.runId));
+  const displayCards = orderedCards(state.cards).filter(card => !(card.kind === 'tool' && card.childRunId) &&
+    !(card.runId && childRuns.has(card.runId) && card.kind !== 'subagent' &&
+      !(card.kind === 'permission' && card.status === 'pending')) &&
+    !(card.kind === 'subagent' && card.parentRunId && childRuns.has(card.parentRunId)));
+  const displayIds = new Set(displayCards.map(card => card.id));
+  for (const [id, record] of rendered) if (!displayIds.has(id)) record.element.hidden = true;
   let position = cards.firstElementChild;
-  for (const card of orderedCards(state.cards)) {
+  for (const [index, card] of displayCards.entries()) {
     let record = rendered.get(card.id);
     if (!record) { record = { element: element('article'), signature: '' }; rendered.set(card.id, record); cards.append(record.element); }
     if (record.element !== position) cards.insertBefore(record.element, position);
     position = record.element.nextElementSibling;
-    const runCards = (card.kind === 'assistant' || card.kind === 'notice') && card.runId ? state.cards.filter(item => item.runId === card.runId) : undefined;
+    const ownerRunId = card.kind === 'subagent' ? card.parentRunId : card.runId;
+    const runCards = ['assistant', 'notice', 'subagent'].includes(card.kind) ? state.cards : undefined;
     const signature = JSON.stringify([card, runCards, state.bookmarkCardIds?.[card.id], state.busy, state.sending, state.connection, state.collaborationMode, state.permissionMode]);
-    const answers = card.runId ? state.cards.filter(answer => answer.kind === 'assistant' && answer.runId === card.runId) : [];
+    const answers = ownerRunId ? state.cards.filter(answer => answer.kind === 'assistant' && answer.runId === ownerRunId) : [];
     const completed = answers.some(answer => answer.completed || answer.workMs !== undefined);
     const visibleAnswer = completed ? answers.at(-1) : undefined;
-    const terminalNotice = card.runId ? state.cards.findLast(item => item.runId === card.runId && item.kind === 'notice' &&
+    const terminalNotice = ownerRunId ? state.cards.findLast(item => item.runId === ownerRunId && item.kind === 'notice' &&
       (item.completed || item.text === '已停止' || item.text.startsWith('运行失败：'))) : undefined;
     const summaryCard = visibleAnswer ?? terminalNotice;
     if (signature !== record.signature) { renderCard(card, record.element, card.kind === 'assistant' && !!visibleAnswer && card.id !== visibleAnswer.id); record.signature = signature; }
+    const chain = !!ownerRunId && !summaryCard && ['assistant', 'thinking', 'tool', 'plan', 'subagent'].includes(card.kind);
+    record.element.classList.toggle('chain-node', chain);
+    record.element.classList.toggle('chain-last', chain && chainEnd(card, displayCards[index + 1]));
     record.element.hidden = !!summaryCard && card.kind !== 'user' && card.kind !== 'files' &&
       card.id !== summaryCard.id && !(card.kind === 'permission' && card.status === 'pending');
   }
-  cards.append(document.getElementById('run-status')!);
+  const firstRunCard = displayCards.find(card => (card.kind === 'subagent' ? card.parentRunId : card.runId) === state.runId &&
+    !!state.runId && card.kind !== 'user');
+  cards.insertBefore(runStatus, firstRunCard ? rendered.get(firstRunCard.id)!.element : null);
+  cards.append(idleProgress);
   updateWorking();
+  updateToolPreviews();
   if (atBottom) cards.scrollTop = cards.scrollHeight;
   jump.hidden = atBottom || !state.cards.length;
   const savedSignature = JSON.stringify([state.sessionId, state.bookmarks, state.bookmarkCardIds]);

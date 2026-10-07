@@ -259,3 +259,41 @@ def test_openai_missing_api_key_raises_system_exit(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(SystemExit, match="OPENAI_API_KEY"):
         OpenAICompatibleProvider("deepseek-test")
+
+
+# 功能：推理增量写入事件与最终响应，并在下一轮按原字段回传。
+# 设计：覆盖三个兼容字段别名，正文与推理同时到达时均须保留。
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning", "thinking"])
+async def test_reasoning_stream_roundtrip(field):
+    first = _text_chunk("answer", "length")
+    setattr(first.choices[0].delta, field, "checking")
+    provider, client = _make_provider([first, _usage_chunk(10, 8192, 0)])
+    result, events = await _chat(provider)
+    assert result.text == "answer"
+    assert result.stop_reason == "max_tokens"
+    assert result.thinking_blocks == [{"type": "reasoning_content", "field": field,
+                                       "text": "checking"}]
+    thinking = [e for e in events if e.type == "llm.thinking"]
+    assert thinking[0].token == "checking"
+    assert thinking[1].block == result.thinking_blocks[0]
+    assert result.usage.reasoning_output_tokens is None
+    client.chat.completions.create.return_value = FakeOpenAIStream([_text_chunk("done")])
+    await _chat(provider, [{"role": "assistant", "content": result.thinking_blocks +
+                           [{"type": "text", "text": result.text}]}])
+    assert client.chat.completions.create.await_args.kwargs["messages"][1][field] == "checking"
+
+
+# 功能：推理阶段断流重试后只保留成功尝试的内容。
+# 设计：第一次只有推理没有正文，确认仍发布推理重置事件。
+async def test_reasoning_retry_resets(monkeypatch):
+    monkeypatch.setattr("agent_lite.core.llm.openai_provider._RETRY_BACKOFF_S", (0, 0, 0))
+    old, new = _text_chunk(""), _text_chunk("done")
+    old.choices[0].delta.reasoning_content = "old"
+    new.choices[0].delta.reasoning_content = "new"
+    provider, client = _make_provider([])
+    client.chat.completions.create.side_effect = [FakeDroppedOpenAIStream([old]),
+                                                 FakeOpenAIStream([new])]
+    result, events = await _chat(provider)
+    assert result.thinking_blocks[0]["text"] == "new"
+    assert [(e.token, e.reset) for e in events if e.type == "llm.thinking" and e.block is None] == [
+        ("old", False), ("", True), ("new", False)]

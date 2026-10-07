@@ -118,11 +118,21 @@ class LlmTokenEvent(BaseModel):
     ts: str
 
 
+class LlmThinkingEvent(BaseModel):
+    type: Literal["llm.thinking"] = "llm.thinking"
+    run_id: str
+    token: str = ""  # 可读推理增量，不混入最终回答
+    block: dict[str, Any] | None = None  # 完整推理块，包含签名或密文
+    reset: bool = False  # 重试时清除上一尝试的增量
+    ts: str
+
+
 class LlmUsageEvent(BaseModel):
     type: Literal["llm.usage"] = "llm.usage"
     run_id: str
     input_tokens: int
     output_tokens: int
+    reasoning_output_tokens: int | None = None  # API 未提供时保持未知
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
     context_pct: float = 0.0  # 最近一次输入加输出的占用比例，展示时乘 100
@@ -312,6 +322,7 @@ Event = Annotated[
     | ToolCallFinishedEvent
     | ToolCallFailedEvent
     | LlmTokenEvent
+    | LlmThinkingEvent
     | LlmUsageEvent
     | LlmModelSelectedEvent
     | LogLineEvent

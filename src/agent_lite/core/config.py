@@ -28,15 +28,18 @@ _DEFAULT_SUBAGENT_ALLOWED_TOOLS = [
     "shell",
     "write_file",
     "edit_file",
-    "list_dir",
+    "glob", "grep",
     "update_plan",
     "spawn_agent",
 ]
 
 
-# 将旧版 bash 工具名迁移为 shell，并保持配置顺序去重
+# 将旧版工具名迁移为现有工具，并保持配置顺序去重。
 def _normalize_tool_names(names: list[str]) -> list[str]:
-    return list(dict.fromkeys("shell" if name == "bash" else name for name in names))
+    migrated = [replacement for name in names
+                for replacement in (["glob", "grep"] if name == "list_dir"
+                                    else ["shell" if name == "bash" else name])]
+    return list(dict.fromkeys(migrated))
 
 
 @dataclass

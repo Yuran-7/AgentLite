@@ -67,6 +67,74 @@ class Client extends EventEmitter {
   close(): void { this.calls.push('client.close'); }
 }
 
+// 功能：推理流与完整块去重，密文只显示状态并位于本轮文字之前。
+// 设计：模拟仅签名的 Claude 和文字推理模型，确保页面状态不携带加密数据。
+test('thinking cards receive text, reconcile blocks and keep encrypted data out of UI', t => {
+  const session = new ChatSession('workspace', () => {}, new Client());
+  t.after(() => session.dispose()); Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+  session.event({ type: 'run.started', run_id: 'r', session_id: 'session' });
+  session.event({ type: 'llm.token', run_id: 'r', token: 'checking' });
+  session.event({ type: 'llm.thinking', run_id: 'r', block: { type: 'thinking', thinking: '', signature: 'secret-cipher' } });
+  assert.deepEqual(session.state.cards.map(card => card.kind), ['thinking', 'assistant']);
+  assert(session.state.cards[0].encryptedThinking);
+  assert(!JSON.stringify(session.state).includes('secret-cipher'));
+  session.event({ type: 'step.started', run_id: 'r' });
+  session.event({ type: 'llm.thinking', run_id: 'r', token: 'first' });
+  session.event({ type: 'llm.thinking', run_id: 'r', token: ' second' });
+  session.event({ type: 'llm.thinking', run_id: 'r', block: { type: 'reasoning_content', text: 'first second' } });
+  assert.equal(session.state.cards.at(-1)?.text, 'first second');
+  session.event({ type: 'llm.thinking', run_id: 'r', reset: true });
+  session.event({ type: 'llm.thinking', run_id: 'r', token: 'retried' });
+  assert.equal(session.state.cards.at(-1)?.text, 'retried');
+});
+
+// 功能：纯空白和重试清空后的推理不留下没有正文的卡片，后续推理仍能重新生成。
+// 设计：重放空白流、文本流、清空及完整空块，覆盖失败重试时没有后续输出的路径。
+test('empty and reset thinking streams do not leave empty cards', t => {
+  const session = new ChatSession('workspace', () => {}, new Client()); t.after(() => session.dispose());
+  session.event({ type: 'run.started', run_id: 'r' });
+  session.event({ type: 'llm.thinking', run_id: 'r', token: ' \n ' });
+  assert.equal(session.state.cards.length, 0);
+  session.event({ type: 'llm.thinking', run_id: 'r', token: '分析' });
+  session.event({ type: 'llm.thinking', run_id: 'r', token: ' ' });
+  assert.equal(session.state.cards[0].text, '分析 ');
+  session.event({ type: 'llm.thinking', run_id: 'r', reset: true });
+  assert.equal(session.state.cards.length, 0);
+  session.event({ type: 'llm.thinking', run_id: 'r', block: { type: 'thinking', thinking: '  ' } });
+  assert.equal(session.state.cards.length, 0);
+  session.event({ type: 'llm.thinking', run_id: 'r', token: '重新分析' });
+  assert.equal(session.state.cards[0].text, '重新分析');
+  assert.equal(historyCards([{ role: 'assistant', content: [{ type: 'thinking', thinking: ' \n ' }] }]).length, 0);
+});
+
+// 功能：只有加密推理而没有回答的完成事件仍提供收起过程的入口。
+// 设计：模拟空正文成功轮次，避免加密节点一直被视为正在执行。
+test('encrypted thinking without answer finishes as a completed activity notice', t => {
+  const session = new ChatSession('workspace', () => {}, new Client());
+  t.after(() => session.dispose()); Object.assign(session.state, { sessionId: 'session', connection: 'ready' });
+  session.event({ type: 'run.started', run_id: 'r', session_id: 'session' });
+  session.event({ type: 'llm.thinking', run_id: 'r', block: { type: 'redacted_thinking', data: 'cipher' } });
+  session.event({ type: 'run.finished', run_id: 'r', status: 'success' });
+  assert(session.state.cards.at(-1)?.completed);
+  assert.equal(session.state.cards.at(-1)?.kind, 'notice');
+  assert(!JSON.stringify(session.state).includes('cipher'));
+});
+
+// 功能：历史会话恢复所有协议的推理文字与加密状态，不生成空推理卡。
+// 设计：同一历史消息包含三类推理块与空块，验证原始顺序及密文隐藏。
+test('history thinking handles readable summaries encrypted blocks and empty output', () => {
+  const cards = historyCards([{ role: 'assistant', run_id: 'r', content: [
+    { type: 'thinking', thinking: '', signature: 'secret' },
+    { type: 'reasoning_content', text: 'reasoning' },
+    { type: 'responses_reasoning', item: { summary: [{ text: 'summary' }], encrypted_content: 'cipher' } },
+    { type: 'thinking', thinking: '' },
+    { type: 'text', text: 'final' },
+  ] }]);
+  assert.deepEqual(cards.map(card => card.kind), ['thinking', 'thinking', 'thinking', 'assistant']);
+  assert.deepEqual(cards.slice(0, 3).map(card => card.text), ['', 'reasoning', 'summary']);
+  assert(!JSON.stringify(cards).includes('secret')); assert(!JSON.stringify(cards).includes('cipher'));
+});
+
 // 功能：文件引用使代理先读取指定相对路径，同时历史卡片只显示用户原文。
 // 设计：捕获真实会话发送参数并重放历史消息，覆盖引用提示与展示分离。
 test('workspace file references reach the agent and stay out of history cards', async t => {
@@ -79,7 +147,7 @@ test('workspace file references reach the agent and stay out of history cards', 
     return { accepted: true };
   };
   await session.send('请看 @src/main.ts @src/', [], ['src/main.ts', 'src/']);
-  assert.match(sent, /read_file/); assert.match(sent, /list_dir/);
+  assert.match(sent, /read_file/); assert.match(sent, /glob/); assert.match(sent, /grep/);
   assert.match(sent, /"src\/main.ts"/); assert.match(sent, /"src\/"/);
   assert.equal(session.state.cards.find(card => card.kind === 'user')?.text, '请看 @src/main.ts @src/');
   assert.deepEqual(session.state.cards.find(card => card.kind === 'user')?.references, ['src/main.ts', 'src/']);
@@ -477,6 +545,44 @@ test('tool cards, plans, child streams, and snapshot restoration', async () => {
   assert.deepEqual(snapshot.cards.filter((card: any) => card.kind === 'tool').map((card: any) => card.status), ['success', 'failed']);
   assert.equal(snapshot.cards.find((card: any) => card.kind === 'plan').plan[0].status, 'completed');
   await session.dispose();
+});
+
+// 功能：后台子任务保留自己的状态和流，回传在完成时独立追加且不会重复。
+// 设计：主任务先退出再完成子任务，覆盖真实异步顺序和重复完成事件。
+test('background subagent survives parent completion and returns a separate report', async t => {
+  const client = new Client(); const session = new ChatSession('workspace', () => {});
+  t.after(() => session.dispose()); await session.attach(client, 'reused');
+  session.event({ type: 'run.started', run_id: 'parent' });
+  session.event({ type: 'tool.call_started', run_id: 'parent', tool_use_id: 'spawn', tool_name: 'spawn_agent',
+    params: { description: '调研代码', prompt: '检查事件流', subagent_type: 'Explore', run_in_background: true } });
+  session.event({ type: 'subagent.started', run_id: 'child', parent_run_id: 'parent', description: '调研代码' });
+  session.event({ type: 'llm.token', run_id: 'child', token: '第一段' });
+  session.event({ type: 'run.finished', run_id: 'parent', status: 'success' });
+  session.event({ type: 'session.waiting_for_input', session_id: 'session', last_run_id: 'parent' });
+  assert.equal(session.state.cards.find(card => card.kind === 'subagent')?.status, 'running');
+  assert.equal(session.state.cards.find(card => card.toolUseId === 'spawn' && card.kind === 'tool')?.childRunId, 'child');
+  session.event({ type: 'llm.token', run_id: 'child', token: '第二段' });
+  session.event({ type: 'run.finished', run_id: 'child', status: 'success' });
+  for (let i = 0; i < 2; i++) session.event({ type: 'subagent.finished', run_id: 'child', parent_run_id: 'parent', status: 'success' });
+  const reports = session.state.cards.filter(card => card.kind === 'subagent_result');
+  assert.equal(reports.length, 1); assert.equal(reports[0].text, '第一段第二段');
+  assert.equal(reports[0].runId, 'parent'); assert.equal(reports[0].agentType, 'Explore');
+  assert.equal(session.state.cards.find(card => card.kind === 'subagent')?.status, 'success');
+  assert.equal(session.state.busy, false);
+});
+
+// 功能：历史回传恢复为独立事件，保留转义正文而不冒充用户提问。
+// 设计：只识别 core 标记的通知消息，同样的普通用户文本保持原样。
+test('history restores typed task notifications as subagent reports', () => {
+  const notification = '<task-notification><task-id>a</task-id><agent-type>Explore</agent-type><status>completed</status><summary>Agent &quot;调研源码&quot; completed</summary><result>&lt;tag&gt; &amp; data</result></task-notification>';
+  const cards = historyCards([
+    { role: 'user', run_id: 'parent', content: '调研' },
+    { role: 'user', run_id: 'parent', kind: 'task_notification', content: [{ type: 'text', text: notification }] },
+    { role: 'user', content: notification },
+  ]);
+  assert.equal(cards[1].kind, 'subagent_result'); assert.equal(cards[1].title, '调研源码');
+  assert.equal(cards[1].text, '<tag> & data'); assert.equal(cards[1].runId, 'parent');
+  assert.equal(cards[1].status, 'success'); assert.equal(cards[2].kind, 'user');
 });
 
 // 功能：拒绝页面透传命令及非法权限决定。

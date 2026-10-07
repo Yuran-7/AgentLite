@@ -56,7 +56,10 @@ def _parse_tools(value: Any, field_name: str) -> tuple[str, ...] | None:
         raw = [item.strip() for item in value if item.strip()]
     else:
         raise ValueError(f"{field_name} must be a string or an array of strings")
-    return tuple(dict.fromkeys(_normalize_tool(item) for item in raw))
+    normalized = [_normalize_tool(item) for item in raw]
+    migrated = [replacement for name in normalized
+                for replacement in (("glob", "grep") if name == "list_dir" else (name,))]
+    return tuple(dict.fromkeys(migrated))
 
 
 def parse_agent_markdown(path: Path, source: AgentSource) -> AgentDefinition:
@@ -115,7 +118,7 @@ def parse_agent_markdown(path: Path, source: AgentSource) -> AgentDefinition:
     )
 
 
-_READ_ONLY_TOOLS = ("read_file", "list_dir", "web_search", "web_fetch", "cosil_localize")
+_READ_ONLY_TOOLS = ("read_file", "glob", "grep", "web_search", "web_fetch", "cosil_localize")
 
 
 def built_in_agents() -> tuple[AgentDefinition, ...]:

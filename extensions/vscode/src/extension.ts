@@ -12,6 +12,7 @@ import { BookmarkStore } from './bookmarks';
 import { ArchiveStore } from './archives';
 import { codeBlocks } from './code-blocks';
 import { PreviewDocuments } from './preview-documents';
+import { toolPresentation } from './tool-presentation';
 import { gitWorkspacePaths, ripgrepWorkspacePaths, searchWorkspaceEntries, workspaceEntries, type WorkspaceEntry } from './workspace-files';
 
 let provider: ChatProvider | undefined;
@@ -140,6 +141,18 @@ class ChatProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'state', state: this.session.state });
       } catch (error) { this.session.report(error); }
       finally { this.post({ type: 'bookmarksSettled' }); }
+      return;
+    }
+    if (message.type === 'openToolContent') {
+      const card = this.session?.state.cards.find(item => item.id === message.cardId && ['tool', 'subagent'].includes(item.kind));
+      if (!card) return;
+      const info = toolPresentation(card);
+      const content = message.section === 'input' ? info.input : info.output ?? card.output;
+      if (content === undefined) return;
+      try {
+        await this.previews.open(`tool:${card.id}:${message.section}`, `${info.name} · ${message.section === 'input' ? 'IN' : 'OUT'}`,
+          content, 'plaintext');
+      } catch (error) { this.session?.report(error); }
       return;
     }
     if (message.type === 'copyCode' || message.type === 'openCode') {

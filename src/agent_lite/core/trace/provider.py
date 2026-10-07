@@ -72,6 +72,8 @@ class TracingProvider:
             resp_data = {
                 "stop_reason": result.stop_reason,
                 "text": result.text,
+                "thinking_blocks": result.thinking_blocks,
+                "content_blocks": result.content_blocks,
                 "tool_calls": [dataclasses.asdict(tc) for tc in result.tool_calls],
                 "usage": dataclasses.asdict(result.usage) if result.usage else {},
                 "latency_ms": latency_ms,

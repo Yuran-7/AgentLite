@@ -9,16 +9,138 @@ import { codeBlocks } from '../src/code-blocks';
 import { parsePageMessage } from '../src/protocol';
 
 // 装载真实打包页面脚本，用宿主消息替身记录页面提交的操作。
-function page() {
+function page(beforeScript?: (window: JSDOM['window']) => void) {
   const dom = new JSDOM(webviewHtml('nonce', 'local:', 'webview.js', 'chat.css'), { runScripts: 'outside-only' });
   const messages: any[] = [];
   Object.assign(dom.window, { acquireVsCodeApi: () => ({ postMessage: (message: unknown) => messages.push(message) }) });
+  beforeScript?.(dom.window);
   dom.window.eval(readFileSync('dist/webview.js', 'utf8'));
   return { dom, messages, document: dom.window.document,
     render: (state: ChatState) => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'state', state } })) };
 }
 const state = (): ChatState => ({ workspace: 'C:/workspace', connection: 'ready', origin: 'reused',
   busy: false, sending: false, cancelling: false, model: 'demo', usage: '', cards: [] });
+
+// 功能：网页工具和 Bash 复用 IN/OUT 行，输入展示查询或网址，输出展示可读结果。
+// 设计：装载真实页面验证结构、外部文本转义及非 JSON 错误回退，避免只检查格式化函数。
+test('web tools use Bash-style readable input and output rows', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state();
+  snapshot.cards = [
+    { id: 'search', kind: 'tool', title: 'web_search', text: '', status: 'success', params: { query: '武汉天气', max_results: 5 },
+      output: JSON.stringify({ query: '武汉天气', provider: 'duckduckgo', results: [{ title: '<script>标题</script>', url: 'https://example.com', snippet: '天气摘要' }] }) },
+    { id: 'fetch', kind: 'tool', title: 'web_fetch', text: '', status: 'success', params: { url: 'https://example.com', max_chars: 5000 },
+      output: JSON.stringify({ title: '天气预报', content: '晴\n最高温度 20°C' }) },
+    { id: 'error', kind: 'tool', title: 'web_fetch', text: '', status: 'failed', params: { url: 'https://example.com' }, output: 'Request timed out' },
+  ]; fixture.render(snapshot);
+  const tools = [...fixture.document.querySelectorAll('#cards > .tool')];
+  assert.deepEqual([...tools[0].querySelectorAll('.tool-preview-label')].map(node => node.textContent), ['IN', 'OUT']);
+  assert.deepEqual([...tools[0].querySelectorAll('pre')].map(node => node.textContent), ['武汉天气', '1. <script>标题</script>\nhttps://example.com\n天气摘要']);
+  assert.deepEqual([...tools[1].querySelectorAll('pre')].map(node => node.textContent), ['https://example.com', '天气预报\n\n晴\n最高温度 20°C']);
+  assert.equal(tools[0].querySelector('script'), null);
+  assert.equal(tools[2].querySelector('.tool-preview-row:last-child pre')?.textContent, 'Request timed out');
+});
+
+// 功能：并行子任务只显示任务卡片，回传独立断线，完成主轮后仍能查看子任务过程。
+// 设计：重放两个交错子运行及父运行结束，验证默认折叠、展开保留和记录归属。
+test('subagent tasks nest activity and break the timeline at hand-back events', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.busy = true; snapshot.runId = 'parent';
+  snapshot.cards = [
+    { id: 'think', kind: 'thinking', runId: 'parent', text: 'planning' },
+    { id: 'spawn', kind: 'tool', runId: 'parent', title: 'spawn_agent', text: '', childRunId: 'a' },
+    { id: 'a', kind: 'subagent', runId: 'a', parentRunId: 'parent', text: '调研源码', status: 'running', agentType: 'Explore', params: { prompt: '搜索实现\n分析事件' } },
+    { id: 'b', kind: 'subagent', runId: 'b', parentRunId: 'parent', text: '检查测试', status: 'running' },
+    { id: 'atool', kind: 'tool', runId: 'a', title: 'grep', text: '', status: 'success' },
+    { id: 'answer-a', kind: 'assistant', runId: 'a', text: '调研结果', completed: true },
+    { id: 'comment', kind: 'assistant', runId: 'parent', text: '等待回传' },
+  ];
+  fixture.render(snapshot);
+  assert.equal(fixture.document.querySelectorAll('#cards > .subagent:not([hidden])').length, 2);
+  assert.equal(fixture.document.querySelectorAll('#cards > .tool:not([hidden])').length, 0);
+  assert.equal(fixture.document.querySelectorAll('#cards > .assistant:not([hidden])').length, 1);
+  const agent = fixture.document.querySelector('#cards > .subagent')!;
+  assert.match(agent.textContent ?? '', /Agent:调研源码/);
+  assert.equal(agent.querySelector('.tool-preview pre')?.textContent, '搜索实现\n分析事件');
+  const activity = agent.querySelector('details') as HTMLDetailsElement;
+  assert(!activity.open); activity.open = true;
+  snapshot.cards[2].status = 'success';
+  snapshot.cards.push({ id: 'report', kind: 'subagent_result', runId: 'parent', childRunId: 'a', title: '调研源码', agentType: 'Explore', text: '调研结果', status: 'success' },
+    { id: 'resume', kind: 'thinking', runId: 'parent', text: '继续' });
+  fixture.render(snapshot);
+  assert((fixture.document.querySelector('#cards > .subagent details') as HTMLDetailsElement).open);
+  assert(fixture.document.querySelector('#cards > .assistant.chain-last'));
+  const report = fixture.document.querySelector('#cards > .subagent_result')!;
+  assert(!report.classList.contains('chain-node'));
+  assert.match(report.textContent ?? '', /Message from @Explore: 调研结果/);
+  assert.match(report.textContent ?? '', /Agent "调研源码" finished/);
+  assert(!(report.querySelector('details') as HTMLDetailsElement).open);
+  snapshot.busy = false;
+  snapshot.cards.push({ id: 'final', kind: 'assistant', runId: 'parent', text: '最终结果', completed: true, workMs: 1000 });
+  fixture.render(snapshot);
+  assert.equal(fixture.document.querySelectorAll('.work-summary > .work-activity > .subagent').length, 2);
+  assert.equal(fixture.document.querySelectorAll('.work-summary > .work-activity > .subagent_result').length, 1);
+  assert(fixture.document.querySelector('.subagent-activity .tool'));
+});
+
+// 功能：运行中展示链状节点，推理默认折叠，完成后只展开最终结果。
+// 设计：真实打包页面经历流式更新和完成转换，检查折叠与手动展开状态。
+test('activity timeline collapses thinking and completed work while keeping the final answer', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.busy = true; snapshot.runId = 'r';
+  snapshot.cards = [
+    { id: 'think', kind: 'thinking', runId: 'r', text: 'analysis' },
+    { id: 'comment', kind: 'assistant', runId: 'r', text: 'checking files' },
+    { id: 'tool', kind: 'tool', runId: 'r', text: '', title: 'write_file', status: 'success' },
+    { id: 'cipher', kind: 'thinking', runId: 'r', text: '', encryptedThinking: true },
+  ];
+  fixture.render(snapshot);
+  assert.equal(fixture.document.querySelectorAll('#cards > .chain-node').length, 4);
+  const think = fixture.document.querySelector('.thinking-details') as HTMLDetailsElement;
+  assert(!think.open); think.open = true;
+  snapshot.cards[0].text += ' more'; fixture.render(snapshot);
+  assert((fixture.document.querySelector('.thinking-details') as HTMLDetailsElement).open);
+  assert.match(fixture.document.querySelector('#cards > .thinking:last-of-type')?.textContent ?? '', /已加密/);
+  snapshot.busy = false; snapshot.cards.push({ id: 'final', kind: 'assistant', runId: 'r', text: 'Final result', completed: true, workMs: 4000 });
+  fixture.render(snapshot);
+  const work = fixture.document.querySelector('.work-summary') as HTMLDetailsElement;
+  assert(!work.open);
+  assert.equal(fixture.document.querySelector('#cards > .assistant:not([hidden]) > .markdown')?.textContent?.trim(), 'Final result');
+  assert.equal(fixture.document.querySelectorAll('.work-activity > .chain-node').length, 4);
+  assert((fixture.document.querySelector('#cards > .thinking') as HTMLElement).hidden);
+  work.open = true;
+  const nested = work.querySelector('.thinking-details') as HTMLDetailsElement; nested.open = true;
+  snapshot.cards[2].output = 'saved'; fixture.render(snapshot);
+  assert((fixture.document.querySelector('.work-summary') as HTMLDetailsElement).open);
+  assert((fixture.document.querySelector('.work-summary .thinking-details') as HTMLDetailsElement).open);
+});
+
+// 功能：空推理过滤，可读及加密推理都默认折叠，展开加密节点显示明确解释。
+// 设计：同时重放旧空节点、纯空白、可读推理和密文节点，验证完成前后的展示一致。
+test('empty thinking is hidden and all real thinking defaults to collapsed disclosures', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.busy = true; snapshot.runId = 'r';
+  snapshot.cards = [
+    { id: 'a', kind: 'tool', runId: 'r', text: '', title: 'read_file' },
+    { id: 'empty', kind: 'thinking', runId: 'r', text: '' },
+    { id: 'space', kind: 'thinking', runId: 'r', text: ' \n ' },
+    { id: 'readable', kind: 'thinking', runId: 'r', text: '分析结果' },
+    { id: 'encrypted', kind: 'thinking', runId: 'r', text: '', encryptedThinking: true },
+    { id: 'b', kind: 'tool', runId: 'r', text: '', title: 'grep' },
+  ]; fixture.render(snapshot);
+  assert.equal(fixture.document.querySelectorAll('#cards > .thinking:not([hidden])').length, 2);
+  assert.equal(fixture.document.querySelectorAll('.thinking-details').length, 2);
+  assert.equal(fixture.document.querySelectorAll('.thinking-details[open]').length, 0);
+  assert.match(fixture.document.querySelector('.thinking-unavailable')?.textContent ?? '', /无法展示原文/);
+  const encrypted = fixture.document.querySelector('.thinking-unavailable')!.closest('details')!;
+  encrypted.open = true; snapshot.cards[3].text += '更新'; fixture.render(snapshot);
+  assert(fixture.document.querySelector('.thinking-unavailable')!.closest('details')!.open);
+  snapshot.busy = false;
+  snapshot.cards.push({ id: 'final', kind: 'assistant', runId: 'r', text: '完成', completed: true }); fixture.render(snapshot);
+  assert.equal(fixture.document.querySelectorAll('.work-activity > .thinking').length, 2);
+  assert.equal(fixture.document.querySelectorAll('.work-activity .thinking-details').length, 2);
+  assert.equal(fixture.document.querySelectorAll('.work-activity .thinking-details[open]').length, 0);
+});
 
 // 功能：计划模式入口不显示占位标记并真正发送模式切换操作。
 // 设计：驱动打包页面的斜杠菜单和发送按钮，覆盖用户截图中的入口路径。
@@ -186,10 +308,10 @@ test('workflow tool output styles preserve alignment and indentation', t => {
   const pre = summary.querySelectorAll('pre')[1];
   const computed = fixture.dom.window.getComputedStyle(pre);
   assert.equal(computed.textAlign, 'left'); assert.equal(computed.whiteSpace, 'pre');
-  assert.equal(computed.overflowWrap, 'normal'); assert.equal(computed.overflowX, 'auto');
+  assert.equal(computed.overflowWrap, 'normal'); assert.equal(computed.overflow, 'hidden');
   assert.equal(pre.textContent, snapshot.cards[0].output);
   assert.equal(fixture.dom.window.getComputedStyle(fixture.document.querySelector('.workflow')!).textAlign, 'left');
-  assert.equal(fixture.dom.window.getComputedStyle(fixture.document.querySelector('.work-status')!).fontSize, '10px');
+  assert.equal(fixture.dom.window.getComputedStyle(fixture.document.querySelector('.work-status')!).fontSize, '12px');
 });
 
 // 功能：单题选项直接提交，重复点击不会重发，模型产生下一题后才显示新内容。
@@ -634,7 +756,7 @@ test('thinking follows prompt and history dismisses outside without row tooltips
   assert(panel.hidden); assert.equal(document.activeElement, toggle);
 });
 
-// 功能：统计位于输入框下方，运行从 Thinking 切换到聊天区计时，全程只显示一个状态。
+// 功能：运行计时从开始起固定在本轮顶部，正文中没有重复计时，完成后转为耗时摘要。
 // 设计：控制时钟并依次渲染首次内容、取消和终态，覆盖完成事件与空闲事件之间的窗口。
 test('composer usage replaces hint and run status has a single location', t => {
   const fixture = page(); t.after(() => fixture.dom.window.close());
@@ -650,19 +772,99 @@ test('composer usage replaces hint and run status has a single location', t => {
   dom.window.Date.now = () => 114_000;
   fixture.render(snapshot);
   const status = document.getElementById('run-status')!;
-  assert(!status.hidden); assert.equal(document.getElementById('run-label')!.textContent, 'Thinking…');
+  assert(!status.hidden); assert.equal(document.getElementById('run-label')!.textContent, 'Processing');
   snapshot.cards.push({ id: 'answer', kind: 'assistant', text: 'checking', runId: 'run' });
   fixture.render(snapshot);
-  assert(status.hidden);
-  assert.equal(document.querySelector('.work-progress')?.textContent, 'Working for 14s');
+  assert(!status.hidden);
+  assert.equal(document.getElementById('run-label')!.textContent, 'Working for 14s');
+  assert.equal(document.querySelector('.work-progress'), null);
+  assert.equal(status.nextElementSibling?.className, 'card assistant chain-node chain-last');
   assert.equal(document.querySelector('.work-summary'), null);
   snapshot.cancelling = true; fixture.render(snapshot);
-  assert(status.hidden); assert.equal(document.querySelector('.work-progress')?.textContent, 'Stopping…');
+  assert(!status.hidden); assert.equal(document.getElementById('run-label')!.textContent, 'Stopping…');
   snapshot.cards[0].completed = true; snapshot.cards[0].workMs = 15_000;
   fixture.render(snapshot);
   assert(status.hidden); assert.equal(document.querySelector('.work-summary summary')?.textContent, 'Worked for 15s');
   snapshot.busy = false; snapshot.runId = undefined; snapshot.cancelling = false;
   fixture.render(snapshot); assert(status.hidden);
+});
+
+// 功能：工具和推理先于正文出现时，唯一计时始终位于本轮执行记录上方。
+// 设计：交错工具、子任务和回答快照，直接检查计时节点与首个活动节点的位置。
+test('live timer stays above thinking tools and subagents before and after text arrives', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.busy = true; snapshot.runId = 'run'; snapshot.workStartedAt = 1000;
+  fixture.dom.window.Date.now = () => 6000;
+  snapshot.cards = [
+    { id: 'user', kind: 'user', text: '检查实现' },
+    { id: 'thinking', kind: 'thinking', runId: 'run', text: '分析' },
+    { id: 'tool', kind: 'tool', runId: 'run', title: 'shell', text: '', status: 'running' },
+    { id: 'child', kind: 'subagent', runId: 'child', parentRunId: 'run', text: '检查测试', status: 'running' },
+  ];
+  fixture.render(snapshot);
+  const timer = fixture.document.getElementById('run-status')!;
+  assert.equal(timer.previousElementSibling?.className, 'card user');
+  assert(timer.nextElementSibling?.classList.contains('thinking'));
+  assert.equal(fixture.document.getElementById('run-label')?.textContent, 'Working for 5s');
+  snapshot.cards.push({ id: 'answer', kind: 'assistant', runId: 'run', text: '检查中' });
+  fixture.render(snapshot);
+  assert(!timer.hidden); assert(timer.nextElementSibling?.classList.contains('thinking'));
+  assert.equal(fixture.document.querySelectorAll('#run-status').length, 1);
+  assert.equal(fixture.document.querySelector('.assistant .work-progress'), null);
+});
+
+// 功能：首次等待和输出停顿展示无圆点的渐变Processing，新进展、用户确认或终止时隐藏。
+// 设计：注入可控时钟和定时器，覆盖五秒边界、无关刷新、流式恢复和完成状态。
+test('gradient processing appears initially and during idle output but hides for user confirmation', t => {
+  let now = 1000; const ticks: (() => void)[] = [];
+  const fixture = page(window => {
+    window.Date.now = () => now;
+    Object.assign(window, { setInterval: (callback: () => void) => { ticks.push(callback); return ticks.length; } });
+  });
+  t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.busy = true; snapshot.runId = 'run'; snapshot.workStartedAt = 1000;
+  snapshot.cards = [{ id: 'user', kind: 'user', text: '检查代码' }]; fixture.render(snapshot);
+  const label = fixture.document.getElementById('run-label')!;
+  const idle = fixture.document.getElementById('idle-thinking')!;
+  assert.equal(label.textContent, 'Processing'); assert(label.classList.contains('progress-shimmer'));
+  assert.equal(fixture.document.querySelector('.working-dot'), null); assert(idle.hidden);
+  snapshot.cards.push({ id: 'answer', kind: 'assistant', runId: 'run', text: '开始检查' }); fixture.render(snapshot);
+  assert(!label.classList.contains('progress-shimmer')); assert.equal(label.textContent, 'Working for 0s');
+  now = 5999; ticks.forEach(tick => tick()); assert(idle.hidden);
+  snapshot.usage = '输入 100'; fixture.render(snapshot);
+  now = 6000; ticks.forEach(tick => tick()); assert(!idle.hidden);
+  assert.equal(idle.textContent, 'Processing'); assert(idle.querySelector('.progress-shimmer'));
+  assert.equal(idle.parentElement?.id, 'cards'); assert.equal(idle.previousElementSibling?.className, 'card assistant chain-node chain-last');
+  snapshot.cards[1].text += '，读取完成'; fixture.render(snapshot); assert(idle.hidden);
+  now = 11000; ticks.forEach(tick => tick()); assert(!idle.hidden);
+  snapshot.cards.push({ id: 'permission', kind: 'permission', runId: 'run', text: '确认操作', status: 'pending' });
+  fixture.render(snapshot); now = 17000; ticks.forEach(tick => tick()); assert(idle.hidden);
+  snapshot.cards[2].status = 'allow_once'; fixture.render(snapshot);
+  now = 22000; ticks.forEach(tick => tick()); assert(!idle.hidden);
+  snapshot.cancelling = true; fixture.render(snapshot); assert(idle.hidden); assert.equal(label.textContent, 'Stopping…');
+  snapshot.cancelling = false; snapshot.cards[1].completed = true; fixture.render(snapshot);
+  assert(idle.hidden); assert(fixture.document.getElementById('run-status')!.hidden);
+});
+
+// 功能：旧页面缺少新增状态节点时仍可重复刷新，不插入 null 文本或抛出异常。
+// 设计：在装载新脚本前删除状态节点，模拟扩展升级后旧 HTML 与新脚本混用。
+test('old webview markup restores missing status nodes without null text', t => {
+  const fixture = page(window => {
+    window.document.getElementById('idle-thinking')?.remove();
+    window.document.getElementById('run-status')?.remove();
+    window.document.getElementById('cards')?.append('nullnull');
+  });
+  t.after(() => fixture.dom.window.close());
+  const snapshot = state();
+  for (let i = 0; i < 5; i++) fixture.render(snapshot);
+  const cards = fixture.document.getElementById('cards')!;
+  assert.equal(cards.querySelectorAll('#run-status').length, 1);
+  assert.equal(cards.querySelectorAll('#idle-thinking').length, 1);
+  assert(!cards.textContent?.includes('null'));
+  fixture.document.getElementById('run-status')?.remove();
+  fixture.document.getElementById('idle-thinking')?.remove();
+  snapshot.busy = true; snapshot.runId = 'run'; fixture.render(snapshot);
+  assert.equal(fixture.document.getElementById('run-label')?.textContent, 'Processing');
 });
 
 // 功能：代码块显示语言和高亮，纯文本保持原样，复制及打开按索引取源代码且不执行内容。
@@ -704,7 +906,8 @@ test('answer completion and work summary belong to the whole run', t => {
   ];
   fixture.render(snapshot);
   assert.equal(fixture.document.querySelector('.answer-actions'), null);
-  assert.equal(fixture.document.querySelector('.work-progress')?.textContent, 'Working…');
+  assert.equal(fixture.document.getElementById('run-label')?.textContent, 'Working…');
+  assert.equal(fixture.document.querySelector('.work-progress'), null);
   assert.equal(fixture.document.querySelector('.work-summary'), null);
   assert.equal(fixture.document.querySelector('#cards > .assistant > .markdown')?.textContent?.trim(), '先检查目录');
   snapshot.cards.push({ id: 'a2', kind: 'assistant', text: '当前目录是…', runId: 'run' });
@@ -713,7 +916,7 @@ test('answer completion and work summary belong to the whole run', t => {
   const streaming = [...fixture.document.querySelectorAll<HTMLElement>('#cards > article')];
   assert(streaming.every(node => !node.hidden));
   assert.equal(streaming.at(-1)?.querySelector('.markdown')?.textContent?.trim(), '当前目录是…');
-  assert.equal(fixture.document.querySelectorAll('.work-progress').length, 1);
+  assert.equal(fixture.document.querySelectorAll('.work-progress').length, 0);
   snapshot.cards[2].status = 'denied'; snapshot.cards[3].status = 'success';
   snapshot.cards[4].workMs = 186_000;
   const originalIds = snapshot.cards.map(card => card.id);
@@ -887,11 +1090,11 @@ test('connection popover replaces model refresh and remains usable while running
 test('worked summary, message hover actions and editing preserve chat behavior', () => {
   const fixture = page(); const snapshot = state();
   snapshot.cards = [{ id: 'u', kind: 'user', text: 'my question', createdAt: '2026-10-02T00:00:00Z' },
-    { id: 't', kind: 'tool', title: 'read_file', runId: 'run', text: '', status: 'success', output: 'result' },
+    { id: 't', kind: 'tool', title: 'shell', runId: 'run', text: '', status: 'success', output: 'result' },
     { id: 'a', kind: 'assistant', text: '**done**', runId: 'run', workMs: 261_000 }];
   fixture.render(snapshot);
   assert.equal(fixture.document.querySelector('.work-summary summary')?.textContent, 'Worked for 4m 21s');
-  assert.equal(fixture.document.querySelector('.work-activity .tool pre:last-child')?.textContent, 'result');
+  assert.equal(fixture.document.querySelector('.work-activity .tool-preview-row:last-child pre')?.textContent, 'result');
   assert((fixture.document.querySelector('#cards > .tool') as HTMLElement).hidden);
   const work = fixture.document.querySelector('.work-summary') as HTMLDetailsElement; work.open = true;
   snapshot.cards[2].text += '!'; fixture.render(snapshot);
@@ -1088,7 +1291,7 @@ test('webview sanitizes Markdown, HTML, links, and tool output', () => {
   const fixture = page(); const snapshot = state();
   snapshot.cards = [
     { id: 'answer', kind: 'assistant', text: '**你好**\n<script>window.hacked=true</script>\n[x](javascript:alert(1))\n<img src=x onerror=alert(1)>' },
-    { id: 'tool', kind: 'tool', text: '', title: 'read_file', status: 'success', output: '<img onerror=alert(1)>', params: {} }
+    { id: 'tool', kind: 'tool', text: '', title: 'shell', status: 'success', output: '<img onerror=alert(1)>', params: {} }
   ];
   fixture.render(snapshot);
   assert.equal(fixture.document.querySelector('.markdown strong')?.textContent, '你好');
@@ -1104,19 +1307,59 @@ test('webview sanitizes Markdown, HTML, links, and tool output', () => {
 
 // 功能：页面重建恢复卡片，更新保持折叠状态，并展开完整工具输出。
 // 设计：用同一快照驱动两份全新页面，模拟隐藏后重建，随后更新卡片验证 DOM 保留行为。
-test('snapshot recreation, tool expansion, and details state', () => {
+test('tool previews are visible and only overflow opens full editor content', () => {
   const snapshot = state();
-  snapshot.cards = [{ id: 'tool', kind: 'tool', title: 'read_file', text: '', output: 'x'.repeat(5000), status: 'success' }];
+  snapshot.cards = [{ id: 'tool', kind: 'tool', title: 'shell', params: { command: 'echo hello' }, text: '', output: 'x'.repeat(15000), status: 'success' }];
   for (let iteration = 0; iteration < 2; iteration++) {
     const fixture = page(); fixture.render(snapshot);
     assert.equal(fixture.messages[0].type, 'ready');
-    const details = fixture.document.querySelector('details')!; details.open = true;
+    assert.equal(fixture.document.querySelector('.tool details'), null);
+    assert.equal(fixture.document.querySelector('.tool-heading strong')!.textContent, 'Bash');
+    const input = fixture.document.querySelector('.tool-preview-row') as HTMLElement;
+    assert.equal(input.querySelector('pre')!.textContent, 'echo hello');
+    assert.equal(input.getAttribute('role'), null);
+    const before = fixture.messages.length; input.click(); assert.equal(fixture.messages.length, before);
     snapshot.cards[0].elapsedMs = iteration + 10; fixture.render(snapshot);
-    assert(fixture.document.querySelector('details')!.open);
-    (fixture.document.querySelector('.tool button') as HTMLButtonElement).click();
-    assert.equal(fixture.document.querySelector('.tool pre:last-of-type')!.textContent!.length, 5000);
+    const output = fixture.document.querySelectorAll('.tool-preview-row')[1] as HTMLElement;
+    assert.equal(output.getAttribute('role'), 'button');
+    output.click();
+    assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'openToolContent', cardId: 'tool', section: 'output' });
+    assert.equal(output.querySelector('pre')!.textContent!.length, 12000);
     fixture.dom.window.close();
   }
+});
+
+// 功能：命令横向溢出时允许查看，宽度足够后取消点击，写入文件直接展示路径和正文。
+// 设计：模拟浏览器布局尺寸并触发窗口变化，覆盖短但过宽的内容与键盘操作。
+test('tool preview adapts to actual viewport overflow and shows write content', t => {
+  const fixture = page(); t.after(() => fixture.dom.window.close());
+  const snapshot = state(); snapshot.cards = [
+    { id: 'shell', kind: 'tool', title: 'shell', text: '', params: { command: 'echo hello' } },
+    { id: 'write', kind: 'tool', title: 'write_file', text: '', params: { path: 'demo.py', content: 'print(1)\nprint(2)' }, output: 'written', status: 'success' },
+    { id: 'read', kind: 'tool', title: 'read_file', text: '', params: { path: 'demo.py' }, output: 'print(1)' },
+  ];
+  fixture.render(snapshot);
+  const row = fixture.document.querySelector('.tool-preview-row') as HTMLElement;
+  const pre = row.querySelector('pre')!;
+  Object.defineProperties(pre, { clientWidth: { value: 30, configurable: true }, scrollWidth: { value: 100 } });
+  fixture.dom.window.dispatchEvent(new fixture.dom.window.Event('resize'));
+  assert(row.classList.contains('overflowing'));
+  row.dispatchEvent(new fixture.dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  assert.deepEqual(parsePageMessage(fixture.messages.at(-1)), { type: 'openToolContent', cardId: 'shell', section: 'input' });
+  Object.defineProperty(pre, 'clientWidth', { value: 120 });
+  fixture.dom.window.dispatchEvent(new fixture.dom.window.Event('resize'));
+  assert(!row.classList.contains('overflowing')); assert.equal(row.getAttribute('role'), null);
+  const write = fixture.document.querySelectorAll('.tool')[1];
+  assert.equal(write.querySelector('.tool-subject')!.textContent, 'demo.py');
+  assert.equal(write.querySelector('.tool-line-count')!.textContent, '2 lines');
+  assert.equal(write.querySelector('pre')!.textContent, 'print(1)\nprint(2)');
+  assert.equal(write.querySelectorAll('.tool-preview-label').length, 0);
+  assert.equal(write.querySelectorAll('.tool-preview-row').length, 1);
+  const read = fixture.document.querySelectorAll('.tool')[2];
+  assert.equal(read.querySelector('strong')!.textContent, 'Read');
+  assert.equal(read.querySelector('.tool-subject')!.textContent, 'demo.py');
+  assert.equal(read.querySelector('.tool-preview'), null);
+  assert.equal(parsePageMessage({ type: 'openToolContent', cardId: 'x', section: 'invalid' }), undefined);
 });
 
 // 功能：Enter 发送、Shift+Enter 换行，运行与权限终态禁用相应按钮。

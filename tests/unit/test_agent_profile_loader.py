@@ -22,7 +22,7 @@ def test_project_markdown_overrides_builtin(tmp_path: Path) -> None:
         """---
 name: explore
 description: Project explorer
-tools: read_file, list_dir
+tools: read_file, glob
 disallowedTools: [shell]
 model: inherit
 maxTurns: 7
@@ -35,7 +35,7 @@ Inspect this project without editing it.
     agent = AgentRegistry(tmp_path).get("explore")
     assert agent is not None
     assert agent.source == "project"
-    assert agent.tools == ("read_file", "list_dir")
+    assert agent.tools == ("read_file", "glob")
     assert agent.disallowed_tools == ("shell",)
     assert agent.max_turns == 7
     assert agent.background is True

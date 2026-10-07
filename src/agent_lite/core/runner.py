@@ -36,7 +36,8 @@ from agent_lite.core.tools.base import BaseTool
 from agent_lite.core.tools.builtin import (
     CosilLocalizeTool,
     EditFileTool,
-    ListDirTool,
+    GlobTool,
+    GrepTool,
     ReadFileTool,
     ShellTool,
     UpdatePlanTool,
@@ -143,7 +144,7 @@ class AgentRunner:
 
         planning = session is not None and session.collaboration_mode == "plan"
         if planning:
-            safe = {"read_file", "list_dir", "web_search", "web_fetch", "request_user_input"}
+            safe = {"read_file", "glob", "grep", "web_search", "web_fetch", "request_user_input"}
             allowed = safe if allowed is None else allowed & safe
         registry = ToolRegistry()
         if (planning and self._input_manager is not None and bus is not None
@@ -157,7 +158,8 @@ class AgentRunner:
             ShellTool(workspace_root),
             WriteFileTool(workspace_root, files),
             EditFileTool(workspace_root, files),
-            ListDirTool(workspace_root),
+            GlobTool(workspace_root),
+            GrepTool(workspace_root),
         ]:
             if _ok(t.name):
                 registry.register(t)

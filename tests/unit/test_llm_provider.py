@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,6 +53,15 @@ class FakeStream:
 
     async def __aexit__(self, *args: object) -> None:
         pass
+
+    # 模拟 SDK 原始事件迭代器，而非只输出文本的 text_stream
+    def __aiter__(self):
+        # 逐个生成原始文本增量事件
+        async def events():
+            for text in self._texts:
+                yield SimpleNamespace(type="content_block_delta",
+                                      delta=SimpleNamespace(type="text_delta", text=text))
+        return events()
 
     @property
     def text_stream(self):  # type: ignore[return]
@@ -232,3 +242,70 @@ async def test_no_tokens_when_response_is_empty() -> None:
     tokens = [e for e in events if e.type == "llm.token"]  # type: ignore[attr-defined]
     assert tokens == []
     assert result.text == ""
+
+
+# 功能：完整保留 Claude 空推理签名、遮蔽密文与原始块顺序。
+# 设计：真实 SDK 内容块与混合工具响应验证加密字段不会丢失。
+async def test_encrypted_thinking_and_redacted_blocks_preserved():
+    from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, ToolUseBlock
+
+
+    content = [ThinkingBlock(type="thinking", thinking="", signature="signed"),
+               TextBlock(type="text", text="checking"),
+               RedactedThinkingBlock(type="redacted_thinking", data="encrypted"),
+               ToolUseBlock(type="tool_use", id="call", name="read", input={})]
+    provider, _ = _make_provider(texts=["checking"], content=content)
+    result, events = await _chat(provider)
+    expected = [b.model_dump(mode="json", exclude_none=True) for b in content]
+    assert result.content_blocks == expected
+    assert result.thinking_blocks == [expected[0], expected[2]]
+    assert [e.block for e in events if e.type == "llm.thinking"] == result.thinking_blocks
+
+
+# 功能：Claude 推理文本以独立事件流输出，不污染回答正文。
+# 设计：模拟原始推理和文本增量事件，验证两条流分别收集。
+async def test_anthropic_thinking_delta():
+    class ThinkingStream(FakeStream):
+        # 生成交错的推理与回答事件
+        def __aiter__(self):
+            # 模拟 SDK 的两类内容块增量
+            async def events():
+                yield SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(
+                    type="thinking_delta", thinking="analysis"))
+                yield SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(
+                    type="text_delta", text="answer"))
+            return events()
+    client = MagicMock()
+    client.messages.stream.return_value = ThinkingStream([], _make_final())
+    result, events = await _chat(AnthropicProvider("test", client=client))
+    assert result.text == "answer"
+    assert [e.token for e in events if e.type == "llm.thinking"] == ["analysis"]
+
+
+# 功能：Claude 推理阶段断流后发布重置事件，成功尝试的签名独立保存。
+# 设计：两次尝试都没有正文，用真实推理块覆盖旧 text_stream 重试路径的盲区。
+async def test_anthropic_thinking_retry(monkeypatch):
+    import httpx
+    from anthropic.types import ThinkingBlock
+
+    monkeypatch.setattr("agent_lite.core.llm.provider._RETRY_BACKOFF_S", (0, 0, 0))
+
+    class RetryStream(FakeStream):
+        # 按尝试生成推理增量，第一轮以网络错误结束
+        def __aiter__(self):
+            # 使用签名区分失败和成功尝试
+            async def events():
+                yield SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(
+                    type="thinking_delta", thinking=self._texts[0]))
+                if self._texts[0] == "old":
+                    raise httpx.ReadError("disconnected")
+            return events()
+
+    final = _make_final(content=[ThinkingBlock(
+        type="thinking", thinking="new", signature="new-signature")])
+    client = MagicMock()
+    client.messages.stream.side_effect = [RetryStream(["old"], final), RetryStream(["new"], final)]
+    result, events = await _chat(AnthropicProvider("test", client=client))
+    assert result.thinking_blocks[0]["signature"] == "new-signature"
+    assert [(e.token, e.reset) for e in events if e.type == "llm.thinking" and e.block is None] == [
+        ("old", False), ("", True), ("new", False)]

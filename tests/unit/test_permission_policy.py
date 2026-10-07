@@ -153,11 +153,11 @@ def test_shell_default_is_ask() -> None:
     assert result == PermissionDecision.ASK
 
 
-# 功能：验证 read_file / list_dir 默认策略是 ALLOW
+# 功能：验证 read_file / glob 默认策略是 ALLOW
 # 设计：只读或安全工具默认不打扰用户，降低权限疲劳
 def test_safe_tools_default_allow() -> None:
     assert evaluate("read_file", {"path": "README.md"}) == PermissionDecision.ALLOW
-    assert evaluate("list_dir", {"path": "."}) == PermissionDecision.ALLOW
+    assert evaluate("glob", {"path": "."}) == PermissionDecision.ALLOW
 
 
 # 功能：验证 write_file 默认策略是 ASK

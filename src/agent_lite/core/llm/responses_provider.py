@@ -7,7 +7,12 @@ from typing import Any, cast
 import httpx
 import openai
 
-from agent_lite.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
+from agent_lite.core.bus.events import (
+    LlmModelSelectedEvent,
+    LlmThinkingEvent,
+    LlmTokenEvent,
+    LlmUsageEvent,
+)
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.openai_provider import (
     _MAX_STREAM_RETRIES,
@@ -20,13 +25,28 @@ from agent_lite.core.llm.openai_provider import (
     _parse_tool_input,
     log,
 )
+from agent_lite.core.llm.thinking import block_dict
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 
 
+# 转换历史消息并按轮次保留 Responses 原生推理项
 def _convert_input(messages: list[dict[str, object]]) -> list[dict[str, Any]]:
     """Convert expanded history to Responses items, retaining function call IDs."""
     items: list[dict[str, Any]] = []
-    for message in _convert_messages(messages, None)[1:]:
+    for original in messages:
+        original_content = original.get("content", [])
+        if original.get("role") == "assistant" and isinstance(original_content, list):
+            for block in original_content:
+                if isinstance(block, dict) and block.get("type") == "responses_reasoning":
+                    items.append(cast(dict[str, Any], block["item"]))
+        items.extend(_convert_input_message(original))
+    return items
+
+
+# 转换单条消息的文本和工具调用，推理项由外层按轮次插入
+def _convert_input_message(original: dict[str, object]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in _convert_messages([original], None)[1:]:
         role = message["role"]
         if role == "tool":
             items.append({"type": "function_call_output",
@@ -65,6 +85,7 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
             "model": self._model, "input": _convert_input(messages),
             "instructions": system or _SYSTEM_PROMPT, "stream": True, "store": False,
             "max_output_tokens": 8192,
+            "include": ["reasoning.encrypted_content"],
         }
         tools = _convert_tools(tool_schemas)
         if self._reasoning_effort:
@@ -77,11 +98,16 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
             ]
 
         published_text = False
+        published_thinking = False
         for attempt in range(1, _MAX_STREAM_RETRIES + 1):
             text_parts: list[str] = []
             calls: dict[int, dict[str, str]] = {}
             response: Any = None
             stream: Any = None
+            reasoning_items: dict[int, dict[str, Any]] = {}
+            if published_thinking:
+                await bus.publish(LlmThinkingEvent(run_id=run_id, reset=True, ts=_now()))
+                published_thinking = False
             if published_text:
                 await bus.publish(LlmTokenEvent(run_id=run_id, token="", reset=True, ts=_now()))
                 published_text = False
@@ -95,8 +121,17 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
                             LlmTokenEvent(run_id=run_id, token=event.delta, ts=_now())
                         )
                         published_text = True
+                    elif kind in {
+                        "response.reasoning_summary_text.delta", "response.reasoning_text.delta",
+                    }:
+                        await bus.publish(
+                            LlmThinkingEvent(run_id=run_id, token=event.delta, ts=_now())
+                        )
+                        published_thinking = True
                     elif kind in {"response.output_item.added", "response.output_item.done"}:
                         item = event.item
+                        if item.type == "reasoning":
+                            reasoning_items[event.output_index] = block_dict(item)
                         if item.type == "function_call":
                             part = calls.setdefault(event.output_index, {})
                             part.update(id=item.call_id, name=item.name)
@@ -117,6 +152,8 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
                     raise RuntimeError("Responses API returned an unsuccessful status")
                 # Terminal output is authoritative, including calls without delta events.
                 for index, item in enumerate(response.output):
+                    if item.type == "reasoning":
+                        reasoning_items[index] = block_dict(item)
                     if item.type == "function_call":
                         calls[index] = {"id": item.call_id, "name": item.name,
                                         "arguments": item.arguments}
@@ -146,6 +183,9 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
                 context_pct=(input_tokens + output_tokens) / self._context_window,
                 context_window=self._context_window,
                 context_window_estimated=self._context_window_estimated,
+                reasoning_output_tokens=getattr(
+                    getattr(raw, "output_tokens_details", None), "reasoning_tokens", None,
+                ),
             )
             await bus.publish(LlmUsageEvent(run_id=run_id, ts=_now(), **asdict(usage)))
         stop_reason = "tool_use" if tool_calls else "end_turn"
@@ -154,5 +194,12 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
             if reason != "max_output_tokens":
                 raise RuntimeError(f"Responses API returned an incomplete response: {reason}")
             stop_reason = "max_tokens"
+        thinking_blocks: list[dict[str, object]] = [
+            {"type": "responses_reasoning", "item": item}
+            for _, item in sorted(reasoning_items.items())
+        ]
+        for block in thinking_blocks:
+            await bus.publish(LlmThinkingEvent(run_id=run_id, block=block, ts=_now()))
         return LlmResponse(stop_reason=stop_reason, tool_calls=tool_calls,
-                           text="".join(text_parts), usage=usage)
+                           text="".join(text_parts), usage=usage,
+                           thinking_blocks=thinking_blocks)

@@ -120,7 +120,9 @@ class AgentLoop:
                 blocks.append(
                     {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}
                 )
-            context.add_assistant_message(blocks)
+            context.add_assistant_message(
+                response.content_blocks if response.content_blocks is not None else blocks
+            )
 
             # [act] execute each requested tool; errors become tool results so loop continues
             if response.stop_reason == "tool_use":

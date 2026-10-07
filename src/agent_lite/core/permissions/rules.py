@@ -11,7 +11,7 @@ from agent_lite.core.tools.working_directory import resolve_tool_path
 QUERY_TOOLS = frozenset(
     {
         "read_file",
-        "list_dir",
+        "glob", "grep",
         "web_search",
         "web_fetch",
         "update_plan",

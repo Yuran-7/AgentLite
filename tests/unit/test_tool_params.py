@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from agent_lite.core.tools.builtin.bash import BashParams
-from agent_lite.core.tools.builtin.list_dir import ListDirParams
+from agent_lite.core.tools.builtin.glob import GlobParams
 from agent_lite.core.tools.builtin.read_file import ReadFileParams
 from agent_lite.core.tools.builtin.write_file import WriteFileParams
 
@@ -76,16 +76,16 @@ def test_write_file_params_valid() -> None:
     assert p.content == "hello"
 
 
-# 功能：验证 ListDirParams 全部使用默认值时合法
-# 设计：空字典触发两个字段的默认值路径，断言 path="." max_depth=2
-def test_list_dir_params_defaults() -> None:
-    p = ListDirParams.model_validate({})
+# 功能：验证 GlobParams 在提供模式后使用正确默认值。
+# 设计：仅提供必填模式，断言路径和分页数量的默认值。
+def test_glob_params_defaults() -> None:
+    p = GlobParams.model_validate({"pattern": "*.py"})
     assert p.path == "."
-    assert p.max_depth == 2
+    assert p.head_limit == 100
 
 
-# 功能：验证 ListDirParams max_depth 超过上限时抛 ValidationError
-# 设计：传 le=4 边界外的值 5，确保不需要工具内手动 min()
-def test_list_dir_params_max_depth_exceeded() -> None:
+# 功能：验证 GlobParams 的 head_limit 超过上限时抛出 ValidationError。
+# 设计：传入上限 1000 外的值 1001，验证 schema 边界约束。
+def test_glob_params_limit_exceeded() -> None:
     with pytest.raises(ValidationError):
-        ListDirParams.model_validate({"max_depth": 5})
+        GlobParams.model_validate({"pattern": "*", "head_limit": 1001})

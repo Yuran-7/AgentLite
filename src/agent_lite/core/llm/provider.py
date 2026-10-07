@@ -10,9 +10,15 @@ from typing import Any
 import anthropic
 import httpx
 
-from agent_lite.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
+from agent_lite.core.bus.events import (
+    LlmModelSelectedEvent,
+    LlmThinkingEvent,
+    LlmTokenEvent,
+    LlmUsageEvent,
+)
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.assets import expand_assets
+from agent_lite.core.llm.thinking import block_dict
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
 
 _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
@@ -118,16 +124,33 @@ class AnthropicProvider:
 
         text_parts: list[str] = []
         final_message: Any = None
+        published_text = False
+        published_thinking = False
 
         for attempt in range(1, _MAX_STREAM_RETRIES + 1):
             text_parts = []
+            if published_text:
+                await bus.publish(LlmTokenEvent(run_id=run_id, token="", reset=True, ts=_now()))
+                published_text = False
+            if published_thinking:
+                await bus.publish(LlmThinkingEvent(run_id=run_id, reset=True, ts=_now()))
+                published_thinking = False
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
-                    async for text in stream.text_stream:
-                        # Only publish token events on the first attempt to avoid TUI duplicates
-                        if attempt == 1:
+                    async for event in stream:
+                        if event.type != "content_block_delta":
+                            continue
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            text = delta.text
                             await bus.publish(LlmTokenEvent(run_id=run_id, token=text, ts=_now()))
-                        text_parts.append(text)
+                            published_text = True
+                            text_parts.append(text)
+                        elif delta.type == "thinking_delta":
+                            await bus.publish(
+                                LlmThinkingEvent(run_id=run_id, token=delta.thinking, ts=_now())
+                            )
+                            published_thinking = True
                     final_message = await stream.get_final_message()
                 break  # success
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as exc:
@@ -168,21 +191,26 @@ class AnthropicProvider:
 
         tool_calls: list[ToolCallBlock] = []
         thinking_blocks: list[dict[str, object]] = []
+        content_blocks: list[dict[str, object]] = []
         for block in final_message.content:
+            serialized = block_dict(block)
+            content_blocks.append(serialized)
             if block.type == "tool_use":
                 tool_calls.append(
                     ToolCallBlock(id=block.id, name=block.name, input=dict(block.input))
                 )
-            elif block.type == "thinking":
+            elif block.type in {"thinking", "redacted_thinking"}:
                 # thinking blocks must be passed back verbatim in subsequent requests
-                thinking_blocks.append({
-                    "type": "thinking", "thinking": block.thinking, "signature": block.signature,
-                })
+                thinking_blocks.append(serialized)
+                await bus.publish(
+                    LlmThinkingEvent(run_id=run_id, block=serialized, ts=_now())
+                )
 
         return LlmResponse(
             stop_reason=final_message.stop_reason or "end_turn",
             tool_calls=tool_calls,
             text="".join(text_parts),
             thinking_blocks=thinking_blocks,
+            content_blocks=content_blocks or None,
             usage=stats,
         )

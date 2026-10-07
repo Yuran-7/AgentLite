@@ -11,7 +11,12 @@ from typing import Any
 import httpx
 import openai
 
-from agent_lite.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
+from agent_lite.core.bus.events import (
+    LlmModelSelectedEvent,
+    LlmThinkingEvent,
+    LlmTokenEvent,
+    LlmUsageEvent,
+)
 from agent_lite.core.events.bus import EventBus
 from agent_lite.core.llm.assets import expand_assets
 from agent_lite.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
@@ -68,6 +73,7 @@ def _convert_messages(
 
         if role == "assistant":
             text_parts: list[str] = []
+            reasoning_parts: dict[str, list[str]] = {}
             tool_calls: list[dict[str, object]] = []
             for raw_block in content:
                 if not isinstance(raw_block, dict):
@@ -76,6 +82,10 @@ def _convert_messages(
                 block_type = block.get("type")
                 if block_type == "text":
                     text_parts.append(str(block.get("text", "")))
+                elif block_type == "reasoning_content":
+                    field = str(block.get("field", "reasoning_content"))
+                    if field in {"reasoning_content", "reasoning", "thinking"}:
+                        reasoning_parts.setdefault(field, []).append(str(block.get("text", "")))
                 elif block_type == "tool_use":
                     tool_calls.append(
                         {
@@ -95,6 +105,8 @@ def _convert_messages(
             }
             if tool_calls:
                 assistant["tool_calls"] = tool_calls
+            for field, reasoning_segments in reasoning_parts.items():
+                assistant[field] = "".join(reasoning_segments)
             converted.append(assistant)
             continue
 
@@ -230,12 +242,20 @@ class OpenAICompatibleProvider:
         finish_reason: str | None = None
         usage_obj: Any = None
         published_text = False
+        published_thinking = False
+        reasoning_parts: dict[str, list[str]] = {}
 
         for attempt in range(1, _MAX_STREAM_RETRIES + 1):
             text_parts = []
             tool_parts = {}
             finish_reason = None
             usage_obj = None
+            reasoning_parts = {}
+            if attempt > 1 and published_thinking:
+                await bus.publish(
+                    LlmThinkingEvent(run_id=run_id, reset=True, ts=_now())
+                )
+                published_thinking = False
             if attempt > 1 and published_text:
                 await bus.publish(
                     LlmTokenEvent(run_id=run_id, token="", reset=True, ts=_now())
@@ -253,6 +273,14 @@ class OpenAICompatibleProvider:
                     if getattr(choice, "finish_reason", None):
                         finish_reason = choice.finish_reason
                     delta = choice.delta
+                    for field in ("reasoning_content", "reasoning", "thinking"):
+                        reasoning = getattr(delta, field, None)
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_parts.setdefault(field, []).append(reasoning)
+                            await bus.publish(
+                                LlmThinkingEvent(run_id=run_id, token=reasoning, ts=_now())
+                            )
+                            published_thinking = True
                     text = getattr(delta, "content", None)
                     if text:
                         await bus.publish(
@@ -316,6 +344,8 @@ class OpenAICompatibleProvider:
             input_tokens = int(getattr(usage_obj, "prompt_tokens", 0) or 0)
             output_tokens = int(getattr(usage_obj, "completion_tokens", 0) or 0)
             prompt_details = getattr(usage_obj, "prompt_tokens_details", None)
+            completion_details = getattr(usage_obj, "completion_tokens_details", None)
+            reasoning_tokens = getattr(completion_details, "reasoning_tokens", None)
             cache_read = int(getattr(prompt_details, "cached_tokens", 0) or 0)
             usage = UsageStats(
                 input_tokens=input_tokens,
@@ -326,6 +356,7 @@ class OpenAICompatibleProvider:
                 context_tokens=input_tokens + output_tokens,
                 context_window=self._context_window,
                 context_window_estimated=self._context_window_estimated,
+                reasoning_output_tokens=reasoning_tokens,
             )
             await bus.publish(LlmUsageEvent(run_id=run_id, ts=_now(), **asdict(usage)))
 
@@ -333,9 +364,17 @@ class OpenAICompatibleProvider:
         if finish_reason == "length":
             stop_reason = "max_tokens"
 
+        thinking_blocks: list[dict[str, object]] = [
+            {"type": "reasoning_content", "field": field, "text": "".join(parts)}
+            for field, parts in reasoning_parts.items()
+        ]
+        for block in thinking_blocks:
+            await bus.publish(LlmThinkingEvent(run_id=run_id, block=block, ts=_now()))
+
         return LlmResponse(
             stop_reason=stop_reason,
             tool_calls=tool_calls,
             text="".join(text_parts),
             usage=usage,
+            thinking_blocks=thinking_blocks,
         )

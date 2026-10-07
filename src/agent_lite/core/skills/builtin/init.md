@@ -3,14 +3,15 @@ name: init
 description: 分析当前项目，生成 AGENT.md 项目指导文件
 allowed_tools:
   - read_file
-  - list_dir
+  - glob
+  - grep
   - write_file
   - shell
 ---
 你是一位项目分析专家。请分析当前项目目录，生成一份 `AGENT.md` 项目指导文件。该文件会在后续 Agent run 中自动加入 system prompt，请只写入稳定、可复用的项目背景与开发约定，不要写入临时任务状态、个人隐私或密钥。
 
 分析步骤：
-1. 用 list_dir 探索项目目录和主要子目录
+1. 用 glob 查找项目文件，用 grep 搜索关键内容
 2. 读取 README、package.json、pyproject.toml、Cargo.toml 等配置文件（如存在）
 3. 了解项目的语言、框架、主要模块和目录结构
 

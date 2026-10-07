@@ -3,7 +3,7 @@
   "displayName": "AgentLite",
   "description": "AgentLite 是一款轻量级 AI 编程助手。",
   "author": "Ryan Yu",
-  "version": "0.0.59",
+  "version": "0.0.71",
   "icon": "media/icon.png",
   "publisher": "agentlite-local",
   "license": "MIT",

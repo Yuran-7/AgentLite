@@ -33,6 +33,21 @@ if (process.argv.includes('--greeting')) {
   state.usage = '';
 }
 if (process.argv.includes('--empty')) { state.cards = []; state.usage = ''; state.title = '新会话'; }
+if (process.argv.includes('--subagents')) {
+  state.busy = true; state.runId = 'parent'; state.title = '子 Agent 执行与回传';
+  state.cards = [
+    { id: 'user', kind: 'user', text: '并行调研源码和测试，然后汇总改进建议。' },
+    { id: 'thinking', kind: 'thinking', runId: 'parent', text: '将两个独立任务委派给子 Agent。' },
+    { id: 'a', kind: 'subagent', runId: 'a', parentRunId: 'parent', agentType: 'Explore', text: '调研源码设计', status: 'success', params: { prompt: '调研 src/agent_lite 的 Agent Loop 和事件流。\n\n1. 检查主循环的继续与停止条件。\n2. 分析子任务如何返回结果。\n3. 给出改进建议。' } },
+    { id: 'b', kind: 'subagent', runId: 'b', parentRunId: 'parent', agentType: 'Explore', text: '检查测试覆盖', status: 'running', params: { prompt: '检查 tests 目录下的单元与集成测试，找出子 Agent 生命周期的覆盖缺口。' } },
+    { id: 'read-a', kind: 'tool', runId: 'a', title: 'read_file', text: '', params: { path: 'src/agent_lite/core/loop.py' }, status: 'success' },
+    { id: 'answer-a', kind: 'assistant', runId: 'a', text: '源码调研已完成。事件流可以区分父子运行，后台任务拥有独立生命周期。', completed: true },
+    { id: 'read-b', kind: 'tool', runId: 'b', title: 'grep', text: '', params: { pattern: 'subagent', path: 'tests' }, status: 'running' },
+    { id: 'comment', kind: 'assistant', runId: 'parent', text: '已启动两个调研 Agent，等待结果回传。' },
+    { id: 'report', kind: 'subagent_result', runId: 'parent', childRunId: 'a', title: '调研源码设计', agentType: 'Explore', text: '源码调研已完成。事件流可以区分父子运行，后台任务拥有独立生命周期。', status: 'success', elapsedMs: 42000 },
+    { id: 'resume', kind: 'assistant', runId: 'parent', text: '源码侧调研完成，正在等待测试侧的结果。' },
+  ];
+}
 if (process.argv.includes('--file-changes')) {
   state.workspace = 'C:\\Users\\HuanZhu\\Desktop\\AgentLite';
   state.cards = [

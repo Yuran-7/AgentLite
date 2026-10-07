@@ -75,7 +75,8 @@ def _param_summary(tool_name: str, params: dict[str, Any], max_len: int = 72) ->
         "read_file": ("path",),
         "write_file": ("path",),
         "edit_file": ("path",),
-        "list_dir": ("path", "max_depth"),
+        "glob": ("pattern", "path"),
+        "grep": ("pattern", "path", "glob", "output_mode"),
         "bash": ("command",),  # legacy sessions
         "shell": ("command",),
     }
@@ -2047,6 +2048,9 @@ class AgentLiteTuiApp(App[None]):
     # 实际的事件路由逻辑
     def _handle_event_inner(self, event: dict[str, Any]) -> None:
         t = event.get("type", "")
+
+        if t == "llm.thinking":
+            return  # 推理单独持久化，避免将回答流切成多个正文块
 
         if t == "llm.token":
             run_id = str(event.get("run_id") or "")

@@ -15,7 +15,7 @@ from agent_lite.core.tools.base import BaseTool, ToolResult
 PLAN_PROMPT = """You are in Plan Mode until the collaboration mode explicitly changes.
 Work in three phases: explore the repository first, clarify intent and tradeoffs,
 then produce a decision-complete implementation plan. Do not implement changes.
-Use read_file, list_dir and web tools to discover facts before asking the user.
+Use read_file, glob, grep and web tools to discover facts before asking the user.
 Use request_user_input for important preferences that cannot be discovered.
 Ask exactly ONE question per request_user_input call, with two or three choices.
 Wait for the answer, then reconsider the plan using that answer before deciding

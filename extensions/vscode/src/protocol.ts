@@ -17,6 +17,7 @@ export type PageMessage =
   | { type: 'setMemory'; setting: 'generate' | 'use'; enabled: boolean }
   | { type: 'copyAnswer' | 'openAnswer' | 'copyMessage' | 'downloadPlan'; cardId: string }
   | { type: 'copyCode' | 'openCode'; cardId: string; blockIndex: number }
+  | { type: 'openToolContent'; cardId: string; section: 'input' | 'output' }
   | { type: 'toggleBookmark'; cardId: string }
   | { type: 'viewFileChanges'; cardId: string; path?: string }
   | { type: 'undoFileChanges'; cardId: string }
@@ -30,6 +31,9 @@ export type PageMessage =
 export function parsePageMessage(value: unknown): PageMessage | undefined {
   if (!value || typeof value !== 'object') return;
   const message = value as Record<string, unknown>;
+  if (message.type === 'openToolContent' && typeof message.cardId === 'string' &&
+      message.cardId.length > 0 && message.cardId.length < 200 && ['input', 'output'].includes(String(message.section)))
+    return { type: 'openToolContent', cardId: message.cardId, section: message.section as 'input' | 'output' };
   if (message.type === 'permissionMode' && ['manual', 'accept_edits', 'auto'].includes(String(message.mode)))
     return { type: 'permissionMode', mode: message.mode as PermissionMode };
   if (message.type === 'collaboration' && ['default', 'plan'].includes(String(message.mode)))

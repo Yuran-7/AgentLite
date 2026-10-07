@@ -38,7 +38,7 @@ def _tool(
         parent_run_id="parent", permission_manager=None, max_steps=5,
         task_manager=manager, session_id="session", workspace_root=tmp_path,
         subagent_allowed_tools=[
-            "read_file", "list_dir", "write_file", "shell", "spawn_agent"
+            "read_file", "glob", "write_file", "shell", "spawn_agent"
         ],
         depth=depth, agent_registry=AgentRegistry(tmp_path),
         provider_factory=provider_factory,
